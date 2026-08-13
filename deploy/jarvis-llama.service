@@ -1,0 +1,13 @@
+[Unit]
+Description=JARVIS local CPU-only Qwen3 model server
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/home/mehmet/jarvis/third_party/llama.cpp/build-cpu/bin/llama-server -m /home/mehmet/jarvis/models/Qwen3-8B-Q4_K_M.gguf -ngl 0 -t 8 -c 2048 -np 1 --host 127.0.0.1 --port 8088 --reasoning off --reasoning-budget 0 --no-webui
+Restart=on-failure
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=default.target
