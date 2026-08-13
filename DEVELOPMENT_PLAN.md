@@ -78,6 +78,25 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 
 Programın bitiş tanımı: F2–F9'un zorunlu maddeleri, güvenlik/kalite kapıları ve kullanıcı kabul senaryoları tamamlanmış olacak. F10 araştırma/deney alanı ise ürünün zorunlu teslim kriteri değildir; yalnız stabil sürümden sonra kontrollü deneyler içindir.
 
+### Genel ilerleme tahmini
+
+Bu oran kod satırından değil; kullanıcı değeri, güvenlik riski, doğrulama maliyeti ve kalan belirsizlik üzerinden yaklaşık hesaplanır. Bir fazın kutuları tamamlanmadan faz ağırlığı “tamamlandı” sayılmaz.
+
+| Faz | Nihai ürün içindeki yaklaşık ağırlık | Bugünkü durum |
+| --- | ---: | --- |
+| F0 — güvenli core | %6 | Tamamlandı |
+| F1 — Desktop MVP | %4 | Tamamlandı |
+| F2 — günlük desktop/multimodal ürün | %15 | Başlamadı |
+| F3 — profil, bellek, RAG | %18 | Başlamadı |
+| F4 — güvenli workbench | %18 | Başlamadı |
+| F5 — ses | %8 | Başlamadı |
+| F6 — kalite ve adaptasyon | %10 | Başlamadı |
+| F7 — yetkili security | %10 | Başlamadı |
+| F8 — ekosistem/remote | %6 | Başlamadı |
+| F9 — release/operasyon | %5 | Başlamadı |
+
+Yaklaşık genel tamamlanma: **%10**. Bu, MVP'nin küçük olduğu anlamına gelmez: MVP kendi hedefinin tamamıdır; ancak kişisel, multimodal, güvenli araç kullanan ve uzun süre bakım görecek nihai ürünün ilk sağlam katmanıdır.
+
 ### Mevcut mimari backlog eşlemesi
 
 Bu dosyanın aşağısındaki ayrıntılı mimari bölümleri korunur; aşağıdaki tablo her açık maddenin hangi ürün fazında kapanacağını gösterir.
@@ -98,9 +117,16 @@ Bu dosyanın aşağısındaki ayrıntılı mimari bölümleri korunur; aşağıd
 
 Durum: TAMAMLANDI
 
-- [x] v2.3 frozen architecture, typed request/task/tool/verifier contracts ve Policy Gate.
-- [x] SQLite persistence, approval/recovery, audit hash-chain ve ilk observability.
-- [x] Local CPU model adapterı, registry, zero-trust workspace temel katmanı ve MCP stdio başlangıcı.
+- [x] Mimari referans: v2.3 frozen architecture, ADR kararları ve implementation baseline.
+- [x] Typed contracts: `Request`, `Task`, `ToolResult`, `VerifierResult`, `PolicyResult`, `CapabilityManifest` ve `ConversationMessage`.
+- [x] Governed pipeline: intent → policy → task → tool → verifier → audit sırası; registry dışı capability reddi.
+- [x] Policy/approval temel akışı: risk sınıfları, task-bound approval, expiry/scope hash ve cancel/resume.
+- [x] Kalıcı local store: SQLite migration, task/approval/audit tabloları, startup recovery ve snapshot API.
+- [x] Audit integrity: sequence, SHA-256 hash-chain, tampering detection ve correlation-scoped structured event.
+- [x] Model güvenlik sınırı: provider adapterı tool/policy authority kazanmaz; native user/assistant context data olarak tutulur.
+- [x] Zero-trust content başlangıcı: workspace path containment, provenance ve prompt-injection isolation.
+- [x] İlk typed MCP ingress ve policy-bypass testleri.
+- [x] Core quality gate: format, strict Clippy, optimize release build ve unit/contract testleri.
 
 Çıkış kanıtı: F1'in güvenle üzerine inşa edildiği MVP core ve regression seti.
 
@@ -108,9 +134,15 @@ Durum: TAMAMLANDI
 
 Durum: TAMAMLANDI
 
-- [x] Kalıcı CPU-only model, terminal sohbet ekranı, scroll/input/paste davranışı ve masaüstü bildirimleri.
-- [x] Read-only workspace/coding/docs capability'leri ve approval-gated not oluşturma.
-- [x] İlk security scope contractı, teacher intake contractı, MCP transportu ve 51 testlik regression suite.
+- [x] Kalıcı CPU-only `llama-server`: loopback-only servis, `-ngl 0`, RAM lifecycle ve `/health` kontrolü.
+- [x] Terminal sohbeti: salt-okunur geçmiş, dinamik taslak alanı, loading state, scrollbar ve uzun tur görünürlüğü.
+- [x] Girdi ergonomisi: native paste, `Ctrl+V`, kelime silme, draft temizleme, klavye/mouse ile history navigation.
+- [x] Yanıt davranışı: bounded chat history, `finish_reason=length` continuation ve Hyprland yanıt bildirimi.
+- [x] Local model runtime: Qwen3-8B-Q4_K_M ile CPU sohbeti, model açık/kapalı kullanıcı semantiği ve VRAM=0.
+- [x] Güvenli ilk capability'ler: system health/time, workspace read, project/coding/docs summary ve approval-gated note.
+- [x] MCP stdio transportu: initialize, tool list, typed call ve bilinmeyen tool deny.
+- [x] İlk security scope contractı ve teacher-example intake contractı.
+- [x] MVP regression gate: 51 test, Clippy, release build, service health ve interaktif smoke.
 
 Çıkış kanıtı: `jarvis` günlük metin sohbeti ve ilk governed capability'leri local-first olarak çalıştırır.
 
@@ -126,10 +158,16 @@ Durum: BEKLENİYOR
 
 Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını görünür ve tekrar üretilebilir hale getirmek.
 
-- [ ] Gerçek terminal etkileşim matrisi: paste, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, mouse wheel, uzun taslak, uzun geçmiş, bildirim, `/quit` ve `exit` için otomasyon + interaktif smoke.
-- [ ] Sohbet kalite değerlendirme seti: Türkçe selamlaşma, kısa takip sorusu, uzun bağlam, konu değiştirme, “bilmiyorum” ve tool-iddiası senaryolarından oluşan sürümlü küçük benchmark.
-- [ ] TUI hata/backlog kaydı: kullanıcı raporlarını test senaryosuna ve çözüm kanıtına bağlayan hata şablonu.
-- [ ] Release komutu: format, test, clippy, release build, servis health ve kritik E2E smoke'u tek raporda toplar.
+- [ ] Girdi otomasyonu: paste, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, `Esc`, UTF-8/Türkçe ve çok satırlı metin senaryoları.
+- [ ] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
+- [ ] Yaşam döngüsü otomasyonu: ilk açılış, servis yükleme, `/quit`, `Ctrl+C`, terminal kapanması, `exit`, yeniden açılış ve DB recovery.
+- [ ] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
+- [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
+- [ ] Sürümlü sohbet kalite seti: Türkçe selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
+- [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
+- [ ] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
+- [ ] Tek release komutu: format, test, clippy, dependency check, release build, servis health, kritik E2E smoke ve özet rapor.
+- [ ] F2.0 exit review: açık P0/P1 kullanım hatası kalmadığının manuel kabulü.
 
 Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 senaryoda tekrar üretilebilir; yeni dilimler bu regression setini geçmeden birleşmez.
 
@@ -139,12 +177,22 @@ Durum: BEKLENİYOR — İlk ürün önceliği
 
 Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
 
-- [ ] Rust-native UI spike: `egui/eframe` ile ayrı pencere, sohbet listesi, salt-okunur mesaj kartları, resize ve bildirim odak davranışı için küçük prototip.
+- [ ] UI teknoloji spike: `egui/eframe` penceresi; açılış süresi, bellek kullanımı, Wayland/Hyprland uyumu ve paketleme riski ölçülür.
+- [ ] UI/core sınırı: native UI yalnız client olur; `jarvis-core` Request/Policy/Task/Verifier zincirini doğrudan kullanır, ikinci runtime yaratmaz.
+- [ ] Sohbet ekranı: message card, streaming/typing state, ayrı draft composer, scroll-to-latest, arama/filtre hazırlığı ve erişilebilir klavye odağı.
+- [ ] Pencere yaşam döngüsü: resize, minimize, tekrar odak, tek-instance davranışı, servis durumu, bildirim tıklamasında pencereyi öne alma.
+- [ ] Görsel tasarım sistemi: renk/typography/spacing tokenları, açık-koyu tema, kontrast kontrolü ve Türkçe metin taşma davranışı.
+- [ ] Yerel ayarlar: UI tercihleri, tema, font scale ve notification seçeneği için versioned config; reset/export akışı.
 - [ ] Attachment contract: `AttachmentRef` (ID, canonical local path, MIME, byte size, SHA-256, oluşturulma zamanı, provenance, sensitivity) ve task/audit ilişkisi.
-- [ ] Güvenli yerel dosya seçimi: `Ctrl+O`/ataç düğmesi; yalnız allowlist MIME, canonical path, boyut/piksel limiti, hash ve kullanıcı görünür önizlemesi. Dosya yolu veya EXIF içeriği model talimatı olmaz.
-- [ ] Vision adapter: mevcut metin modelinden ayrı, CPU uyumlu multimodal GGUF + eşleşen `mmproj` ile loopback-only local endpoint. **Bu noktada model indirmeden önce seçenekler, disk/RAM maliyeti ve lisans kullanıcıya sunulacak.**
-- [ ] Görsel cevap policy: model yalnız görüntü açıklaması/analizi üretir; görselden gelen hiçbir metin tool yetkisi kazanmaz. Hassas veya desteklenmeyen görsel için açık hata ve yerel silme kontrolü sağlanır.
-- [ ] E2E: JPEG/PNG başarı, bozuk dosya/MIME reddi, boyut limiti, provenance, model kapalıyken hata, görsel prompt-injection izolasyonu ve TUI fallback testleri.
+- [ ] Attachment storage policy: orijinal dosya yerinde referans mı yoksa uygulama kasasında kopya mı; retention, local delete ve stale-reference davranışı için ADR.
+- [ ] Güvenli dosya seçimi: `Ctrl+O`/ataç düğmesi, kullanıcı görünür dosya adı/önizleme ve gönderimden önce kaldırma.
+- [ ] Dosya doğrulama: MIME magic-byte kontrolü, canonical path, allowlist, boyut/piksel limitleri, decode bomb/bozuk dosya reddi ve SHA-256.
+- [ ] Metin/doküman ekleri: ilk aşamada yalnız güvenli metadata + ayrı RAG ingestion kuyruğu; ekin ham içeriği tool talimatı sayılmaz.
+- [ ] Vision model kararı: CPU uyumlu multimodal GGUF + eşleşen `mmproj` adayları, lisans, disk/RAM/latency karşılaştırması. **İndirme ancak kullanıcı onayından sonra.**
+- [ ] Vision service: text modelinden ayrı loopback-only endpoint, health/lifecycle, attachment byte/path passing ve timeout/cancel sınırı.
+- [ ] Vision response policy: yalnız görüntü açıklaması/analizi; görüntü OCR metni untrusted data, tool authority yok; desteklenmeyen/hassas içerik için açık hata.
+- [ ] Attachment privacy UX: ek geçmişini görme, tekli/tüm ekleri silme, ek gönderilmeden önce local-only uyarısı ve export.
+- [ ] E2E: JPEG/PNG başarı; bozuk MIME, boyut/piksel limiti, stale dosya, model kapalı, injection/EXIF izolasyonu ve TUI fallback.
 
 Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.
 
@@ -154,12 +202,24 @@ Durum: BEKLENİYOR
 
 Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir biçimde hatırlaması; belgelerden kaynaklı cevap vermesi.
 
-- [ ] Ayrı profile store: ad, tercih ve rol gibi bilgiler için açık kullanıcı düzenleme/silme ekranı; sohbetten otomatik kalıcı yazma yok.
-- [ ] Memory türleri: session, user-profile, project ve task memory fiziksel olarak ayrılır; her kayıtta provenance, sensitivity, TTL ve silme durumu olur.
-- [ ] Workspace ingestion: çoklu belge indeksleme, SQLite metadata/FTS ile retrieval, dosya hash'i ve değişiklik algılama.
-- [ ] Secret/hassas dosya filtresi: `.env`, anahtarlar, credential ve kullanıcı tanımlı path'ler indeks dışı; sonuçlarda kaynak ve alıntı sınırı gösterilir.
-- [ ] Context budgeter: en alakalı, provenance'ı korunan küçük parçaları modele verir; retrieval içeriği data envelope dışına çıkmaz.
-- [ ] E2E: belgeden doğru cevap/kaynak, injection reddi, secret exclusion, bellek silme ve konu değişiminde eski profilin yanlış kullanılmaması.
+- [ ] Profile schema/ADR: ad, hitap biçimi, dil, rol/tercih, sensitivity, source ve updated-at alanları; sohbetten otomatik persistent write varsayılan olarak kapalı.
+- [ ] Profile CRUD UX: kullanıcı açıkça ekler/düzenler/siler; her alan için “modele dahil etme” anahtarı ve export/reset seçeneği.
+- [ ] Profile injection boundary: profile alanları da system prompt değil typed data olarak taşınır; model profile üzerinden tool yetkisi kazanamaz.
+- [ ] Memory namespace'leri: session, user-profile, project, task ve ephemeral tool-output fiziksel/şematik olarak ayrılır.
+- [ ] Memory write policy: önerilen kayıt → kullanıcı preview/onay → sensitivity/TTL seçimi → audit; model kendiliğinden kalıcı anı yazamaz.
+- [ ] Memory retrieval policy: namespace/sensitivity/TTL filtreleri, kullanıcıya “neden kullanıldı” bilgisi ve kaynaklı cevapta görünür attribution.
+- [ ] Memory deletion: tek kayıt, namespace, proje ve “her şeyi unut” silme; tombstone/backup etkisi ve doğrulama testi.
+- [ ] Memory migration/backup: versioned schema, encrypted-secret ayrımı gerekiyorsa ADR, export/import ve rollback.
+- [ ] Workspace izin UX'i: klasör seçimi, kök sınırı, indeks kapsamı, exclude pattern ve indeks boyutu tahmini kullanıcıya gösterilir.
+- [ ] Document parser katmanı: Markdown/TXT/PDF başlangıcı; sonradan Office/HTML için ayrı parser ve sandbox kararı.
+- [ ] Ingestion pipeline: canonical path, content hash, MIME/size limiti, chunking, dosya değişiklik algısı ve incremental re-index.
+- [ ] Metadata/FTS index: SQLite metadata-first retrieval, belge/chunk ID, konum, hash, provenance ve indeks sürümü.
+- [ ] Embedding/re-rank kararı: FTS baseline ölçülür; embedding model gerekiyorsa boyut/RAM/lisans bilgisi ve kullanıcı onayıyla indirilir.
+- [ ] Secret/hassas filtre: `.env`, private key, credential, binary, çok büyük dosya ve kullanıcı exclude listesi indeks dışı; filtre loglanır ama sır saklanmaz.
+- [ ] Retrieval policy: relevance threshold, result sayısı, token/context budget, duplicate suppression ve kaynağı olmayan cevabı engelleme.
+- [ ] Citation UX: yanıtın hangi belge/parçadan geldiği, kısa alıntı, dosya konumu ve “kaynağı aç” davranışı.
+- [ ] Untrusted-content isolation: doküman/OCR/web metni data envelope içinde kalır; prompt injection, tool call ve data exfiltration denemeleri reddedilir.
+- [ ] RAG eval seti: doğru kaynak, yanlış kaynak, secret exclusion, eski indeks, çelişen belge, injection ve silinmiş bellek senaryoları.
 
 Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak gösteren cevap alabilir ve saklanan tüm kişisel veriyi görüntüleyip silebilir.
 
@@ -169,12 +229,21 @@ Durum: BEKLENİYOR
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
-- [ ] Read-only plan/diff akışı: görev planı, etkilenen dosyalar, patch preview ve test planı.
-- [ ] Isolated worker: workspace snapshot, allowlist komutları, CPU/RAM/süre limiti, ağ kapalı çalışma ve iptal/cleanup handle'ları.
-- [ ] Patch uygulama onayı: dosya bazlı scope, diff hash, explicit approval, rollback/snapshot ve verifier evidence.
-- [ ] Coding evaluation seti: küçük hatalar, test ekleme, yanlış patch reddi ve existing-test regression senaryoları.
-- [ ] Yerel üretkenlik tool'ları: takvim, not, dosya düzenleme gibi her yeni tool için ayrı capability manifest, minimum scope, preview, approval ve verifier zinciri.
-- [ ] Çok-adımlı workflow runner: planı kullanıcıya gösterme, her yan etkili adımdan önce policy/approval, iptal edildiğinde cleanup ve audit özeti.
+- [ ] Worker threat model/ADR: host çalışma alanı, ağ, shell, secret, process tree ve resource exhaustion için saldırı modeli ve seçilen izolasyon yaklaşımı.
+- [ ] Isolated worker bootstrap: workspace snapshot/overlay, ayrı çalışma dizini, read-only input ve sınırlandırılmış output artifact alanı.
+- [ ] OS izolasyonu: kullanıcı namespace/container/bubblewrap seçimi, ağ=kapalı varsayılanı, mount allowlist, no-new-privileges ve seccomp fizibilitesi.
+- [ ] Resource kontrolü: CPU/RAM/disk/PID/time quota, process group, watchdog, stdout/stderr limitleri ve güvenli cleanup.
+- [ ] Gerçek cancellation: task cancel → child process signal → grace period → kill → snapshot cleanup → audit/verifier sonucu.
+- [ ] Allowlist command runner: her komut için manifest, argüman schema, cwd scope, env allowlist, dry-run ve evidence capture.
+- [ ] Read-only project analyst: repo overview, dependency/test discovery, riskli dosya uyarısı ve hiçbir yazma yapmadan plan üretme.
+- [ ] Coding plan UX: yapılacaklar, etkilenen dosyalar, varsayımlar, test planı, tahmini risk ve kullanıcı soruları.
+- [ ] Patch generator: unified diff, dosya/path containment, diff hash, maksimum değişiklik limiti ve binary/secret dosya reddi.
+- [ ] Patch preview/review: satır bazlı görünüm, seçilebilir dosya scope'u, kullanıcı değişiklik notu ve explicit approve/reject.
+- [ ] Patch apply transaction: approval'a bağlı diff hash, snapshot/backup, atomic write, başarısızlıkta rollback ve audit.
+- [ ] Test/verifier runner: allowlisted test komutu, exit code/log özeti, değiştirilen dosya hash'i ve mevcut test regresyon raporu.
+- [ ] Coding evaluation seti: küçük hata düzeltme, test ekleme, yanlış patch reddi, timeout/cancel, secret exposure ve mevcut-test regression senaryoları.
+- [ ] Yerel üretkenlik tool framework: takvim, not, dosya düzenleme gibi her yeni tool için capability manifest, minimum scope, preview, approval ve verifier.
+- [ ] Çok-adımlı workflow runner: planı kullanıcıya gösterme, her yan etkili adımdan önce policy/approval, retry/idempotency, iptalde cleanup ve audit özeti.
 
 Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı onayı olmadan yazmaz; onay sonrası yalnız scope içindeki patch'i uygular ve test kanıtını döndürür.
 
@@ -184,11 +253,17 @@ Durum: BEKLENİYOR
 
 Amaç: Her zaman dinleyen bir sistem yerine açık, mahremiyeti koruyan push-to-talk ses akışı.
 
-- [ ] Yerel STT seçimi ve indirme kararı: model boyutu/kaynak tüketimi kullanıcıya sunulur; kayıt varsayılan olarak kalıcı tutulmaz.
-- [ ] Push-to-talk, ses seviyesi göstergesi, transkript doğrulama/düzenleme ve normal `InputType::Voice` pipeline'ı.
-- [ ] Yerel TTS seçeneği, ses seçimi ve açık kapatma anahtarı.
-- [ ] E2E: mikrofon izin reddi, model yok, sessizlik, Türkçe transkript, sesli tool approval ve kayıt silme testleri.
-- [ ] Wake word yalnız ayrı opt-in deney olarak: lokal işleme, görünür dinleme göstergesi, fiziksel/klavye kill switch ve ham ses retention=off varsayılanı.
+- [ ] Audio ADR: PipeWire/Wayland cihaz erişimi, mikrofon izinleri, örnekleme formatı, gecikme hedefi ve recording retention varsayılanı.
+- [ ] STT aday değerlendirmesi: Türkçe doğruluk, CPU/RAM, model boyutu, lisans, offline destek ve warm-start süreleri. **İndirme kullanıcı onayıyla.**
+- [ ] Push-to-talk capture: tuş basılıyken kayıt, ses seviyesi/VAD göstergesi, bırakınca transkript kuyruğu ve kolay iptal.
+- [ ] Transkript editörü: gönderim öncesi metni görme, düzeltme, silme, yeniden deneme ve normal `InputType::Voice` pipeline'ına dönüştürme.
+- [ ] Voice privacy: ham ses varsayılan olarak kalıcı değil; kullanıcı isterse geçici dosyanın yeri/silme zamanı görünür.
+- [ ] TTS aday değerlendirmesi: Türkçe ses kalitesi, lisans, CPU kullanımı, ses modeli boyutu ve offline çalışma; indirme onaylı.
+- [ ] TTS playback: yanıt bitince opt-in oynatma, duraklat/durdur, hız/ses seçimi, kulaklık cihaz değişimi ve sessiz mod.
+- [ ] Sesli approval UX: yüksek riskli aksiyon için yalnız ses değil, ekranda açık yazılı onay veya güvenli ikinci doğrulama.
+- [ ] Wake word araştırma spike: ayrı feature flag, lokal algılama, görünür dinleme göstergesi, fiziksel/klavye kill switch ve retention=off.
+- [ ] Accessibility: klavye-only kullanım, ekran okuyucu metinleri, işitme/görme farklılıkları için eşdeğer metin kontrolleri.
+- [ ] E2E: mikrofon izin reddi, cihaz yok, model yok, sessizlik/gürültü, Türkçe transkript, iptal, sesli tool approval ve kayıt silme.
 
 Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek transkripti görür/onaylar ve yanıtı isterse sesli duyar.
 
@@ -198,13 +273,23 @@ Durum: BEKLENİYOR
 
 Amaç: Sohbeti hard-code etmek yerine ölçmek; gerekiyorsa küçük, geri alınabilir bir model adaptasyonu yapmak.
 
-- [ ] Sürümlü benchmark: Türkçe diyalog, takip sorusu, güvenlik sınırı, RAG doğruluğu ve coding görevleri için golden set + latency/quality raporu.
-- [ ] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; silme/poisoned-example marker'ları ve dataset manifest hash'i.
-- [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
-- [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
-- [ ] Old-vs-new regresyonu ve tek komutla model/adaptor rollback.
-- [ ] Kullanıcı geri bildirimi intake'i: beğen/beğenme veya düzeltme sinyali doğrudan eğitim verisi olmaz; sensitivity, provenance ve human review kuyruğundan geçer.
-- [ ] Prompt/model konfigürasyon registry'si: her deneyin model hash'i, prompt sürümü, benchmark sonucu ve rollback hedefi kaydedilir.
+- [ ] Eval governance ADR: benchmark sahipliği, sürümleme, veri kaynakları, sensitivity, insan değerlendirme rubriği ve başarı metrikleri.
+- [ ] Türkçe sohbet golden seti: selamlaşma, takip sorusu, belirsizlik, konu geçişi, uzun konuşma, güvenli sınır ve doğru “bilmiyorum” örnekleri.
+- [ ] RAG golden seti: kaynak doğruluğu, citation, secret exclusion, eski indeks, çelişkili belge ve injection örnekleri.
+- [ ] Coding golden seti: plan, patch, test, rollback, scope reddi, timeout/cancel ve verifier doğruluğu örnekleri.
+- [ ] Security golden seti: scope dışı hedef, prompt injection, authorization/revoke, dry-run ve evidence kalitesi örnekleri.
+- [ ] Benchmark harness: deterministic seed/ayar, model hash, prompt sürümü, latency/token/RAM kaydı ve makine-okunur rapor.
+- [ ] İnsan değerlendirme akışı: blind comparison, kalite/hata etiketi, feedback provenance ve reviewer kimliği/sensitivity.
+- [ ] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; manifest hash ve imzalı release notu.
+- [ ] Dataset hygiene: deduplication, PII/secret scan, license/provenance kontrolü, poisoned-example marker ve deletion request akışı.
+- [ ] Teacher output re-verification: öğretmen/model yanıtı bağımsız test/verifier olmadan training candidate olamaz.
+- [ ] Baseline model registry: mevcut Qwen3 ve adayların quantization, lisans, SHA-256, kaynak profili ve benchmark sonucu.
+- [ ] Model karşılaştırması: CPU/RAM/VRAM gecikme, Türkçe kalite, tool boundary, RAG/coding başarısı ve enerji etkisi.
+- [ ] Prompt/config registry: system prompt, sampling, context, adapter/model hash, benchmark sonucu ve rollback hedefi.
+- [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi, maliyet, risk ve artifact storage. **Eğitim kullanıcı onayından önce başlamaz.**
+- [ ] Eğitim pipeline spike: dataset split, reproducible environment, checkpoint, adapter metadata, holdout eval ve eğitim kesintisi sonrası recovery.
+- [ ] Old-vs-new gate: kalite artışı hedefi, güvenlik/latency regresyon eşiği, canary kullanım ve tek komutla model/adaptor rollback.
+- [ ] Kullanıcı geri bildirimi intake'i: beğen/beğenme veya düzeltme doğrudan eğitim verisi olmaz; review kuyruğu ve opt-in ile işlenir.
 
 Tamamlanma ölçütü: Her model veya adapter değişikliği, sürümlü eval'de hedef metriği iyileştirir ve güvenlik/latency regresyonu üretmez; aksi halde kullanılmaz.
 
@@ -214,10 +299,20 @@ Durum: BEKLENİYOR — F4 izolasyonundan önce execution açılmaz
 
 Amaç: “sızma testi yapabilen” değil, yalnız yazılı yetki ve teknik sınırlar altında güvenli değerlendirme yapabilen bir capability oluşturmak.
 
-- [ ] İmzalı authorization/scope manifest, hedef canonicalization, CIDR semantiği, DNS pinning/rebinding savunması ve expiry/revoke.
-- [ ] Network-scoped sandbox worker: yalnız allowlist egress, rate/runtime limiti, kill switch, dry-run ve gerçek cancellation/cleanup.
-- [ ] Önce SAFE/read-only envanter ve raporlama; ACTIVE/INTRUSIVE/DESTRUCTIVE modları varsayılan olarak kapalı kalır.
-- [ ] Evidence tabanlı finding formatı, insan onayı, audit export ve scope dışı/secret hedef deny testleri.
+- [ ] Security program ADR: kullanıcı rolü, yazılı yetki standardı, kabul edilmeyen hedefler, sorumlu kullanım, veri saklama ve kill-switch politikası.
+- [ ] Authorization manifest: imzalı yetki referansı, müşteri/varlık sahibi, hedef allowlist/exclusion, zaman aralığı, maksimum mod ve runtime bütçesi.
+- [ ] Scope doğrulama: canonical hostname/IP, IDNA/punycode, wildcard/CIDR semantiği, private/reserved range politikası ve port/protocol scope.
+- [ ] DNS güvenliği: resolve/pin, TTL/rebinding tespiti, proxy/redirect kuralı ve IP değişiminde task durdurma.
+- [ ] Scope lifecycle: create/review/approve, expiry, revoke, key rotation, audit export ve immutable authorization referansı.
+- [ ] Network enforcement: sandbox namespace/proxy üzerinden yalnız scope allowlist egress; host ağını doğrudan kullanmama.
+- [ ] Rate/runtime controls: hedef başına rate limit, global eşzamanlılık, byte/time bütçesi, circuit breaker ve kullanıcı kill switch.
+- [ ] SAFE capability başlangıcı: yalnız pasif/read-only envanter, HTTP/TLS metadata veya açıkça izinli health kontrolleri; exploit/payload yok.
+- [ ] Dry-run mode: hedefe trafik çıkarmadan plan, scope kararı, komut ve beklenen evidence üretme.
+- [ ] ACTIVE/INTRUSIVE/DESTRUCTIVE gate'leri: ayrı threat model, açık onay, ayrı worker profili ve varsayılan disabled; SAFE kapısı geçmeden açılmaz.
+- [ ] Evidence/finding schema: finding ID, kanıt, timestamp, target/scope, confidence, remediation, hassaslık ve verifier bağlantısı.
+- [ ] Security report UX: kapsam özeti, kullanılan mod, sınırlar, bulgular, ham kanıt maskesi ve export/redaction.
+- [ ] Red-team testleri: scope dışı host, DNS rebinding, CIDR bypass, redirect, prompt injection, secret hedef, revoke sırasında çalışma ve cancel/cleanup.
+- [ ] Legal/operational review: gerçek target execution öncesi yazılı yetki ve sorumlu açıklama kullanıcı tarafından yeniden onaylanır.
 
 Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda üretilen her bulgu kanıt ve audit ile ilişkilidir. Bu gate geçmeden aktif test capability'si eklenmez.
 
@@ -225,11 +320,21 @@ Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda
 
 Durum: BEKLENİYOR
 
-- [ ] MCP production hardening: protocol sürümleme, extension/tool manifest imzası, credential/raw-secret response filtresi, untrusted output provenance ve tool permission ekranı.
-- [ ] Yerel entegrasyonlar: takvim, e-posta, mesajlaşma veya dosya sağlayıcısı yalnız explicit OAuth/secret store, minimum scope, dry-run/preview, approval ve revoke ile eklenir.
-- [ ] Plugin/skill ekosistemi: signed/allowlisted paketler, capability sandbox profile, sürüm uyumluluğu, kilitleme dosyası ve tek tıkla devre dışı bırakma.
-- [ ] Remote/mobile yalnız explicit device pairing, public key, nonce/replay koruması, revoke, bağlantı şifreleme ve server-side kill switch'ten sonra ele alınır.
-- [ ] Cross-device handoff: task scope'u genişletmeyen typed handoff, offline queue/conflict policy ve alıcı cihazda yeniden policy değerlendirmesi.
+- [ ] MCP protocol release: sürüm müzakeresi, schema compatibility, capability discovery sınırı ve hata contractı.
+- [ ] MCP trust boundary: server identity, tool manifest signature, minimum permission, raw credential/secrets filter ve untrusted output provenance.
+- [ ] MCP permission UX: tool ilk kullanım promptu, erişim kapsamı, süreli izin, revoke/disable ve audit görünümü.
+- [ ] Extension registry: allowlisted source, paket imzası/hash'i, dependency lockfile, sürüm uyumluluğu, sandbox profile ve update/rollback.
+- [ ] Plugin kill switch: tek eklenti veya tüm üçüncü taraf tool'ları anında kapatma, çalışan task cleanup ve kullanıcı görünür durum.
+- [ ] Secret store ADR: OS keyring/şifreli vault seçimi, plaintext config yasağı, secret rotation, export dışı bırakma ve access audit.
+- [ ] OAuth integration foundation: redirect/callback güvenliği, minimum scope, token refresh/revoke, çoklu hesap ayrımı ve permission ekranı.
+- [ ] İlk entegrasyon seçimi: takvim/e-posta/mesajlaşma/dosya sağlayıcısından yalnız biri; read-only + preview ile başlar.
+- [ ] Entegrasyon write action gate: dry-run, kullanıcı önizlemesi, explicit approval, idempotency key, sonucu doğrulama ve undo mümkünse undo.
+- [ ] Device identity: cihaz anahtar çifti, cihaz adı, first-seen bilgisi, explicit pairing QR/short-code ve local user confirmation.
+- [ ] Remote transport: bağlantı şifreleme, certificate/key pinning, nonce/sequence/timestamp replay koruması ve rate limits.
+- [ ] Remote permission: cihaz başına capability/scope, session expiry, revoke, offline durum ve server-side/global kill switch.
+- [ ] Typed task handoff: task ID/scope/approval bağını koruma, alıcıda policy'yi yeniden çalıştırma, yetki genişletmeme.
+- [ ] Offline/sync policy: local-first queue, conflict çözümü, duplicate/replay reddi ve kullanıcı görünür teslim durumu.
+- [ ] Remote/mobile E2E: eşleşmemiş cihaz reddi, revoke sonrası deny, replay, scope expansion denemesi, bağlantı kopması ve kill switch.
 
 Tamamlanma ölçütü: Yerel desktop sürümü güvenilir olmadan hiçbir eklenti, entegrasyon veya remote cihaz tool yetkisi ya da kişisel bellek erişimi almaz.
 
@@ -237,13 +342,19 @@ Tamamlanma ölçütü: Yerel desktop sürümü güvenilir olmadan hiçbir eklent
 
 Durum: BEKLENİYOR — F2 ile birlikte başlar, ürün yayınından önce kapanır
 
-- [ ] Release pipeline: format, test, clippy, dependency/security denetimi, release build, migration kontrolü ve E2E smoke'u tek raporda birleştirme.
-- [ ] Metrikler: latency, model yükleme, token üretimi, başarı/verification oranı, iptal, hata sınıfı, CPU/RAM/disk kullanımı; kişisel içerik toplamadan yerel telemetry.
-- [ ] Gerçek timeout/cancellation worker: process group, cleanup handles, resource quota, watchdog ve stuck-task recovery.
-- [ ] Backup/retention komutları, config/model/dataset rollback, audit export/witness stratejisi ve restore tatbikatı.
-- [ ] Sürüm/migration yönetimi: semantic version, changelog, config migration, compatibility check ve kullanıcı verisi geri dönüş planı.
-- [ ] Güvenlik bakım döngüsü: bağımlılık güncellemesi, secret scanning, threat-model review, penetration-test bulgu takibi ve responsible disclosure kanalı.
-- [ ] Kullanıcı kabul/release gate: offline çalışma, veri silme/export, model kapatma, erişilebilirlik, Türkçe UX ve performans hedefleri için checklist.
+- [ ] CI/release pipeline: format, test, clippy, dependency/license/security denetimi, release build, migration kontrolü, SBOM ve E2E smoke raporu.
+- [ ] Paketleme/kurulum: signed release artifact, Linux packaging, ilk kurulum wizard'ı, model bulunamadı indirme/verify akışı ve kaldırma prosedürü.
+- [ ] Config lifecycle: schema version, default migration, compatibility check, invalid config recovery ve güvenli reset.
+- [ ] Privacy-preserving metrics: latency, model warm-up, token üretimi, başarı/verifier, iptal, error class, CPU/RAM/disk; prompt/yanıt içeriği telemetry'e girmez.
+- [ ] Local diagnostics UX: kullanıcı izin verirse redacted log bundle, task/audit ID, servis durum özeti ve bug report export.
+- [ ] Runtime reliability: process group, cleanup handle, quota, watchdog, stuck task recovery, retry/idempotency ve degradation mode.
+- [ ] Backup commands: schedule/retention, encrypted target seçeneği, model/config/dataset/audit ayrımı ve overwrite koruması.
+- [ ] Restore drill: boş makinede veya test dizininde backup restore, audit-chain doğrulama, model/config compatibility ve rollback kanıtı.
+- [ ] Audit export/witness: redacted export formatı, integrity manifest, local/opsiyonel remote witness ADR ve export erişim onayı.
+- [ ] Version/migration yönetimi: semantic version, changelog, breaking-change notu, upgrade/downgrade path ve kullanıcı verisi geri dönüş planı.
+- [ ] Güvenlik bakım döngüsü: dependency update, secret scan, threat-model review, CVE triage, pentest finding takibi ve responsible disclosure kanalı.
+- [ ] Kullanıcı kabul/release gate: offline çalışma, veri silme/export, model kapatma, erişilebilirlik, Türkçe UX, performans ve düşük disk/RAM koşulları.
+- [ ] Release sonrası bakım: crash/bug triage, stable/beta channel, hotfix prosedürü ve kullanıcıya görünür known-issues kaydı.
 
 Tamamlanma ölçütü: Yeni sürüm kurulabilir, geri alınabilir, yedekten döndürülebilir ve kritik kullanıcı akışları kanıtlı biçimde çalışır.
 
@@ -251,9 +362,13 @@ Tamamlanma ölçütü: Yeni sürüm kurulabilir, geri alınabilir, yedekten dön
 
 Durum: BEKLENİYOR — v1 teslimi değildir
 
-- [ ] Daha büyük/özel modeller, çoklu ajan koordinasyonu, federated/on-device learning ve ileri perception yalnız benchmark + threat model + maliyet değerlendirmesi sonrası deney dalında değerlendirilir.
-- [ ] Her araştırma deneyi ana sürümden feature flag, ayrı artifact ve rollback ile ayrılır; kullanıcı verisi deney setine varsayılan olarak girmez.
-- [ ] Başarılı deneyler yalnız F6 eval kapısını ve F9 release kapısını geçerse ana ürüne taşınır.
+- [ ] Araştırma intake'i: önerilen teknoloji, kullanıcı değeri, maliyet, lisans, threat model, benchmark hedefi ve rollback sahibi olmadan deney başlamaz.
+- [ ] Daha büyük/özel modeller: CPU/GPU/hibrit çalışma, yeni quantization, speculative decoding veya model routing yalnız karşılaştırmalı eval ile.
+- [ ] Çoklu ajan koordinasyonu: rol ayrımı, shared state, deadlock/loop limiti, tool authority separation ve bütçe kontrolü.
+- [ ] Federated/on-device learning: privacy model, opt-in, secure aggregation, veri silme ve tehdide dayanıklılık araştırması.
+- [ ] İleri perception: ekran/ kamera/konum gibi yüksek hassasiyetli girdiler için açık opt-in, durum göstergesi, retention=off ve ayrı policy.
+- [ ] Her deney ana sürümden feature flag, ayrı artifact/dataset, kaynak quota ve rollback ile ayrılır; kullanıcı verisi varsayılan olarak deney setine girmez.
+- [ ] Başarılı deneyler yalnız F6 eval kapısını, F7/F8 ilgili trust kapılarını ve F9 release kapısını geçerse ana ürüne taşınır.
 
 ### Önerilen uygulama sırası
 
