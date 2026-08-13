@@ -45,6 +45,142 @@ Gate dışı (sonraki rota): fine-tuning/LoRA, gelişmiş autonomous pentest, mo
 
 ---
 
+## MVP tamamlanma kaydı ve Phase 2 çalışma sırası
+
+Durum: PLANLANDI — 14 Ağustos 2026
+
+MVP tamamlandı: local CPU sohbeti, kalıcı model yaşam döngüsü, terminal sohbet ekranı, onay/policy zinciri, SQLite audit/recovery, ilk MCP ve güvenli read-only capability'ler çalışıyor. Bu, “JARVIS fikrinin ispatı”dır; henüz tam masaüstü ürünü veya eğitilmiş özel model değildir.
+
+Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler sırayla teslim edilecek. Her dilim, kendi kullanıcı akışı, güvenlik sınırı, otomatik testleri ve gerçek smoke kanıtı olmadan `[x]` olmayacak.
+
+### Phase 2 çalışma ilkeleri
+
+- Mevcut Rust core (`Request → Policy → Task → Tool → Verifier → Audit`) korunur; yeni arayüz veya model adapterı bu zinciri bypass edemez.
+- Bir model, embedding modeli veya sistem paketi indirilmeden önce boyut, RAM/VRAM etkisi, lisans ve ne için gerektiği kullanıcıya açıkça söylenir; indirme kullanıcı onayıyla başlar.
+- Önce günlük kullanım değeri ve veri güvenliği, sonra otonomi gelir. Fine-tuning ve aktif pentest, ölçüm/scope/sandbox katmanlarından önce başlatılmaz.
+- Her yeni yetenek için en az bir başarı, bir reddetme/edge-case ve bir gerçek local smoke testi gerekir.
+- TUI MVP olarak korunur; native masaüstü kabuğu aynı core'a ikinci bir istemci olarak eklenir. Core yeniden yazılmaz.
+
+### P2.0 — MVP stabilizasyonu ve ürün kalite kapısı
+
+Durum: BEKLENİYOR
+
+Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını görünür ve tekrar üretilebilir hale getirmek.
+
+- [ ] Gerçek terminal etkileşim matrisi: paste, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, mouse wheel, uzun taslak, uzun geçmiş, bildirim, `/quit` ve `exit` için otomasyon + interaktif smoke.
+- [ ] Sohbet kalite değerlendirme seti: Türkçe selamlaşma, kısa takip sorusu, uzun bağlam, konu değiştirme, “bilmiyorum” ve tool-iddiası senaryolarından oluşan sürümlü küçük benchmark.
+- [ ] TUI hata/backlog kaydı: kullanıcı raporlarını test senaryosuna ve çözüm kanıtına bağlayan hata şablonu.
+- [ ] Release komutu: format, test, clippy, release build, servis health ve kritik E2E smoke'u tek raporda toplar.
+
+Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 senaryoda tekrar üretilebilir; yeni dilimler bu regression setini geçmeden birleşmez.
+
+### P2.1 — Native desktop kabuğu ve gerçek görsel ekler
+
+Durum: BEKLENİYOR — İlk ürün önceliği
+
+Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
+
+- [ ] Rust-native UI spike: `egui/eframe` ile ayrı pencere, sohbet listesi, salt-okunur mesaj kartları, resize ve bildirim odak davranışı için küçük prototip.
+- [ ] Attachment contract: `AttachmentRef` (ID, canonical local path, MIME, byte size, SHA-256, oluşturulma zamanı, provenance, sensitivity) ve task/audit ilişkisi.
+- [ ] Güvenli yerel dosya seçimi: `Ctrl+O`/ataç düğmesi; yalnız allowlist MIME, canonical path, boyut/piksel limiti, hash ve kullanıcı görünür önizlemesi. Dosya yolu veya EXIF içeriği model talimatı olmaz.
+- [ ] Vision adapter: mevcut metin modelinden ayrı, CPU uyumlu multimodal GGUF + eşleşen `mmproj` ile loopback-only local endpoint. **Bu noktada model indirmeden önce seçenekler, disk/RAM maliyeti ve lisans kullanıcıya sunulacak.**
+- [ ] Görsel cevap policy: model yalnız görüntü açıklaması/analizi üretir; görselden gelen hiçbir metin tool yetkisi kazanmaz. Hassas veya desteklenmeyen görsel için açık hata ve yerel silme kontrolü sağlanır.
+- [ ] E2E: JPEG/PNG başarı, bozuk dosya/MIME reddi, boyut limiti, provenance, model kapalıyken hata, görsel prompt-injection izolasyonu ve TUI fallback testleri.
+
+Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.
+
+### P2.2 — Kullanıcı profili, kontrollü bellek ve gerçek RAG
+
+Durum: BEKLENİYOR
+
+Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir biçimde hatırlaması; belgelerden kaynaklı cevap vermesi.
+
+- [ ] Ayrı profile store: ad, tercih ve rol gibi bilgiler için açık kullanıcı düzenleme/silme ekranı; sohbetten otomatik kalıcı yazma yok.
+- [ ] Memory türleri: session, user-profile, project ve task memory fiziksel olarak ayrılır; her kayıtta provenance, sensitivity, TTL ve silme durumu olur.
+- [ ] Workspace ingestion: çoklu belge indeksleme, SQLite metadata/FTS ile retrieval, dosya hash'i ve değişiklik algılama.
+- [ ] Secret/hassas dosya filtresi: `.env`, anahtarlar, credential ve kullanıcı tanımlı path'ler indeks dışı; sonuçlarda kaynak ve alıntı sınırı gösterilir.
+- [ ] Context budgeter: en alakalı, provenance'ı korunan küçük parçaları modele verir; retrieval içeriği data envelope dışına çıkmaz.
+- [ ] E2E: belgeden doğru cevap/kaynak, injection reddi, secret exclusion, bellek silme ve konu değişiminde eski profilin yanlış kullanılmaması.
+
+Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak gösteren cevap alabilir ve saklanan tüm kişisel veriyi görüntüleyip silebilir.
+
+### P2.3 — Güvenli coding workbench
+
+Durum: BEKLENİYOR
+
+Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
+
+- [ ] Read-only plan/diff akışı: görev planı, etkilenen dosyalar, patch preview ve test planı.
+- [ ] Isolated worker: workspace snapshot, allowlist komutları, CPU/RAM/süre limiti, ağ kapalı çalışma ve iptal/cleanup handle'ları.
+- [ ] Patch uygulama onayı: dosya bazlı scope, diff hash, explicit approval, rollback/snapshot ve verifier evidence.
+- [ ] Coding evaluation seti: küçük hatalar, test ekleme, yanlış patch reddi ve existing-test regression senaryoları.
+
+Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı onayı olmadan yazmaz; onay sonrası yalnız scope içindeki patch'i uygular ve test kanıtını döndürür.
+
+### P2.4 — Sesli etkileşim (push-to-talk ile başlar)
+
+Durum: BEKLENİYOR
+
+Amaç: Her zaman dinleyen bir sistem yerine açık, mahremiyeti koruyan push-to-talk ses akışı.
+
+- [ ] Yerel STT seçimi ve indirme kararı: model boyutu/kaynak tüketimi kullanıcıya sunulur; kayıt varsayılan olarak kalıcı tutulmaz.
+- [ ] Push-to-talk, ses seviyesi göstergesi, transkript doğrulama/düzenleme ve normal `InputType::Voice` pipeline'ı.
+- [ ] Yerel TTS seçeneği, ses seçimi ve açık kapatma anahtarı.
+- [ ] E2E: mikrofon izin reddi, model yok, sessizlik, Türkçe transkript, sesli tool approval ve kayıt silme testleri.
+
+Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek transkripti görür/onaylar ve yanıtı isterse sesli duyar.
+
+### P2.5 — Model kalite programı ve yalnız kanıt sonrası adaptasyon
+
+Durum: BEKLENİYOR
+
+Amaç: Sohbeti hard-code etmek yerine ölçmek; gerekiyorsa küçük, geri alınabilir bir model adaptasyonu yapmak.
+
+- [ ] Sürümlü benchmark: Türkçe diyalog, takip sorusu, güvenlik sınırı, RAG doğruluğu ve coding görevleri için golden set + latency/quality raporu.
+- [ ] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; silme/poisoned-example marker'ları ve dataset manifest hash'i.
+- [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
+- [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
+- [ ] Old-vs-new regresyonu ve tek komutla model/adaptor rollback.
+
+Tamamlanma ölçütü: Her model veya adapter değişikliği, sürümlü eval'de hedef metriği iyileştirir ve güvenlik/latency regresyonu üretmez; aksi halde kullanılmaz.
+
+### P2.6 — Yetkili security/pentest hazırlığı
+
+Durum: BEKLENİYOR — P2.3 izolasyonundan önce execution açılmaz
+
+Amaç: “sızma testi yapabilen” değil, yalnız yazılı yetki ve teknik sınırlar altında güvenli değerlendirme yapabilen bir capability oluşturmak.
+
+- [ ] İmzalı authorization/scope manifest, hedef canonicalization, CIDR semantiği, DNS pinning/rebinding savunması ve expiry/revoke.
+- [ ] Network-scoped sandbox worker: yalnız allowlist egress, rate/runtime limiti, kill switch, dry-run ve gerçek cancellation/cleanup.
+- [ ] Önce SAFE/read-only envanter ve raporlama; ACTIVE/INTRUSIVE/DESTRUCTIVE modları varsayılan olarak kapalı kalır.
+- [ ] Evidence tabanlı finding formatı, insan onayı, audit export ve scope dışı/secret hedef deny testleri.
+
+Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda üretilen her bulgu kanıt ve audit ile ilişkilidir. Bu gate geçmeden aktif test capability'si eklenmez.
+
+### P2.7 — Operasyonel olgunluk ve isteğe bağlı remote
+
+Durum: BEKLENİYOR
+
+- [ ] Metrikler: latency, model yükleme, token üretimi, başarı/verification oranı, iptal ve kaynak kullanımı.
+- [ ] Backup/retention komutları, config/model/dataset rollback ve audit export/witness stratejisi.
+- [ ] Remote/mobile yalnız explicit device pairing, public key, nonce/replay koruması, revoke ve server-side kill switch'ten sonra ele alınır.
+
+Tamamlanma ölçütü: Yerel desktop sürümü güvenilir olmadan hiçbir remote device yetki veya kişisel bellek erişimi almaz.
+
+### Önerilen uygulama sırası
+
+1. **P2.0 stabilizasyonu** — önce eldeki kullanım hatalarını test edilebilir hale getiririz.
+2. **P2.1 native desktop + vision** — fotoğraf/dosya ihtiyacını ve terminal sınırlarını doğrudan çözer.
+3. **P2.2 memory + RAG** — kişiselleşme ve dokümanlarla gerçek çalışma bu katmandan gelir.
+4. **P2.3 coding workbench** — sadece izolasyon ve onay temeli üstünde.
+5. **P2.4 voice** — arayüz temelinin üzerine eklenir.
+6. **P2.5 quality/LoRA** — hangi eğitimin gerçekten gerekli olduğunu benchmark gösterdikten sonra.
+7. **P2.6 security** ve **P2.7 remote** — en son, çünkü hata maliyetleri daha yüksektir.
+
+İlk somut Phase 2 işi önerisi: P2.0'ın küçük regresyon paketiyle birlikte P2.1'in native desktop/attachment contract spike'ı. Vision modeli indirme noktasına geldiğimizde burada durup kullanıcıdan açık onay alınır.
+
+---
+
 ## Desktop usability ve local model lifecycle hardening
 
 Durum: TAMAMLANDI — 14 Ağustos 2026
@@ -72,9 +208,7 @@ Bu dilim MVP'nin yetki sınırlarını genişletmez. Amaç, ilk günlük kullan�
 - [x] Terminal metin düzenleme kısayolları
   - Yapılan: Bracketed paste ve mouse capture etkinleştirildi; `Ctrl+V` Wayland panosundan, terminalin native paste olayı ise doğrudan taslağa ekleniyor. `Ctrl+Backspace`/`Ctrl+W` önceki kelimeyi ve ayırıcı boşluklarını, `Ctrl+U` taslağın tamamını siler; mouse tekerleği history scrollbar'ını hareket ettirir.
   - Sonuç: Çok satırlı yapıştırmalar istemeden mesaj göndermez; boşluklar güvenli biçimde tek satır taslağa dönüştürülür ve UTF-8 Türkçe metin sınırları korunur. Klavye ve mouse ile geçmiş, model yanıtı beklenirken de gezilebilir.
-- [ ] Vision attachment dilimi
-  - Gereksinim: Mevcut `Qwen3-8B-Q4_K_M` yalnız metin modelidir; bir fotoğrafı anlayamaz. Gerçek fotoğraf gönderme/analiz için CPU-uyumlu multimodal GGUF model, uygun vision projector (`mmproj`) ve attachment provenance sınırı kurulmalıdır.
-  - Sonraki adım: Uyumlu vision modeli indirildikten sonra `Ctrl+O`/dosya seçimi, görsel önizleme-metaverisi ve yerel vision endpointi tek bir güvenli dikey dilim olarak eklenecek.
+- Vision attachment dilimi MVP dışındadır; ayrıntılı uygulama sırası ve güvenlik gate'i **P2.1 — Native desktop kabuğu ve gerçek görsel ekler** altında planlandı.
 - [x] Approval UX'in yeni ekrana taşınması
   - Yapılan: `/approvals`, `/approve`, `/approve <task-id>`, `/cancel`, `/cancel <task-id>` komutları TUI'ye bağlandı.
   - Sonuç: Kalıcı işlem onayı, eski satır CLI'sındaki güvenlik contractını koruyor.
