@@ -45,7 +45,7 @@ Gate dışı (sonraki rota): fine-tuning/LoRA, gelişmiş autonomous pentest, mo
 
 ---
 
-## MVP tamamlanma kaydı ve Phase 2 çalışma sırası
+## MVP tamamlanma kaydı ve ana ürün yol haritası
 
 Durum: PLANLANDI — 14 Ağustos 2026
 
@@ -53,7 +53,7 @@ MVP tamamlandı: local CPU sohbeti, kalıcı model yaşam döngüsü, terminal s
 
 Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler sırayla teslim edilecek. Her dilim, kendi kullanıcı akışı, güvenlik sınırı, otomatik testleri ve gerçek smoke kanıtı olmadan `[x]` olmayacak.
 
-### Phase 2 çalışma ilkeleri
+### Program çalışma ilkeleri
 
 - Mevcut Rust core (`Request → Policy → Task → Tool → Verifier → Audit`) korunur; yeni arayüz veya model adapterı bu zinciri bypass edemez.
 - Bir model, embedding modeli veya sistem paketi indirilmeden önce boyut, RAM/VRAM etkisi, lisans ve ne için gerektiği kullanıcıya açıkça söylenir; indirme kullanıcı onayıyla başlar.
@@ -61,7 +61,66 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 - Her yeni yetenek için en az bir başarı, bir reddetme/edge-case ve bir gerçek local smoke testi gerekir.
 - TUI MVP olarak korunur; native masaüstü kabuğu aynı core'a ikinci bir istemci olarak eklenir. Core yeniden yazılmaz.
 
-### P2.0 — MVP stabilizasyonu ve ürün kalite kapısı
+### Tüm fazlar — bağımlılık haritası
+
+| Faz | Hedef | Durum | Başlamadan önce gerekli olan |
+| --- | --- | --- | --- |
+| F0 | Mimari, typed core, persistence ve güvenlik contractları | TAMAMLANDI | — |
+| F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
+| F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | SIRADAKİ | F1 |
+| F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR | F2 attachment/provenance temeli |
+| F4 | Onaylı, izole coding ve yerel iş workbench'i | BEKLENİYOR | F2 + OS-isolated worker |
+| F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
+| F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
+| F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
+| F8 | MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile | BEKLENİYOR | F3, F7 trust/permission temeli |
+| F9 | Operasyonel olgunluk, release ve uzun dönem bakım | BEKLENİYOR | F2–F8 boyunca sürekli yürür |
+
+Programın bitiş tanımı: F2–F9'un zorunlu maddeleri, güvenlik/kalite kapıları ve kullanıcı kabul senaryoları tamamlanmış olacak. F10 araştırma/deney alanı ise ürünün zorunlu teslim kriteri değildir; yalnız stabil sürümden sonra kontrollü deneyler içindir.
+
+### Mevcut mimari backlog eşlemesi
+
+Bu dosyanın aşağısındaki ayrıntılı mimari bölümleri korunur; aşağıdaki tablo her açık maddenin hangi ürün fazında kapanacağını gösterir.
+
+| Mevcut bölüm | Sahip faz | Kapanış hedefi |
+| --- | --- | --- |
+| 3. Capability Registry ve güvenli tool runtime | F4 + F9 | Isolated worker, gerçek iptal/cleanup, retry/idempotency, backup/dry-run |
+| 4. Local model adapter ve routing | F2 + F6 + F9 | UX/health, benchmark, model registry ve rollback |
+| 5. RAG, workspace ve memory | F3 | Ingestion, sensitivity, retrieval, context budget ve silme |
+| 6. Teacher–Student learning ve dataset governance | F6 | Dataset sürümü, deletion marker, eval, LoRA/QLoRA ve rollback |
+| 7. Yetkili security/pentest | F7 | Authorization, network enforcement, sandbox, evidence ve deny testleri |
+| 8. Remote device trust ve task handoff | F8 | Pairing, public key, replay koruması, revoke ve handoff |
+| 9. MCP vertical slice | F8 | Credential filtresi, provenance, extension trust ve permission UX |
+| 10. Observability, audit integrity ve recovery | F9 | Retention, metrikler, witness/export ve config/model rollback |
+| 11. Test ve kalite kapısı | F2.0 + F9 | E2E, concurrency/cancel/lock, release gate ve sürekli regression |
+
+### F0 — Mimari ve güvenli core
+
+Durum: TAMAMLANDI
+
+- [x] v2.3 frozen architecture, typed request/task/tool/verifier contracts ve Policy Gate.
+- [x] SQLite persistence, approval/recovery, audit hash-chain ve ilk observability.
+- [x] Local CPU model adapterı, registry, zero-trust workspace temel katmanı ve MCP stdio başlangıcı.
+
+Çıkış kanıtı: F1'in güvenle üzerine inşa edildiği MVP core ve regression seti.
+
+### F1 — Local-first Desktop MVP
+
+Durum: TAMAMLANDI
+
+- [x] Kalıcı CPU-only model, terminal sohbet ekranı, scroll/input/paste davranışı ve masaüstü bildirimleri.
+- [x] Read-only workspace/coding/docs capability'leri ve approval-gated not oluşturma.
+- [x] İlk security scope contractı, teacher intake contractı, MCP transportu ve 51 testlik regression suite.
+
+Çıkış kanıtı: `jarvis` günlük metin sohbeti ve ilk governed capability'leri local-first olarak çalıştırır.
+
+### F2 — Günlük masaüstü ürünü ve multimodal ekler
+
+Durum: SIRADAKİ
+
+Amaç: Terminal MVP'yi korurken, gerçek günlük kullanım için native masaüstü deneyimi, dosya/görsel ekleri ve ölçülebilir UX kalitesi oluşturmak.
+
+#### F2.0 — MVP stabilizasyonu ve ürün kalite kapısı
 
 Durum: BEKLENİYOR
 
@@ -74,7 +133,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
 
 Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 senaryoda tekrar üretilebilir; yeni dilimler bu regression setini geçmeden birleşmez.
 
-### P2.1 — Native desktop kabuğu ve gerçek görsel ekler
+#### F2.1 — Native desktop kabuğu ve gerçek görsel ekler
 
 Durum: BEKLENİYOR — İlk ürün önceliği
 
@@ -89,7 +148,7 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
 
 Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.
 
-### P2.2 — Kullanıcı profili, kontrollü bellek ve gerçek RAG
+### F3 — Kullanıcı profili, kontrollü bellek ve gerçek RAG
 
 Durum: BEKLENİYOR
 
@@ -104,7 +163,7 @@ Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir b
 
 Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak gösteren cevap alabilir ve saklanan tüm kişisel veriyi görüntüleyip silebilir.
 
-### P2.3 — Güvenli coding workbench
+### F4 — Güvenli coding ve yerel iş workbench'i
 
 Durum: BEKLENİYOR
 
@@ -114,10 +173,12 @@ Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız ona
 - [ ] Isolated worker: workspace snapshot, allowlist komutları, CPU/RAM/süre limiti, ağ kapalı çalışma ve iptal/cleanup handle'ları.
 - [ ] Patch uygulama onayı: dosya bazlı scope, diff hash, explicit approval, rollback/snapshot ve verifier evidence.
 - [ ] Coding evaluation seti: küçük hatalar, test ekleme, yanlış patch reddi ve existing-test regression senaryoları.
+- [ ] Yerel üretkenlik tool'ları: takvim, not, dosya düzenleme gibi her yeni tool için ayrı capability manifest, minimum scope, preview, approval ve verifier zinciri.
+- [ ] Çok-adımlı workflow runner: planı kullanıcıya gösterme, her yan etkili adımdan önce policy/approval, iptal edildiğinde cleanup ve audit özeti.
 
 Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı onayı olmadan yazmaz; onay sonrası yalnız scope içindeki patch'i uygular ve test kanıtını döndürür.
 
-### P2.4 — Sesli etkileşim (push-to-talk ile başlar)
+### F5 — Sesli etkileşim ve algı arayüzü
 
 Durum: BEKLENİYOR
 
@@ -127,10 +188,11 @@ Amaç: Her zaman dinleyen bir sistem yerine açık, mahremiyeti koruyan push-to-
 - [ ] Push-to-talk, ses seviyesi göstergesi, transkript doğrulama/düzenleme ve normal `InputType::Voice` pipeline'ı.
 - [ ] Yerel TTS seçeneği, ses seçimi ve açık kapatma anahtarı.
 - [ ] E2E: mikrofon izin reddi, model yok, sessizlik, Türkçe transkript, sesli tool approval ve kayıt silme testleri.
+- [ ] Wake word yalnız ayrı opt-in deney olarak: lokal işleme, görünür dinleme göstergesi, fiziksel/klavye kill switch ve ham ses retention=off varsayılanı.
 
 Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek transkripti görür/onaylar ve yanıtı isterse sesli duyar.
 
-### P2.5 — Model kalite programı ve yalnız kanıt sonrası adaptasyon
+### F6 — Model kalite, dataset governance ve adaptasyon
 
 Durum: BEKLENİYOR
 
@@ -141,12 +203,14 @@ Amaç: Sohbeti hard-code etmek yerine ölçmek; gerekiyorsa küçük, geri alın
 - [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
 - [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
 - [ ] Old-vs-new regresyonu ve tek komutla model/adaptor rollback.
+- [ ] Kullanıcı geri bildirimi intake'i: beğen/beğenme veya düzeltme sinyali doğrudan eğitim verisi olmaz; sensitivity, provenance ve human review kuyruğundan geçer.
+- [ ] Prompt/model konfigürasyon registry'si: her deneyin model hash'i, prompt sürümü, benchmark sonucu ve rollback hedefi kaydedilir.
 
 Tamamlanma ölçütü: Her model veya adapter değişikliği, sürümlü eval'de hedef metriği iyileştirir ve güvenlik/latency regresyonu üretmez; aksi halde kullanılmaz.
 
-### P2.6 — Yetkili security/pentest hazırlığı
+### F7 — Yetkili security/pentest hazırlığı
 
-Durum: BEKLENİYOR — P2.3 izolasyonundan önce execution açılmaz
+Durum: BEKLENİYOR — F4 izolasyonundan önce execution açılmaz
 
 Amaç: “sızma testi yapabilen” değil, yalnız yazılı yetki ve teknik sınırlar altında güvenli değerlendirme yapabilen bir capability oluşturmak.
 
@@ -157,27 +221,52 @@ Amaç: “sızma testi yapabilen” değil, yalnız yazılı yetki ve teknik sı
 
 Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda üretilen her bulgu kanıt ve audit ile ilişkilidir. Bu gate geçmeden aktif test capability'si eklenmez.
 
-### P2.7 — Operasyonel olgunluk ve isteğe bağlı remote
+### F8 — MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile
 
 Durum: BEKLENİYOR
 
-- [ ] Metrikler: latency, model yükleme, token üretimi, başarı/verification oranı, iptal ve kaynak kullanımı.
-- [ ] Backup/retention komutları, config/model/dataset rollback ve audit export/witness stratejisi.
-- [ ] Remote/mobile yalnız explicit device pairing, public key, nonce/replay koruması, revoke ve server-side kill switch'ten sonra ele alınır.
+- [ ] MCP production hardening: protocol sürümleme, extension/tool manifest imzası, credential/raw-secret response filtresi, untrusted output provenance ve tool permission ekranı.
+- [ ] Yerel entegrasyonlar: takvim, e-posta, mesajlaşma veya dosya sağlayıcısı yalnız explicit OAuth/secret store, minimum scope, dry-run/preview, approval ve revoke ile eklenir.
+- [ ] Plugin/skill ekosistemi: signed/allowlisted paketler, capability sandbox profile, sürüm uyumluluğu, kilitleme dosyası ve tek tıkla devre dışı bırakma.
+- [ ] Remote/mobile yalnız explicit device pairing, public key, nonce/replay koruması, revoke, bağlantı şifreleme ve server-side kill switch'ten sonra ele alınır.
+- [ ] Cross-device handoff: task scope'u genişletmeyen typed handoff, offline queue/conflict policy ve alıcı cihazda yeniden policy değerlendirmesi.
 
-Tamamlanma ölçütü: Yerel desktop sürümü güvenilir olmadan hiçbir remote device yetki veya kişisel bellek erişimi almaz.
+Tamamlanma ölçütü: Yerel desktop sürümü güvenilir olmadan hiçbir eklenti, entegrasyon veya remote cihaz tool yetkisi ya da kişisel bellek erişimi almaz.
+
+### F9 — Operasyonel olgunluk, release ve uzun dönem bakım
+
+Durum: BEKLENİYOR — F2 ile birlikte başlar, ürün yayınından önce kapanır
+
+- [ ] Release pipeline: format, test, clippy, dependency/security denetimi, release build, migration kontrolü ve E2E smoke'u tek raporda birleştirme.
+- [ ] Metrikler: latency, model yükleme, token üretimi, başarı/verification oranı, iptal, hata sınıfı, CPU/RAM/disk kullanımı; kişisel içerik toplamadan yerel telemetry.
+- [ ] Gerçek timeout/cancellation worker: process group, cleanup handles, resource quota, watchdog ve stuck-task recovery.
+- [ ] Backup/retention komutları, config/model/dataset rollback, audit export/witness stratejisi ve restore tatbikatı.
+- [ ] Sürüm/migration yönetimi: semantic version, changelog, config migration, compatibility check ve kullanıcı verisi geri dönüş planı.
+- [ ] Güvenlik bakım döngüsü: bağımlılık güncellemesi, secret scanning, threat-model review, penetration-test bulgu takibi ve responsible disclosure kanalı.
+- [ ] Kullanıcı kabul/release gate: offline çalışma, veri silme/export, model kapatma, erişilebilirlik, Türkçe UX ve performans hedefleri için checklist.
+
+Tamamlanma ölçütü: Yeni sürüm kurulabilir, geri alınabilir, yedekten döndürülebilir ve kritik kullanıcı akışları kanıtlı biçimde çalışır.
+
+### F10 — Kontrollü araştırma ve uzun vadeli evrim
+
+Durum: BEKLENİYOR — v1 teslimi değildir
+
+- [ ] Daha büyük/özel modeller, çoklu ajan koordinasyonu, federated/on-device learning ve ileri perception yalnız benchmark + threat model + maliyet değerlendirmesi sonrası deney dalında değerlendirilir.
+- [ ] Her araştırma deneyi ana sürümden feature flag, ayrı artifact ve rollback ile ayrılır; kullanıcı verisi deney setine varsayılan olarak girmez.
+- [ ] Başarılı deneyler yalnız F6 eval kapısını ve F9 release kapısını geçerse ana ürüne taşınır.
 
 ### Önerilen uygulama sırası
 
-1. **P2.0 stabilizasyonu** — önce eldeki kullanım hatalarını test edilebilir hale getiririz.
-2. **P2.1 native desktop + vision** — fotoğraf/dosya ihtiyacını ve terminal sınırlarını doğrudan çözer.
-3. **P2.2 memory + RAG** — kişiselleşme ve dokümanlarla gerçek çalışma bu katmandan gelir.
-4. **P2.3 coding workbench** — sadece izolasyon ve onay temeli üstünde.
-5. **P2.4 voice** — arayüz temelinin üzerine eklenir.
-6. **P2.5 quality/LoRA** — hangi eğitimin gerçekten gerekli olduğunu benchmark gösterdikten sonra.
-7. **P2.6 security** ve **P2.7 remote** — en son, çünkü hata maliyetleri daha yüksektir.
+1. **F2.0 stabilizasyonu** — önce eldeki kullanım hatalarını test edilebilir hale getiririz.
+2. **F2.1 native desktop + vision** — fotoğraf/dosya ihtiyacını ve terminal sınırlarını doğrudan çözer.
+3. **F3 memory + RAG** — kişiselleşme ve dokümanlarla gerçek çalışma bu katmandan gelir.
+4. **F4 coding/workflow workbench** — sadece izolasyon ve onay temeli üstünde.
+5. **F5 voice** — arayüz temelinin üzerine eklenir.
+6. **F6 quality/LoRA** — hangi eğitimin gerçekten gerekli olduğunu benchmark gösterdikten sonra.
+7. **F7 security** ve **F8 integrations/remote** — en son, çünkü hata maliyetleri daha yüksektir.
+8. **F9 release/operations** — her fazda yürür; v1 yayınından önce zorunlu olarak kapanır.
 
-İlk somut Phase 2 işi önerisi: P2.0'ın küçük regresyon paketiyle birlikte P2.1'in native desktop/attachment contract spike'ı. Vision modeli indirme noktasına geldiğimizde burada durup kullanıcıdan açık onay alınır.
+İlk somut iş: F2.0'ın küçük regresyon paketiyle birlikte F2.1'in native desktop/attachment contract spike'ı. Vision modeli indirme noktasına geldiğimizde burada durup kullanıcıdan açık onay alınır.
 
 ---
 
@@ -208,7 +297,7 @@ Bu dilim MVP'nin yetki sınırlarını genişletmez. Amaç, ilk günlük kullan�
 - [x] Terminal metin düzenleme kısayolları
   - Yapılan: Bracketed paste ve mouse capture etkinleştirildi; `Ctrl+V` Wayland panosundan, terminalin native paste olayı ise doğrudan taslağa ekleniyor. `Ctrl+Backspace`/`Ctrl+W` önceki kelimeyi ve ayırıcı boşluklarını, `Ctrl+U` taslağın tamamını siler; mouse tekerleği history scrollbar'ını hareket ettirir.
   - Sonuç: Çok satırlı yapıştırmalar istemeden mesaj göndermez; boşluklar güvenli biçimde tek satır taslağa dönüştürülür ve UTF-8 Türkçe metin sınırları korunur. Klavye ve mouse ile geçmiş, model yanıtı beklenirken de gezilebilir.
-- Vision attachment dilimi MVP dışındadır; ayrıntılı uygulama sırası ve güvenlik gate'i **P2.1 — Native desktop kabuğu ve gerçek görsel ekler** altında planlandı.
+- Vision attachment dilimi MVP dışındadır; ayrıntılı uygulama sırası ve güvenlik gate'i **F2.1 — Native desktop kabuğu ve gerçek görsel ekler** altında planlandı.
 - [x] Approval UX'in yeni ekrana taşınması
   - Yapılan: `/approvals`, `/approve`, `/approve <task-id>`, `/cancel`, `/cancel <task-id>` komutları TUI'ye bağlandı.
   - Sonuç: Kalıcı işlem onayı, eski satır CLI'sındaki güvenlik contractını koruyor.
@@ -570,7 +659,7 @@ Durum: BEKLENİYOR
 - [x] 10.7 SQLite snapshot ve transaction-consistent backup (ilk sürüm)
   - Kanıt: `sqlite_backup_is_consistent_and_never_overwrites` unit testi.
 - [x] 10.8 RUNNING task recovery → INTERRUPTED (MVP)
-  - Kanıt: SQLite startup recovery testleri; RECOVERING worker semantics Phase 2’dedir.
+  - Kanıt: SQLite startup recovery testleri; RECOVERING worker semantics F4/F9 kapsamındadır.
 - [ ] 10.9 Model/dataset/config rollback
 
 ---
@@ -620,7 +709,7 @@ Durum: TAMAMLANDI — 13 Ağustos 2026
 - [x] Teacher escalation için güvenli placeholder/adapter
   - Kanıt: private context için approval-required contract testi; bu placeholder cloud provider çağrısı yapmaz.
 - [x] İlk MCP vertical slice (stdio JSON-RPC)
-  - Sınır: External MCP server registry/discovery ve untrusted response provenance Phase 2’dedir.
+  - Sınır: External MCP server registry/discovery ve untrusted response provenance F8 kapsamındadır.
 - [x] Development plan güncel
 - [x] Kritik security testleri geçiyor (MVP)
   - Kanıt: policy/model/MCP bypass, approval scope/replay, path traversal, sandbox profile, audit tampering ve pentest scope unit testleri.
@@ -637,7 +726,7 @@ Desktop MVP tamamlandı. Sistem CLI/HUD/voice-transcript veya MCP stdio isteğin
 routing yapıyor, policy kararı veriyor, yedi kayıtlı capability’yi controlled runtime’da çalıştırıyor, evidence/verifier sonucu çıkarıyor,
 task state güncelliyor ve SQLite’a task/approval/audit yazıyor. Structured correlation log, SHA-256 audit chain, zero-trust workspace
 content, teacher privacy gate, approval/resume/cancel ve CPU-only local model çalışıyor. Gerçek sandbox worker, derin retrieval/memory,
-eğitim/fine-tuning, advanced pentest ve mobile/remote Phase 2+ kapsamındadır.
+eğitim/fine-tuning, advanced pentest ve mobile/remote F3–F8 kapsamındadır.
 
 Son doğrulama komutları:
 
@@ -649,7 +738,7 @@ printf 'system health\ndosya oku: Cargo.toml\nnot oluştur\nunknown\nexit\n' | c
 
 Sonuç: 51 test geçti; tool intentleri deterministic/policy-gated, serbest doğal sohbet ise local modelin bounded session-history taşıyan, native user/assistant rollü data-only conversation path’inden yürür. Qwen3-8B CPU-only çalışır; sohbet çıktısı tool veya policy authority kazanmaz ve reasoning kapalıdır. SQLite migration v3, restart recovery, overwrite-safe snapshot, SHA-256 audit-chain, correlation log, zero-trust workspace content, teacher privacy gate, MCP stdio transportu, coding/docs ve HUD/voice basics kanıtlandı. İlk platform Linux-first desktop terminal UI’dır.
 
-### MVP sonrası rota — Phase 2’ye kontrollü geçiş
+### Tarihsel MVP sonrası rota — ana faz haritası tarafından kapsandı
 
 1. **RAG’i gerçek retrieval’a taşı:** ContentRef provenance, hassas dosya exclusion, SQLite metadata index ve context budget.
 2. **Coding agent güvenliği:** isolated worker içinde test/check/diff üretme; patch preview + explicit approval + verifier.
@@ -657,4 +746,4 @@ Sonuç: 51 test geçti; tool intentleri deterministic/policy-gated, serbest doğ
 4. **Pentest readiness:** imzalı scope manifest, CIDR/DNS/egress enforcement ve network-scoped worker; ancak sonra SAFE capability’ler.
 5. **Operasyonel sertleştirme:** gerçek timeout/cancel worker’ı, backup command/retention, metric dashboard ve audit witness/export.
 
-Phase 2’ye geçmeden önce MVP’nin güvenlik/kalite gate’i yeniden çalıştırılır; fine-tuning ve advanced pentest aynı anda başlatılmaz.
+Bu ilk taslak rota, yukarıdaki F2–F9 ana faz haritasına taşındı. Her yeni faza geçmeden önce MVP'nin güvenlik/kalite gate'i yeniden çalıştırılır; fine-tuning ve advanced pentest aynı anda başlatılmaz.
