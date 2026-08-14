@@ -3512,6 +3512,42 @@ mod tests {
     }
 
     #[test]
+    fn attachment_reaches_the_model_as_user_data_without_a_local_path() {
+        let root = temporary_workspace("attachment-context");
+        let image_path = root.join("private-photo.png");
+        image::RgbaImage::new(2, 2)
+            .save(&image_path)
+            .expect("attachment fixture image");
+        let attachment = inspect_local_image(&image_path).expect("attachment intake");
+        let provider = ContextCapturingProvider::default();
+        let mut runtime = Runtime::new();
+        let request = Request {
+            schema_version: 1,
+            request_id: "attachment-context".into(),
+            input_type: InputType::Gui,
+            content: "Bu görsel hakkında ne biliyorsun?".into(),
+            attachments: vec![attachment],
+        };
+        let (task, _, verification) = runtime.handle_with_provider(request, &provider);
+        assert_eq!(task.capability, "conversation.reply");
+        assert_eq!(verification.status, VerifyStatus::Pass);
+        let messages = provider.messages.lock().expect("captured messages");
+        let attachment_message = messages
+            .iter()
+            .find(|message| message.content.contains("attachment-data"))
+            .expect("attachment descriptor passed as data");
+        assert_eq!(attachment_message.role, "user");
+        assert!(!attachment_message
+            .content
+            .contains(&image_path.display().to_string()));
+        assert!(attachment_message
+            .content
+            .contains("Image pixels are not available"));
+        drop(messages);
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
     fn controlled_memory_requires_approval_is_retrievable_and_can_be_deleted() {
         let store = SqliteStore::in_memory().expect("sqlite schema");
         let mut runtime = Runtime::with_store(store);

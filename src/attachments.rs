@@ -372,4 +372,19 @@ mod tests {
         attachment.original_name = "picture.png".into();
         validate_attachment(&attachment).expect("record validation only checks local contract");
     }
+
+    #[test]
+    fn model_descriptor_never_exposes_the_local_path_or_image_bytes() {
+        let path = temporary_file(
+            "private-location",
+            &valid_image_bytes(AttachmentKind::Png, 3, 2),
+        );
+        let attachment = inspect_local_image(&path).expect("valid PNG accepted");
+        let descriptor = attachment.untrusted_descriptor();
+        let raw_png_prefix = String::from_utf8_lossy(&[0x89, b'P', b'N', b'G']);
+        assert!(descriptor.contains(&attachment.original_name));
+        assert!(!descriptor.contains(&attachment.canonical_path.display().to_string()));
+        assert!(!descriptor.contains(raw_png_prefix.as_ref()));
+        fs::remove_file(path).expect("fixture cleanup");
+    }
 }
