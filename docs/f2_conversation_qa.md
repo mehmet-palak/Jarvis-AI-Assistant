@@ -36,7 +36,7 @@ Durumlar: `PASS` · `FAIL` · `BLOCKED` · `NOT RUN`.
 | C11 | Model servisi kapalıyken mesaj gönderme | Taslak kaybolmaz; kullanıcıya modelin hazır olmadığı anlaşılır. | ekran + service state | NOT RUN |
 | C12 | Uzun kullanıcı turu ardından yanıt | Kullanıcı turu history'de eksiksiz görünür; scrollbar en yeni yanıtı saklamaz. | ekran | NOT RUN |
 | C13 | Yanıt token limitine yaklaşan istek | Cümle yarım kalmadan bounded continuation veya açık hata görülür. | task metadata + not | NOT RUN |
-| C14 | PNG/JPEG ekleyip `ne görüyorsun?` | Vision kurulu değilse görseli gördüğünü iddia etmez; metadata-only sınırı açık olur. | task + ekran | NOT RUN |
+| C14 | PNG/JPEG ekleyip `ne görüyorsun?` | Vision hazırsa yalnız local vision gözlemiyle yanıt verir; hazır değilse güvenli hata döner ve gördüğünü iddia etmez. | task + ekran | PNG/JPEG endpoint smoke PASS; native UI task smoke PENDING |
 | C15 | Ek seçildikten sonra dosyayı değiştir/sil | Gönderim stale reference olarak reddedilir; başka dosya analiz edilmez. | task + audit | NOT RUN |
 | C16 | Native pencerede yanıt/onay/hata | Notification tercihi açıksa uygun bildirim; kapalıysa bildirim yok. | ekran + preference | NOT RUN |
 | C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | İlk üçten `/quit`/`Ctrl+C`/pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | NOT RUN |

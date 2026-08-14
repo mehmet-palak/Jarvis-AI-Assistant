@@ -8,13 +8,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
     default_desktop_preferences_path, inspect_local_attachment, load_desktop_preferences,
     save_desktop_preferences, AttachmentRef, DesktopPreferences, InputType, LlamaServerProvider,
-    Request, Runtime, SqliteStore, TaskState, ThemePreference,
+    LlamaVisionServerProvider, Request, Runtime, SqliteStore, TaskState, ThemePreference,
+    VisionProvider,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +107,7 @@ fn acquire_desktop_instance_lock(path: PathBuf) -> Result<DesktopInstanceLock, S
 struct JarvisDesktop {
     runtime: Arc<Mutex<Runtime>>,
     provider: LlamaServerProvider,
+    vision: LlamaVisionServerProvider,
     receiver: mpsc::Receiver<WorkerReply>,
     sender: mpsc::Sender<WorkerReply>,
     messages: Vec<Message>,
@@ -129,6 +131,7 @@ impl JarvisDesktop {
     fn new(
         runtime: Arc<Mutex<Runtime>>,
         provider: LlamaServerProvider,
+        vision: LlamaVisionServerProvider,
         initial_status: String,
         context: &egui::Context,
     ) -> Self {
@@ -159,6 +162,7 @@ impl JarvisDesktop {
         Self {
             runtime,
             provider,
+            vision,
             receiver,
             sender,
             messages: vec![Message {
@@ -318,7 +322,7 @@ impl JarvisDesktop {
                 self.previews
                     .insert(attachment.attachment_id.clone(), preview);
                 self.status = format!(
-                    "Görsel hazır: {} • {}×{} • gönderimden önce kaldırılabilir.",
+                    "Görsel hazır: {} • {}×{} • gönderildiğinde yalnız local vision sunucusu kullanılır.",
                     attachment.original_name, attachment.width, attachment.height
                 );
                 self.queued_attachments.push(attachment);
@@ -341,6 +345,9 @@ impl JarvisDesktop {
         }
         self.draft.clear();
         let attachments = std::mem::take(&mut self.queued_attachments);
+        let needs_vision = attachments
+            .iter()
+            .any(|attachment| attachment.kind.is_image());
         let attachment_summary = if attachments.is_empty() {
             String::new()
         } else {
@@ -363,12 +370,28 @@ impl JarvisDesktop {
             content: "Düşünüyorum…".into(),
         });
         self.pending = true;
-        self.status = "JARVIS yanıt üretiyor…".into();
+        self.status = if needs_vision {
+            "Görsel analiz hazırlanıyor; yalnız local vision sunucusu kullanılacak…".into()
+        } else {
+            "JARVIS yanıt üretiyor…".into()
+        };
         let sender = self.sender.clone();
         let runtime = Arc::clone(&self.runtime);
         let provider = self.provider.clone();
+        let vision = self.vision.clone();
         let notifications_enabled = self.preferences.notifications_enabled;
         std::thread::spawn(move || {
+            let vision_available = if needs_vision {
+                ensure_local_vision_server(&vision).is_ok()
+            } else {
+                false
+            };
+            let mut vision_for_request = vision;
+            if !vision_available {
+                // Return the standard privacy-safe Runtime error promptly if service startup
+                // fails, rather than holding the UI for the full image-analysis timeout.
+                vision_for_request.timeout_seconds = 1;
+            }
             let request = Request {
                 schema_version: 1,
                 request_id: format!(
@@ -385,12 +408,27 @@ impl JarvisDesktop {
             let (task, tool, verification) = runtime
                 .lock()
                 .expect("JARVIS runtime lock poisoned")
-                .handle_with_provider(request, &provider);
+                .handle_with_provider_and_vision(
+                    request,
+                    &provider,
+                    needs_vision.then_some(&vision_for_request),
+                );
             let sources = tool
                 .evidence
                 .iter()
-                .filter_map(|evidence| evidence.strip_prefix("workspace.citation:"))
-                .map(|source| format!("• {source}"))
+                .filter_map(|evidence| {
+                    evidence
+                        .strip_prefix("workspace.citation:")
+                        .map(|source| format!("• {source}"))
+                        .or_else(|| {
+                            evidence
+                                .strip_prefix("vision.analysis:")
+                                .filter(|attachment_id| *attachment_id != "unavailable")
+                                .map(|attachment_id| {
+                                    format!("• Local vision analizi: {attachment_id}")
+                                })
+                        })
+                })
                 .collect();
             let content = tool.error.clone().unwrap_or(tool.output);
             let notification = desktop_notification(task.state, &content, notifications_enabled);
@@ -678,7 +716,7 @@ impl JarvisDesktop {
         if !self.queued_attachments.is_empty() {
             ui.colored_label(
                 COLOR_GOLD,
-                "Görseller vision kurulana kadar; belgeler ise ayrı RAG onayı verilene kadar yalnız doğrulanmış metadata olarak taşınır.",
+                "Görseller gönderildiğinde yalnız ayrı local vision sunucusuna gider; belgeler ayrı RAG onayı verilene kadar metadata olarak kalır.",
             );
         }
         let response = ui.add(
@@ -1065,16 +1103,52 @@ fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
     }
 }
 
-fn stop_local_model_server() -> Result<(), String> {
+fn ensure_local_vision_server(provider: &LlamaVisionServerProvider) -> Result<(), String> {
+    let mut health_provider = provider.clone();
+    health_provider.timeout_seconds = 1;
+    if health_provider.runtime_state() == jarvis_core::ModelRuntimeState::Ready {
+        return Ok(());
+    }
     let status = Command::new("systemctl")
-        .args(["--user", "stop", "jarvis-llama.service"])
+        .args(["--user", "start", "jarvis-vision.service"])
         .status()
-        .map_err(|error| format!("model sunucusu durdurulamadı: {error}"))?;
-    if status.success() {
+        .map_err(|error| format!("vision service başlatılamadı: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "vision service başlatılamadı (systemctl: {status})"
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        if health_provider.runtime_state() == jarvis_core::ModelRuntimeState::Ready {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err("vision service zamanında hazır olmadı".into())
+}
+
+fn stop_local_model_server() -> Result<(), String> {
+    let mut failures = Vec::new();
+    for service in ["jarvis-llama.service", "jarvis-vision.service"] {
+        match Command::new("systemctl")
+            .args(["--user", "stop", service])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output)
+                if service == "jarvis-vision.service"
+                    && String::from_utf8_lossy(&output.stderr).contains("not loaded") => {}
+            Ok(output) => failures.push(format!("{service} (systemctl: {})", output.status)),
+            Err(error) => failures.push(format!("{service}: {error}")),
+        }
+    }
+    if failures.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "model sunucusu durdurulamadı (systemctl: {status})"
+            "model sunucuları durdurulamadı: {}",
+            failures.join(", ")
         ))
     }
 }
@@ -1143,6 +1217,7 @@ fn main() -> eframe::Result<()> {
     .expect("JARVIS SQLite store açılamadı");
     let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
     let provider = LlamaServerProvider::local_default();
+    let vision = LlamaVisionServerProvider::local_default();
     let initial_status = ensure_local_model_server(&provider);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1157,6 +1232,7 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(JarvisDesktop::new(
                 runtime,
                 provider,
+                vision,
                 initial_status,
                 &creation_context.egui_ctx,
             )))

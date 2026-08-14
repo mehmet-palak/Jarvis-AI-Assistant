@@ -1,0 +1,17 @@
+[Unit]
+Description=JARVIS local CPU vision model
+After=default.target
+ConditionPathExists=%h/jarvis/models/Qwen2.5-VL-3B-Instruct-GGUF/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf
+ConditionPathExists=%h/jarvis/models/Qwen2.5-VL-3B-Instruct-GGUF/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jarvis/jarvis
+ExecStart=%h/jarvis/third_party/llama.cpp/build-cpu/bin/llama-server -m %h/jarvis/models/Qwen2.5-VL-3B-Instruct-GGUF/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf --mmproj %h/jarvis/models/Qwen2.5-VL-3B-Instruct-GGUF/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf --no-mmproj-offload --image-min-tokens 1024 -ngl 0 -t 6 -c 2048 -np 1 --host 127.0.0.1 --port 8089 --cors-origins localhost --no-cors-credentials --no-webui
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+Nice=5
+
+[Install]
+WantedBy=default.target

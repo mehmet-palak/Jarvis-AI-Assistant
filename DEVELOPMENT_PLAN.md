@@ -153,7 +153,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
 - [x] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
   - Şablon: [docs/f2_bug_report_template.md](docs/f2_bug_report_template.md). Hassas sohbet/ek verisi yerine redakte özet ve correlation ID kullanılır.
 - [x] Tek release komutu: format, test, clippy, dependency check, release build, servis health, kritik E2E smoke ve özet rapor.
-  - Kanıt: `bash scripts/release_check.sh` offline format/test/Clippy/release build ile izole geçici SQLite üzerinde MCP `system.health` PASS ve unknown-tool DENY smoke çalıştırır. `--with-service` yalnız zaten açık loopback model servisinin health kontrolünü ekler; model başlatmaz.
+  - Kanıt: `bash scripts/release_check.sh` offline format/test/Clippy/release build ile izole geçici SQLite üzerinde MCP `system.health` PASS ve unknown-tool DENY smoke çalıştırır. `--with-service` text model health'ini, `--with-vision` kurulu text + vision loopback health'ini ekler; hiçbiri modeli başlatmaz.
 - [ ] F2.0 exit review: açık P0/P1 kullanım hatası kalmadığının manuel kabulü.
 
 Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 senaryoda tekrar üretilebilir; yeni dilimler bu regression setini geçmeden birleşmez.
@@ -180,13 +180,16 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
   - Kanıt: PNG/JPEG magic/header + full decoder doğrulaması, 10 MiB/20 MP limiti, SHA-256 ve bozuk/stale dosya testleri.
 - [x] Metin/doküman ekleri: TXT, Markdown ve PDF ilk aşamada yalnız güvenli metadata ile seçilir; ham içerik ayrı RAG ingestion/onay akışı olmadan modele veya tool'a taşınmaz.
   - Kanıt: canonical path, MIME/UTF-8/PDF magic, 5 MiB limiti, SHA-256, stale-reference reddi; descriptor path/ham belge metnini taşımaz ve injection metni runtime context testinde görünmez.
-- [ ] Vision model kararı: CPU uyumlu multimodal GGUF + eşleşen `mmproj` adayları, lisans, disk/RAM/latency karşılaştırması. **İndirme ancak kullanıcı onayından sonra.**
+- [x] Vision model kararı: CPU uyumlu multimodal GGUF + eşleşen `mmproj` adayları, lisans, disk/RAM/latency karşılaştırması. **İndirme ancak kullanıcı onayından sonra.**
 
 > Kullanıcı kararı — 14 Ağustos 2026: normal geliştirme indirimi önce boyutu bildirilerek **en fazla 100–200 MB** olabilir. Vision GGUF (yaklaşık 2–4 GB) ve `mmproj` (yaklaşık 0.4–1 GB) şimdilik ertelendi; birkaç saat sonraki durum güncellemesinde kullanıcıya yeniden hatırlatılacak. Bu dosyalar için açık “indir” onayı olmadan hiçbir indirme başlatılmaz.
-- [ ] Vision service: text modelinden ayrı loopback-only endpoint, health/lifecycle, attachment byte/path passing ve timeout/cancel sınırı.
-- [ ] Vision response policy: yalnız görüntü açıklaması/analizi; görüntü OCR metni untrusted data, tool authority yok; desteklenmeyen/hassas içerik için açık hata.
+- [x] Vision service: text modelinden ayrı loopback-only endpoint, health/lifecycle, attachment byte/path passing ve timeout/cancel sınırı.
+  - Kanıt: `jarvis-vision.service`, yalnız `127.0.0.1:8089`, `-ngl 0`, 6 CPU thread, CORS `localhost`/credentials kapalı; ek baytlarını yalnız bu endpoint alır. İlk görsel isteğinde başlar; `exit` ve native RAM düğmesi iki modeli de kapatır.
+- [x] Vision response policy: yalnız görüntü açıklaması/analizi; görüntü OCR metni untrusted data, tool authority yok; desteklenmeyen/hassas içerik için açık hata.
+  - Kanıt: vision system contractı, 96-token gözlem limiti, `VisionAnalysis` XML-escape + user-data envelope; PNG/JPEG dışı, stale veya erişilemeyen servis path-safe failure verir.
 - [ ] Attachment privacy UX: ek geçmişini görme, tekli/tüm ekleri silme, ek gönderilmeden önce local-only uyarısı ve export.
-- [ ] E2E: JPEG/PNG başarı; bozuk MIME, boyut/piksel limiti, stale dosya, model kapalı, injection/EXIF izolasyonu ve TUI fallback.
+- [x] E2E: JPEG/PNG başarı; bozuk MIME, boyut/piksel limiti, stale dosya, model kapalı, injection/EXIF izolasyonu ve TUI fallback.
+  - Kanıt: Rust attachment/vision regression testleri ve [F2 local vision smoke](docs/f2_vision_smoke_2026-08-14.md). Gerçek PNG ve JPEG endpoint smoke yalnız sistem örnekleriyle yapıldı; user path/ham byte text modele verilmedi, vision'a geçmeden önce EXIF/ancillary metadata'dan arındırılmış JPEG taşınır.
 
 Bu turda kanıtlanan alt dilim:
 
@@ -196,16 +199,16 @@ Bu turda kanıtlanan alt dilim:
 
 #### F2 güncel çalışma kaydı — henüz exit gate değildir
 
-- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 90 test, strict Clippy, release build ve izole MCP policy smoke çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
+- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, strict Clippy, release build ve izole MCP policy smoke çalıştırır. `--with-service` text model health'ini; `--with-vision` indirilmiş vision servisini de kontrol eder. Hiçbiri servis başlatmaz veya İnternet'e çıkmaz.
 - [x] TUI davranış regresyonu: çok satırlı paste, Türkçe/UTF-8 kelime silme, `Ctrl+V`, Wayland primary selection için mouse orta tuşu, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, terminal-control karakterleri, klavye/mouse scroll, `Home`/`End`, küçük terminalde scrollbar ve en yeni turun görünürlüğü testlere bağlandı.
 - [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde eski JARVIS HUD dilini izleyen teal/siyah merkez orb, sol sistem kontrolü ve sağ bağımsız sohbet konsolu sunar. Salt-okunur kartlar, ayrı composer, typing state, Türkçe harf farkını gözeten mesaj arama/rol filtresi, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, task-bound onay/red paneli, model-RAM kontrolü, stale-lock recovery'li ve sahiplik güvenli tek-pencere koruması, versioned yerel UI tercihleri (reset/export dahil) korunur. TUI davranışı değişmez; `jarvis --desktop` sibling release binary'sini başlatır. Pencereyi kapatmak servisi durdurmaz.
 - [x] Native bildirim contractı: kullanıcının notification tercihi kapalıysa hiçbir bildirim üretilmez; açıksa completed yanıt, `WaitingForUser` onayı ve failed/interrupted işlem için ayrı başlıklar test edilir. Notification daemon yoksa mevcut `notify-send` çağrısı best-effort kalır ve task sonucunu değiştirmez.
-- [x] Vision sınırı UX'i: TUI ve native composer seçilmiş PNG/JPEG için açıkça “metadata-only” sınırını gösterir; vision service/model kurulana dek text modelin piksel gördüğü izlenimi verilmez.
+- [x] Vision sınırı UX'i: TUI ve native composer seçilmiş PNG/JPEG için görselin yalnız ayrı local vision servisine gideceğini; normal chat modelinin ham piksel veya yerel path görmediğini açıkça belirtir.
 - [x] Doküman sınırı UX'i: TUI `/attach` ve native `Ctrl+O`, TXT/Markdown/PDF'yi seçebilir; belge içeriğinin modele veya tool'a gitmediğini, indekslemenin ayrı açık onaylı RAG akışı olduğunu belirtir.
 - [x] Çok dilli sohbet contractı: sistem prompt'u son kullanıcı mesajının dilini temel alır; Türkçe ve İngilizce doğal cevap istenir, kullanıcı istemedikçe çeviri/dil karışımı yapılmaz. Bu bir yanıt şablonu veya kullanıcıya özel kural değildir; gerçek çıktılar sürümlü QA setinde model kalitesi olarak ölçülür.
 - [x] Serbest metin tool yönlendirme sınırı: sohbet girdisi artık anahtar-kelime `if/else` ile capability'ye bağlanmaz. Tek model üretimi ya doğal yanıt ya da allowlist'teki tam capability kimliğini taşıyan dar bir intent envelope üretir; envelope registry, policy ve verifier tarafından bağımsız doğrulanır. Normal sohbet ek routing çağrısı veya yanıt şablonu kullanmaz.
-- [ ] Native UI Wayland/Hyprland gerçek smoke: açılış, resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması kullanıcı masaüstüsünde doğrulanacak.
-- [ ] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilecek model + `mmproj` olmadan görsel pikselleri modele verilemez; mevcut davranış güvenli metadata-only fallback'tir.
+- [ ] Native UI Wayland/Hyprland gerçek smoke: release binary açılışı ve HUD/composer görsel kontrolü PASS ([kayıt](docs/f2_native_wayland_smoke_2026-08-14.md)); resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması için kullanıcı kabul koşumu açık.
+- [x] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilen Qwen2.5-VL 3B Q4_K_M + `mmproj`, CPU-only ayrı loopback servisinde gerçek PNG smoke'undan geçti. Kanıt: [f2_vision_smoke_2026-08-14.md](docs/f2_vision_smoke_2026-08-14.md).
 
 Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.
 

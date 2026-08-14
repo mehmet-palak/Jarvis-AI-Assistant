@@ -4,8 +4,8 @@
 set -euo pipefail
 
 mode="${1:---offline}"
-if [[ "$mode" != "--offline" && "$mode" != "--with-service" ]]; then
-    printf 'Kullanım: bash scripts/release_check.sh [--offline|--with-service]\n' >&2
+if [[ "$mode" != "--offline" && "$mode" != "--with-service" && "$mode" != "--with-vision" ]]; then
+    printf 'Kullanım: bash scripts/release_check.sh [--offline|--with-service|--with-vision]\n' >&2
     exit 2
 fi
 
@@ -32,13 +32,18 @@ if ! grep -q '"capability":"unknown"' <<<"$smoke_output"; then
 fi
 printf '%s\n' 'MCP policy smoke: PASS'
 
-if [[ "$mode" == "--with-service" ]]; then
+if [[ "$mode" == "--with-service" || "$mode" == "--with-vision" ]]; then
     if ! command -v curl >/dev/null; then
         printf '%s\n' 'curl bulunamadı; loopback model health doğrulanamadı.' >&2
         exit 1
     fi
     curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8088/health >/dev/null
     printf '%s\n' 'Loopback model health: PASS'
+fi
+
+if [[ "$mode" == "--with-vision" ]]; then
+    curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8089/health >/dev/null
+    printf '%s\n' 'Loopback vision health: PASS'
 fi
 
 printf '%s\n' 'JARVIS local release gate: PASS'

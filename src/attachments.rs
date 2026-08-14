@@ -72,7 +72,7 @@ impl AttachmentRef {
             "document-metadata-only=\"true\"".into()
         };
         let availability = if self.kind.is_image() {
-            "Image pixels are not available to this text-only model."
+            "Image pixels are not available directly to this text-only model. A separate local vision analysis may provide an explicitly marked untrusted observation."
         } else {
             "Document content is not available to this model or any tool from this attachment queue."
         };

@@ -27,7 +27,7 @@ Komut hangi klasörden çalıştırılırsa çalıştırılsın bundled model ve
 - Kısayollar: `/help`, `/status`, `/clear`, `/approvals`
 - Tek bir işlem onay bekliyorsa `/approve` veya `/cancel`; birden fazla varsa `/approve <task-id>` / `/cancel <task-id>`
 - `/quit` veya `Ctrl+C`: yalnız sohbet ekranını kapatır; model arka planda RAM'de kalır.
-- `exit`: sohbet ekranını kapatır ve yerel model sunucusunu durdurur; RAM boşalır.
+- `exit`: sohbet ekranını kapatır; açık olan text ve vision model sunucularını durdurur, RAM boşalır.
 
 Hyprland'de terminali `Super + Q` ile kapatmak da sadece arayüzü sonlandırır; model sunucusu çalışmaya devam eder. Sonraki `jarvis` açılışı model hâlâ RAM'deyse doğrudan kullanır, değilse otomatik başlatır.
 
@@ -51,7 +51,7 @@ jarvis --desktop
 - Mesaj kartları düzenlenemez. Ortadaki arama alanı mevcut oturumda Türkçe büyük/küçük harf farkını gözetmeden arar; **Sen / JARVIS / Sistem** filtresiyle daraltılabilir.
 - Onay isteyen işler soldaki panelde task ID ile görünür; **Onayla** yalnız o task'ı core approval zincirinden geçirir, **Reddet** yan etkiyi çalıştırmadan iptal eder.
 - Tema, yazı ölçeği ve bildirim tercihi yalnız `~/.config/jarvis/desktop.json` içinde tutulur; ekrandan varsayılanlara döndürülebilir veya kullanıcı seçtiği konuma dışa aktarılabilir. Bildirim tercihi açıksa yanıt, onay bekleme ve işlem hatası bildirilir. Sohbet içeriği, ek dosya yolu veya kimlik bilgisi bu dosyaya yazılmaz.
-- `Ctrl+O` veya **Dosya ekle** ile PNG/JPEG/TXT/Markdown/PDF seçilir; önizleme ve kaldırma işlemi dosyayı silmez. Görsel pikselleri vision GGUF ve `mmproj` indirilene kadar, belge içeriği ise ayrı RAG onayı verilene kadar modele taşınmaz; her ikisi de yalnız doğrulanmış metadata olarak kalır.
+- `Ctrl+O` veya **Dosya ekle** ile PNG/JPEG/TXT/Markdown/PDF seçilir; önizleme ve kaldırma işlemi dosyayı silmez. PNG/JPEG gönderildiğinde piksel baytları yalnız ayrı local vision sunucusuna gider; normal chat modeline yerel yol veya ham piksel verilmez. Vision betimlemesi normal modele escaped, güvenilmeyen veri olarak iletilir. TXT/Markdown/PDF içeriği ise ayrı RAG onayı verilene kadar yalnız doğrulanmış metadata olarak kalır.
 
 ## Local model çalışma profili
 
@@ -72,6 +72,31 @@ systemctl --user status jarvis-llama.service
 systemctl --user stop jarvis-llama.service
 systemctl --user start jarvis-llama.service
 ```
+
+## Local vision çalışma profili
+
+Görsel ekler için text modelinden ayrı bir Qwen2.5-VL 3B GGUF sunucusu kullanılır. Servis yalnız
+ilk PNG/JPEG isteğinde başlatılır; text-only sohbetlerde RAM tüketmez.
+
+```text
+Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf + eşleşen mmproj
+CPU/RAM only: -ngl 0
+VRAM layer: 0
+Endpoint: 127.0.0.1:8089 (loopback only)
+Vision observation budget: 96 tokens
+```
+
+Kurulum deposundaki unit ile yapılır ve uygulama ilk görsel isteğinde otomatik başlatır:
+
+```bash
+bash scripts/install_vision_service.sh
+systemctl --user status jarvis-vision.service
+```
+
+Vision çıktısı nihai yanıt değildir; ayrı modelin kısa, güvenilmeyen gözlemidir. JARVIS normal
+sohbet modeli bunu bağlam verisi olarak kullanır. İlk farklı görsel CPU'da daha yavaş olabilir;
+ayrıntılı smoke ve ölçüm kaydı [f2_vision_smoke_2026-08-14.md](docs/f2_vision_smoke_2026-08-14.md)
+içindedir.
 
 Modelin tool veya policy yetkisi yoktur. Doğal sohbet modelden gelir; geçmiş, modele gerçek `user`/`assistant` rolleriyle ve tam konuşma çiftleri halinde iletilir. Son kullanıcı mesajı önceliklidir; kısa takip soruları yakın turlardan bağlam alır fakat önceki yanıtı gereksizce tekrar etmez. Kişisel bilgi veya tercih uygulama koduna gömülmez; bunun için sonraki dilimde kullanıcı profili/bellek katmanı eklenecektir. İzin gerektiren dosya değişiklikleri Policy Gate ve task-bound approval akışından geçer. Başka bir çalışma alanını okumak için `JARVIS_WORKSPACE_ROOT=/path/to/workspace` ayarlanabilir.
 
@@ -95,6 +120,8 @@ Kalıcı not işlemleri kullanıcı onayı bekler. Notlar `notes/` altında olu�
 bash scripts/release_check.sh
 # Model servisinin yalnız loopback health kontrolünü de eklemek için:
 bash scripts/release_check.sh --with-service
+# Text ve kurulu vision servislerinin ikisini de kontrol etmek için:
+bash scripts/release_check.sh --with-vision
 cargo run --offline --bin router_benchmark
 ```
 

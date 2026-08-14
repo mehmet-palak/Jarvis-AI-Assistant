@@ -14,7 +14,8 @@ use crossterm::{
 };
 use jarvis_core::{
     inspect_local_attachment, propose_memory, AttachmentRef, DataSensitivity, InputType,
-    LlamaServerProvider, MemoryNamespace, MemoryProposal, Request, Runtime, SqliteStore, TaskState,
+    LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, Request,
+    Runtime, SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -146,8 +147,9 @@ fn main() -> io::Result<()> {
     .expect("JARVIS SQLite store açılamadı");
     let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
     let provider = LlamaServerProvider::local_default();
+    let vision = LlamaVisionServerProvider::local_default();
     let startup_note = ensure_local_model_server(&provider);
-    run_tui(runtime, provider, startup_note)
+    run_tui(runtime, provider, vision, startup_note)
 }
 
 fn cli_requests_desktop() -> bool {
@@ -198,16 +200,58 @@ fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
     }
 }
 
-fn stop_local_model_server() -> Result<(), String> {
+/// Starts the separate CPU-only image server on demand. It stays loopback-only and is never
+/// needed for a text-only turn. A caller that receives `Err` still routes through Runtime so
+/// the user gets the standard path-safe vision failure instead of a fabricated answer.
+fn ensure_local_vision_server(provider: &LlamaVisionServerProvider) -> Result<(), String> {
+    let mut health_provider = provider.clone();
+    health_provider.timeout_seconds = 1;
+    if health_provider.runtime_state() == jarvis_core::ModelRuntimeState::Ready {
+        return Ok(());
+    }
     let status = Command::new("systemctl")
-        .args(["--user", "stop", "jarvis-llama.service"])
+        .args(["--user", "start", "jarvis-vision.service"])
         .status()
-        .map_err(|error| format!("model sunucusu durdurulamadı: {error}"))?;
-    if status.success() {
+        .map_err(|error| format!("vision service başlatılamadı: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "vision service başlatılamadı (systemctl: {status})"
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        if health_provider.runtime_state() == jarvis_core::ModelRuntimeState::Ready {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err("vision service zamanında hazır olmadı".into())
+}
+
+fn stop_local_model_server() -> Result<(), String> {
+    let mut failures = Vec::new();
+    for service in ["jarvis-llama.service", "jarvis-vision.service"] {
+        match Command::new("systemctl")
+            .args(["--user", "stop", service])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            // F2's optional vision unit may not yet be linked on a text-only installation.
+            // Stopping `exit` must still release the normal text model without reporting a false
+            // failure in that supported configuration.
+            Ok(output)
+                if service == "jarvis-vision.service"
+                    && String::from_utf8_lossy(&output.stderr).contains("not loaded") => {}
+            Ok(output) => failures.push(format!("{service} (systemctl: {})", output.status)),
+            Err(error) => failures.push(format!("{service}: {error}")),
+        }
+    }
+    if failures.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "model sunucusu durdurulamadı (systemctl: {status})"
+            "model sunucuları durdurulamadı: {}",
+            failures.join(", ")
         ))
     }
 }
@@ -215,6 +259,7 @@ fn stop_local_model_server() -> Result<(), String> {
 fn run_tui(
     runtime: Arc<Mutex<Runtime>>,
     provider: LlamaServerProvider,
+    vision: LlamaVisionServerProvider,
     startup_note: String,
 ) -> io::Result<()> {
     enable_raw_mode()?;
@@ -230,7 +275,7 @@ fn run_tui(
     let model_state = provider.runtime_state().as_str();
     let mut app = App::new(model_state);
     app.status = startup_note;
-    let result = event_loop(&mut terminal, runtime, provider, app);
+    let result = event_loop(&mut terminal, runtime, provider, vision, app);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -246,6 +291,7 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     runtime: Arc<Mutex<Runtime>>,
     provider: LlamaServerProvider,
+    vision: LlamaVisionServerProvider,
     mut app: App,
 ) -> io::Result<()> {
     let (sender, receiver) = mpsc::channel::<WorkerReply>();
@@ -343,7 +389,7 @@ fn event_loop(
             continue;
         }
         match key.code {
-            KeyCode::Enter => submit(&mut app, &runtime, &provider, &sender),
+            KeyCode::Enter => submit(&mut app, &runtime, &provider, &vision, &sender),
             KeyCode::Backspace => {
                 app.input.pop();
             }
@@ -463,6 +509,7 @@ fn submit(
     app: &mut App,
     runtime: &Arc<Mutex<Runtime>>,
     provider: &LlamaServerProvider,
+    vision: &LlamaVisionServerProvider,
     sender: &mpsc::Sender<WorkerReply>,
 ) {
     let input = app.input.trim().to_owned();
@@ -504,7 +551,7 @@ fn submit(
                         format!("{} KiB", attachment.byte_size.div_ceil(1024))
                     };
                     let availability = if attachment.kind.is_image() {
-                        "Mevcut text-only model görsel piksellerini analiz etmez; ek metadata olarak güvenle taşınır. Vision modeli kurulduğunda aynı contract görsel girdiye bağlanacak."
+                        "Görsel gönderildiğinde yalnız ayrı local vision sunucusuna gider; normal text modeline piksel veya yerel yol verilmez. Vision hazır değilse JARVIS güvenli hata verir ve görseli gördüğünü iddia etmez."
                     } else {
                         "Belge içeriği bu ek kuyruğundan modele veya araca verilmez; yalnız metadata güvenle taşınır. İndeksleme için ayrı, açık onaylı RAG akışı gerekir."
                     };
@@ -753,6 +800,9 @@ fn submit(
     // A newly submitted turn should always return the view to the newest conversation content.
     return_to_latest(&mut app.scroll);
     let attachments = std::mem::take(&mut app.attachments);
+    let needs_vision = attachments
+        .iter()
+        .any(|attachment| attachment.kind.is_image());
     let attachment_summary = if attachments.is_empty() {
         String::new()
     } else {
@@ -775,11 +825,27 @@ fn submit(
         content: "Düşünüyorum…".into(),
     });
     app.pending = true;
-    app.status = "JARVIS yanıt üretiyor…".into();
+    app.status = if needs_vision {
+        "Görsel analiz hazırlanıyor; yalnız local vision sunucusu kullanılacak…".into()
+    } else {
+        "JARVIS yanıt üretiyor…".into()
+    };
     let runtime = Arc::clone(runtime);
     let provider = provider.clone();
+    let vision = vision.clone();
     let sender = sender.clone();
     std::thread::spawn(move || {
+        let vision_available = if needs_vision {
+            ensure_local_vision_server(&vision).is_ok()
+        } else {
+            false
+        };
+        let mut vision_for_request = vision;
+        if !vision_available {
+            // A service startup failure should become the privacy-safe Runtime failure promptly,
+            // rather than leaving the UI waiting for the normal image-analysis timeout.
+            vision_for_request.timeout_seconds = 1;
+        }
         let request = Request {
             schema_version: 1,
             request_id: format!(
@@ -796,12 +862,25 @@ fn submit(
         let (task, tool, verification) = runtime
             .lock()
             .expect("JARVIS runtime lock poisoned")
-            .handle_with_provider(request, &provider);
+            .handle_with_provider_and_vision(
+                request,
+                &provider,
+                needs_vision.then_some(&vision_for_request),
+            );
         let sources = tool
             .evidence
             .iter()
-            .filter_map(|evidence| evidence.strip_prefix("workspace.citation:"))
-            .map(|source| format!("• {source}"))
+            .filter_map(|evidence| {
+                evidence
+                    .strip_prefix("workspace.citation:")
+                    .map(|source| format!("• {source}"))
+                    .or_else(|| {
+                        evidence
+                            .strip_prefix("vision.analysis:")
+                            .filter(|attachment_id| *attachment_id != "unavailable")
+                            .map(|attachment_id| format!("• Local vision analizi: {attachment_id}"))
+                    })
+            })
             .collect::<Vec<_>>();
         let content = tool.error.clone().unwrap_or(tool.output);
         let approval_pending = task.state == TaskState::WaitingForUser;
@@ -1163,7 +1242,7 @@ mod tests {
         submit, tui_exit_action, tui_notification, App, Message, MessageRole, TuiExitAction,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-    use jarvis_core::{LlamaServerProvider, Runtime, TaskState};
+    use jarvis_core::{LlamaServerProvider, LlamaVisionServerProvider, Runtime, TaskState};
     use ratatui::{backend::TestBackend, Terminal};
     use std::sync::{mpsc, Arc, Mutex};
 
@@ -1317,10 +1396,11 @@ mod tests {
     fn unavailable_model_keeps_the_user_draft_for_retry() {
         let runtime = Arc::new(Mutex::new(Runtime::new()));
         let provider = LlamaServerProvider::local_default();
+        let vision = LlamaVisionServerProvider::local_default();
         let (sender, _receiver) = mpsc::channel();
         let mut app = App::new("missing_executable");
         app.input = "Bu taslak kaybolmamalı".into();
-        submit(&mut app, &runtime, &provider, &sender);
+        submit(&mut app, &runtime, &provider, &vision, &sender);
         assert_eq!(app.input, "Bu taslak kaybolmamalı");
         assert!(!app.pending);
         assert!(app.status.contains("kutuda tutuluyor"));
