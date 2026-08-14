@@ -496,6 +496,12 @@ impl eframe::App for JarvisDesktop {
                     .retain(|attachment| attachment.attachment_id != attachment_id);
                 self.previews.remove(&attachment_id);
             }
+            if !self.queued_attachments.is_empty() {
+                ui.colored_label(
+                    Color32::from_rgb(205, 165, 65),
+                    "Vision modeli kurulana kadar ek görsel yalnız doğrulanmış metadata olarak taşınır; pikseller text modeline verilmez.",
+                );
+            }
             let response = ui.add(
                 egui::TextEdit::multiline(&mut self.draft)
                     .desired_rows(3)
