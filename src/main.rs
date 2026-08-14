@@ -11,7 +11,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use jarvis_core::{InputType, LlamaServerProvider, Request, Runtime, SqliteStore, TaskState};
+use jarvis_core::{
+    inspect_local_image, propose_memory, AttachmentRef, DataSensitivity, InputType,
+    LlamaServerProvider, MemoryNamespace, MemoryProposal, Request, Runtime, SqliteStore, TaskState,
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -41,6 +44,7 @@ struct WorkerReply {
     task_id: String,
     approval_pending: bool,
     notify_user: bool,
+    sources: Vec<String>,
 }
 
 struct App {
@@ -52,6 +56,8 @@ struct App {
     scroll: u16,
     pending: bool,
     running: bool,
+    attachments: Vec<AttachmentRef>,
+    pending_memory: Option<MemoryProposal>,
 }
 
 impl App {
@@ -73,6 +79,8 @@ impl App {
             scroll: 0,
             pending: false,
             running: true,
+            attachments: vec![],
+            pending_memory: None,
         }
     }
 
@@ -198,6 +206,10 @@ fn event_loop(
         while let Ok(reply) = receiver.try_recv() {
             if let Some(message) = app.messages.get_mut(reply.message_index) {
                 message.content = reply.content;
+                if !reply.sources.is_empty() {
+                    message.content.push_str("\n\nKaynaklar:\n");
+                    message.content.push_str(&reply.sources.join("\n"));
+                }
             }
             app.status = reply.status;
             app.pending = false;
@@ -389,6 +401,137 @@ fn submit(
         cancel_task(app, runtime, task_id);
         return;
     }
+    if let Some(path) = input.strip_prefix("/attach ").map(str::trim) {
+        match inspect_local_image(path) {
+            Ok(attachment) => {
+                if app
+                    .attachments
+                    .iter()
+                    .any(|queued| queued.sha256 == attachment.sha256)
+                {
+                    app.push_system("Bu görsel zaten ek kuyruğunda.");
+                } else {
+                    app.push_system(format!(
+                        "Ek kuyruğa alındı: {} • {} • {}×{} • SHA-256:{}…\nMevcut text-only model görsel piksellerini analiz etmez; ek metadata olarak güvenle taşınır. Vision modeli kurulduğunda aynı contract görsel girdiye bağlanacak.",
+                        attachment.original_name,
+                        attachment.mime_type(),
+                        attachment.width,
+                        attachment.height,
+                        &attachment.sha256[..12],
+                    ));
+                    app.attachments.push(attachment);
+                }
+            }
+            Err(error) => app.push_system(format!("Ek alınamadı: {error}")),
+        }
+        return;
+    }
+    if let Some(specification) = input.strip_prefix("/remember ").map(str::trim) {
+        match specification {
+            "approve" => {
+                let Some(proposal) = app.pending_memory.take() else {
+                    app.push_system("Onaylanacak bellek teklifi yok.");
+                    return;
+                };
+                match runtime
+                    .lock()
+                    .expect("JARVIS runtime lock poisoned")
+                    .commit_memory_proposal(&proposal, true)
+                {
+                    Ok(record) => app.push_system(format!(
+                        "Bellek kaydedildi: {} = {} • namespace={} • modele dahil={}",
+                        record.key,
+                        record.value,
+                        record.namespace.as_str(),
+                        record.include_in_model_context
+                    )),
+                    Err(error) => app.push_system(format!("Bellek kaydedilemedi: {error}")),
+                }
+                return;
+            }
+            "reject" => {
+                if app.pending_memory.take().is_some() {
+                    app.push_system("Bellek teklifi reddedildi; hiçbir veri kaydedilmedi.");
+                } else {
+                    app.push_system("Reddedilecek bellek teklifi yok.");
+                }
+                return;
+            }
+            _ => {}
+        }
+        let Some((key, value)) = specification
+            .split_once('=')
+            .map(|(key, value)| (key.trim(), value.trim()))
+        else {
+            app.push_system("Kullanım: /remember anahtar = değer • ardından /remember approve veya /remember reject");
+            return;
+        };
+        match propose_memory(
+            MemoryNamespace::UserProfile,
+            key,
+            value,
+            DataSensitivity::Internal,
+            "tui-user-approved-profile",
+            true,
+            None,
+        ) {
+            Ok(proposal) => {
+                app.push_system(format!(
+                    "Bellek teklifi (henüz kaydedilmedi): {} = {}\nNamespace: {} • sensitivity: {} • model context: evet\nOnay: /remember approve • Vazgeç: /remember reject",
+                    proposal.record.key,
+                    proposal.record.value,
+                    proposal.record.namespace.as_str(),
+                    proposal.record.sensitivity.as_str(),
+                ));
+                app.pending_memory = Some(proposal);
+            }
+            Err(error) => app.push_system(format!("Bellek teklifi geçersiz: {error}")),
+        }
+        return;
+    }
+    if let Some(memory_id) = input.strip_prefix("/forget ").map(str::trim) {
+        let result = if memory_id == "all" {
+            runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .forget_all_memory()
+                .map(|count| format!("{count} bellek kaydı silindi."))
+        } else {
+            runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .delete_memory(memory_id)
+                .map(|deleted| {
+                    if deleted {
+                        format!("Bellek silindi: {memory_id}")
+                    } else {
+                        "Bu ID ile bellek kaydı yok.".into()
+                    }
+                })
+        };
+        match result {
+            Ok(message) => app.push_system(message),
+            Err(error) => app.push_system(format!("Bellek silinemedi: {error}")),
+        }
+        return;
+    }
+    if let Some(relative_path) = input.strip_prefix("/index ").map(str::trim) {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .index_workspace_document(&root, std::path::Path::new(relative_path), true)
+        {
+            Ok(report) => app.push_system(format!(
+                "Dosya indekslendi: {} • {} parça • SHA-256:{}…\nBu klasöre ait metin artık yalnız ilgili sorularda kaynaklı data olarak kullanılabilir.",
+                report.canonical_path.display(),
+                report.chunk_count,
+                &report.content_sha256[..12]
+            )),
+            Err(error) => app.push_system(format!("Dosya indekslenemedi: {error}")),
+        }
+        return;
+    }
     match input.as_str() {
         "exit" | "/exit" => {
             app.status = match stop_local_model_server() {
@@ -407,8 +550,70 @@ fn submit(
             app.push_system("Sohbet görünümü temizlendi. Local session context güvenlik için RAM'de kalır; yeni oturum için JARVIS'i yeniden başlatabilirsin.");
             return;
         }
+        "/attachments clear" => {
+            let count = app.attachments.len();
+            app.attachments.clear();
+            app.push_system(format!("{count} ek gönderilmeden kuyruktan kaldırıldı."));
+            return;
+        }
+        "/attachments" => {
+            if app.attachments.is_empty() {
+                app.push_system("Ek kuyruğu boş.");
+            } else {
+                let queued = app
+                    .attachments
+                    .iter()
+                    .map(|attachment| {
+                        format!(
+                            "{} • {} • {}×{} • {}…",
+                            attachment.original_name,
+                            attachment.mime_type(),
+                            attachment.width,
+                            attachment.height,
+                            &attachment.attachment_id[11..]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.push_system(format!(
+                    "Gönderilmeyi bekleyen ekler:\n{queued}\nTümünü kaldırmak için /attachments clear"
+                ));
+            }
+            return;
+        }
+        "/memory" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .list_memory()
+            {
+                Ok(records) if records.is_empty() => app.push_system("Kaydedilmiş bellek yok."),
+                Ok(records) => {
+                    let listed = records
+                        .iter()
+                        .map(|record| {
+                            format!(
+                                "{} • {} = {} • {} • modele dahil={} • sil: /forget {}",
+                                record.memory_id,
+                                record.key,
+                                record.value,
+                                record.namespace.as_str(),
+                                record.include_in_model_context,
+                                record.memory_id
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    app.push_system(format!(
+                        "Kaydedilmiş bellekler:\n{listed}\nTümünü sil: /forget all"
+                    ));
+                }
+                Err(error) => app.push_system(format!("Bellek listelenemedi: {error}")),
+            }
+            return;
+        }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG-yolu>, /attachments, /attachments clear. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -448,9 +653,22 @@ fn submit(
     }
     // A newly submitted turn should always return the view to the newest conversation content.
     app.scroll = 0;
+    let attachments = std::mem::take(&mut app.attachments);
+    let attachment_summary = if attachments.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n[Ekler: {}]",
+            attachments
+                .iter()
+                .map(|attachment| attachment.original_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     app.messages.push(Message {
         role: MessageRole::User,
-        content: input.clone(),
+        content: format!("{input}{attachment_summary}"),
     });
     let message_index = app.messages.len();
     app.messages.push(Message {
@@ -474,11 +692,18 @@ fn submit(
             ),
             input_type: InputType::Gui,
             content: input,
+            attachments,
         };
         let (task, tool, verification) = runtime
             .lock()
             .expect("JARVIS runtime lock poisoned")
             .handle_with_provider(request, &provider);
+        let sources = tool
+            .evidence
+            .iter()
+            .filter_map(|evidence| evidence.strip_prefix("workspace.citation:"))
+            .map(|source| format!("• {source}"))
+            .collect::<Vec<_>>();
         let content = tool.error.clone().unwrap_or(tool.output);
         let approval_pending = task.state == TaskState::WaitingForUser;
         let notify_user =
@@ -498,6 +723,7 @@ fn submit(
             task_id: task.task_id,
             approval_pending,
             notify_user,
+            sources,
         });
     });
 }
@@ -726,7 +952,7 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
         ),
         Span::raw("  •  "),
         server_badge,
-        Span::raw("  •  VRAM: 0"),
+        Span::raw(format!("  •  VRAM: 0  •  EK: {}", app.attachments.len())),
     ]))
     .block(Block::default().borders(Borders::ALL).title(" Sohbet "));
     frame.render_widget(header, layout[0]);
@@ -781,8 +1007,10 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
 
     let input_title = if app.pending {
         " Mesaj — yanıt bekleniyor "
-    } else {
+    } else if app.attachments.is_empty() {
         " Mesaj — Enter gönder "
+    } else {
+        " Mesaj — ekler hazır, Enter gönder "
     };
     let input_width = layout[2].width.saturating_sub(2);
     let input_rows = layout[2].height.saturating_sub(2);
