@@ -149,7 +149,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
   - Otomatik kanıt: Ratatui `TestBackend` küçük/geniş ve üç yeniden-boyutlandırma ölçüsünde en yeni tur, composer ve cursor sınırlarını PASS doğrular. Gerçek terminalde DPI/font/kontrast/focus kabulü açık kalır.
 - [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
-  - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu; sonuçlar henüz `NOT RUN`.
+  - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu. C01/C03/C04/C05/C07 için kayıtsız local model smoke PASS; tam task/audit ve insan değerlendirmesi henüz açık.
 - [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
   - Koşum kaydı model dosya/hash'i, CPU/RAM durumu, task ID ve kısa insan değerlendirmesi için alan içerir; kişisel prompt/yanıtı varsayılan olarak kaydetmez.
 - [x] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.

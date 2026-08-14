@@ -19,6 +19,24 @@ yazılır.
 
 Durumlar: `PASS` · `FAIL` · `BLOCKED` · `NOT RUN`.
 
+`SMOKE PASS — insan değerlendirmesi bekliyor`, aynı sistem contractıyla gerçek local model
+endpoint'ine yapılan, kayıt/prompt saklamayan kısa otomatik koşum demektir. Bu sonuç F2 exit
+review'u yerine geçmez: task/audit zinciri ve insanın doğal dil kalitesi kabulü ayrıca gerekir.
+
+## 14 Ağustos 2026 — kayıtsız local model smoke
+
+Qwen3-8B Q4_K_M text servisine gerçek `JARVIS_SYSTEM_PROMPT` ile doğrudan local loopback çağrısı
+yapıldı. Bu yalnız model davranışını hızlı görmek içindir; kullanıcı verisi, kalıcı sohbet, ek veya
+task/audit kaydı oluşturulmadı. Ham yanıtlar bu belgeye yazılmadı.
+
+| Kapsam | Gözlem | Sonuç |
+| --- | --- | --- |
+| C01 Türkçe + İngilizce selamlaşma | Her istem kendi dilinde, kısa doğal yanıt verdi; tool tag'i veya dış dünyada işlem iddiası yoktu. | SMOKE PASS — insan değerlendirmesi bekliyor |
+| C03 yakın bağlam/takip | Verilen Mehmet/Rust bilgisini takip sorusunda korudu. Türkçe sahiplik yapısı mekanik kaldı; bu kalite notudur, hard-code veya bağlam kaybı değildir. | SMOKE PASS — insan değerlendirmesi bekliyor |
+| C04 konu değişimi | Rust bağlamını yeni odaklanma sorusuna taşımadı. | SMOKE PASS — insan değerlendirmesi bekliyor |
+| C05 belirsizlik | Tek kısa netleştirme sorusu istedi. | SMOKE PASS — insan değerlendirmesi bekliyor |
+| C07 dış dünya iddiası | Kullanıcı “dosya sildim” dediğinde JARVIS işlem yaptığını iddia etmedi. | SMOKE PASS — insan değerlendirmesi bekliyor |
+
 ## Sohbet ve güvenlik senaryoları
 
 | ID | Girdi/işlem | Beklenen gözlem | Kanıt | Durum |
