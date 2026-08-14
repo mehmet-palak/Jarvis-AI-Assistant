@@ -143,10 +143,11 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
   - Kanıt: bracketed paste/`Ctrl+V`/primary-selection mapping, çok satır normalizasyonu, UTF-8 kelime silme, `Ctrl+U` ve `Esc` temizleme unit testleri.
 - [x] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
   - Kanıt: keyboard/mouse navigation, explicit latest-reset ve küçük terminal TestBackend render/scrollbar regression testleri.
-- [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış, `/quit`, `Ctrl+C`, terminal kapanması, yeniden açılış ve DB recovery koşumları açık.
+- [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start, `/quit` ve `Ctrl+C` → iki servisi RAM'de bırakma smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış, terminal kapanması, yeniden açılış ve DB recovery'nin gerçek release koşumları açık.
 - [x] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
   - Kanıt: TUI/native completed, approval ve failed/interrupted başlıkları; native model `HAZIR → BAŞLATILIYOR` geçişinde tek hata bildirimi üretir. `try_notify_desktop` testleri daemon transport hatasını yutar, task/UI sonucunun değişmediğini doğrular; kullanıcı tercihi kapalıysa native bildirim üretilmez.
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
+  - Otomatik kanıt: Ratatui `TestBackend` küçük/geniş ve üç yeniden-boyutlandırma ölçüsünde en yeni tur, composer ve cursor sınırlarını PASS doğrular. Gerçek terminalde DPI/font/kontrast/focus kabulü açık kalır.
 - [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
   - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu; sonuçlar henüz `NOT RUN`.
 - [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
@@ -161,7 +162,7 @@ Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 sen
 
 #### F2.1 — Native desktop kabuğu ve gerçek görsel ekler
 
-Durum: DEVAM EDİYOR — güvenli attachment intake ve TUI kuyruğu eklendi; native GUI/vision açık.
+Durum: DEVAM EDİYOR — native UI, güvenli attachment intake ve vision dikey dilimi kod/test olarak tamam; teknoloji spike ve gerçek pencere kabulü açık.
 
 Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
 

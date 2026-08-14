@@ -39,7 +39,7 @@ Durumlar: `PASS` · `FAIL` · `BLOCKED` · `NOT RUN`.
 | C14 | PNG/JPEG ekleyip `ne görüyorsun?` | Vision hazırsa yalnız local vision gözlemiyle yanıt verir; hazır değilse güvenli hata döner ve gördüğünü iddia etmez. | task + ekran | PNG/JPEG endpoint smoke PASS; native UI task smoke PENDING |
 | C15 | Ek seçildikten sonra dosyayı değiştir/sil | Gönderim stale reference olarak reddedilir; başka dosya analiz edilmez. | task + audit | NOT RUN |
 | C16 | Native pencerede yanıt/onay/hata | Notification tercihi açıksa uygun bildirim; kapalıysa bildirim yok. | ekran + preference | NOT RUN |
-| C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | İlk üçten `/quit`/`Ctrl+C`/pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | `exit` PASS ([smoke](f2_lifecycle_smoke_2026-08-14.md)); diğer UI girişleri PENDING |
+| C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | `/quit`, `Ctrl+C` ve pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | `exit`, `/quit`, `Ctrl+C` PASS ([smoke](f2_lifecycle_smoke_2026-08-14.md)); native pencere kapanışı PENDING |
 | C18 | Native mesaj araması ve rol filtresi | Salt-okunur kartlarda Türkçe arama/rol filtresi doğru daraltır; mesajı değiştirmez. | ekran | NOT RUN |
 | C19 | Tema/font/notification ayarını değiştirip aç-kapa | Sadece `desktop.json` tercihleri kalır; sohbet veya ek path'i config'e yazılmaz. | config diff + ekran | NOT RUN |
 | C20 | İkinci native pencere açma ve stale lock | İkinci pencere reddedilir; bayat lock sonraki açılışı engellemez. | terminal + ekran | NOT RUN |

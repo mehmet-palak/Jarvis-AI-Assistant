@@ -1539,6 +1539,46 @@ mod tests {
     }
 
     #[test]
+    fn tui_resize_keeps_the_composer_cursor_and_latest_turn_in_bounds() {
+        let backend = TestBackend::new(48, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new("ready");
+        app.input = "Türkçe taslak uzun olsa da imleç composer içinde kalmalı".into();
+        app.messages.push(Message {
+            role: MessageRole::User,
+            content: "Önceki uzun tur ".repeat(14),
+        });
+        app.messages.push(Message {
+            role: MessageRole::Jarvis,
+            content: "EN_YENI_TUR responsive terminalde görünür kalmalı".into(),
+        });
+
+        for area in [
+            ratatui::layout::Rect::new(0, 0, 48, 18),
+            ratatui::layout::Rect::new(0, 0, 112, 38),
+            ratatui::layout::Rect::new(0, 0, 56, 22),
+        ] {
+            terminal.resize(area).expect("resize test terminal");
+            terminal
+                .draw(|frame| super::draw(frame.area(), frame, &app))
+                .expect("render after resize");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(rendered.contains("JARVIS"));
+            assert!(rendered.contains("Mesaj"));
+            assert!(rendered.contains("EN_YENI_TUR"));
+            let cursor = terminal.get_cursor_position().expect("composer cursor");
+            assert!(cursor.x < area.width);
+            assert!(cursor.y < area.height);
+        }
+    }
+
+    #[test]
     fn keyboard_and_mouse_navigation_follow_and_leave_the_latest_turn() {
         let mut scroll = 0;
         assert!(apply_history_key_scroll(&mut scroll, KeyCode::Up));
