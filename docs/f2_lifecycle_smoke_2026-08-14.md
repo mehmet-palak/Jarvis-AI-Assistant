@@ -22,7 +22,9 @@ geçtikten sonra iki saniye beklenip aşağıdaki girdiler gönderildi:
 | --- | --- | --- | --- |
 | `/quit` + Enter | `active` → `active` | `active` → `active` | PASS |
 | `Ctrl+C` | `active` → `active` | `active` → `active` | PASS |
+| TUI sürecine terminal-close `SIGHUP` | `active` → `active` | `active` → `active` | PASS |
 
-Bu iki koşum yalnız release TUI sürecini bitirdi; hiçbir model servisini başlatmadı veya
-durdurmadı. Terminal pencere yöneticisiyle kapanış ve native pencerenin kullanıcı etkileşimli
+Bu üç koşum yalnız release TUI sürecini bitirdi; hiçbir model servisini başlatmadı veya
+durdurmadı. `SIGHUP` koşumu, pseudo-terminalde gerçek TUI child PID'sine gönderildi; koşum
+sonunda artakalan `jarvis`/`script` süreci bulunmadı. Native pencerenin kullanıcı etkileşimli
 kapanışı halen kullanıcı kabul koşumudur.

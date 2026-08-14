@@ -143,7 +143,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
   - Kanıt: bracketed paste/`Ctrl+V`/primary-selection mapping, çok satır normalizasyonu, UTF-8 kelime silme, `Ctrl+U` ve `Esc` temizleme unit testleri.
 - [x] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
   - Kanıt: keyboard/mouse navigation, explicit latest-reset ve küçük terminal TestBackend render/scrollbar regression testleri.
-- [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start, `/quit` ve `Ctrl+C` → iki servisi RAM'de bırakma smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış, terminal kapanması, yeniden açılış ve DB recovery'nin gerçek release koşumları açık.
+- [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start; `/quit`, `Ctrl+C` ve terminal-close `SIGHUP` → iki servisi RAM'de bırakma smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış/yeniden açılış ve DB recovery'nin gerçek release koşumları açık.
 - [x] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
   - Kanıt: TUI/native completed, approval ve failed/interrupted başlıkları; native model `HAZIR → BAŞLATILIYOR` geçişinde tek hata bildirimi üretir. `try_notify_desktop` testleri daemon transport hatasını yutar, task/UI sonucunun değişmediğini doğrular; kullanıcı tercihi kapalıysa native bildirim üretilmez.
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
