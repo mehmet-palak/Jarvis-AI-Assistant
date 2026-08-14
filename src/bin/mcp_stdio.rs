@@ -4,7 +4,8 @@ use jarvis_core::{McpIngressRequest, Runtime, SqliteStore};
 use serde_json::{json, Value};
 
 fn main() {
-    let store = SqliteStore::open("jarvis.db").expect("JARVIS SQLite store açılamadı");
+    let database_path = std::env::var("JARVIS_DB_PATH").unwrap_or_else(|_| "jarvis.db".into());
+    let store = SqliteStore::open(&database_path).expect("JARVIS SQLite store açılamadı");
     let mut runtime = Runtime::with_store(store);
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };

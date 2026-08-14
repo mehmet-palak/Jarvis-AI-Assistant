@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions};
+use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
     default_desktop_preferences_path, inspect_local_image, load_desktop_preferences,
     save_desktop_preferences, AttachmentRef, DesktopPreferences, InputType, LlamaServerProvider,
@@ -121,8 +121,8 @@ struct JarvisDesktop {
     model_status: String,
     preferences_path: Option<PathBuf>,
     preferences: DesktopPreferences,
-    system_visuals: egui::Visuals,
     baseline_pixels_per_point: f32,
+    orb_phase: f32,
 }
 
 impl JarvisDesktop {
@@ -177,8 +177,8 @@ impl JarvisDesktop {
             model_status: "kontrol ediliyor".into(),
             preferences_path,
             preferences,
-            system_visuals: context.style().visuals.clone(),
             baseline_pixels_per_point: context.pixels_per_point(),
+            orb_phase: 0.0,
         }
     }
 
@@ -405,8 +405,7 @@ impl JarvisDesktop {
 
     fn apply_preferences(&self, context: &egui::Context) {
         let visuals = match self.preferences.theme {
-            ThemePreference::System => self.system_visuals.clone(),
-            ThemePreference::Dark => egui::Visuals::dark(),
+            ThemePreference::System | ThemePreference::Dark => jarvis_dark_visuals(),
             ThemePreference::Light => egui::Visuals::light(),
         };
         context.set_visuals(visuals);
@@ -518,121 +517,89 @@ impl JarvisDesktop {
             });
         }
     }
-}
 
-impl eframe::App for JarvisDesktop {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_worker();
-        self.refresh_model_state();
-        self.apply_preferences(context);
-        context.request_repaint_after(std::time::Duration::from_millis(100));
+    fn show_system_panel(&mut self, ui: &mut egui::Ui) {
+        hud_section_title(ui, "SİSTEM DURUMU");
+        let model_color = if self.model_status == "MODEL HAZIR" {
+            COLOR_GREEN
+        } else {
+            COLOR_GOLD
+        };
+        hud_status_row(ui, "CORE", "LOCAL-FIRST", COLOR_TEAL);
+        hud_status_row(ui, "MODEL", &self.model_status, model_color);
+        hud_status_row(ui, "DONANIM", "CPU-ONLY / VRAM 0", COLOR_TEAL_DIM);
+        hud_status_row(ui, "ERİŞİM", "LOOPBACK", COLOR_TEAL_DIM);
+        ui.add_space(10.0);
 
-        let attach_shortcut = !self.pending
-            && context.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::O));
-        if attach_shortcut {
-            self.add_attachment(context);
+        egui::Frame::group(ui.style())
+            .fill(COLOR_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
+            .show(ui, |ui| {
+                ui.label(RichText::new("GÜVENLİK SINIRI").small().color(COLOR_TEAL));
+                ui.small("Onay gerektiren bir işlem, yalnız kendi task kimliği için çalışır.");
+            });
+        self.show_approval_controls(ui);
+
+        ui.add_space(8.0);
+        if ui
+            .add_sized(
+                [ui.available_width(), 30.0],
+                egui::Button::new("MODELİ RAM'DEN ÇIKAR"),
+            )
+            .clicked()
+        {
+            self.status = match stop_local_model_server() {
+                Ok(()) => "Model sunucusu durduruldu; RAM serbest bırakıldı.".into(),
+                Err(error) => error,
+            };
         }
+        ui.small("Pencereyi kapatmak modeli durdurmaz.");
 
-        egui::TopBottomPanel::top("header").show(context, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.heading(RichText::new("JARVIS").color(Color32::from_rgb(80, 210, 196)));
-                ui.label("Local-first personal AI");
-                ui.separator();
-                let model_color = if self.model_status == "MODEL HAZIR" {
-                    Color32::from_rgb(80, 180, 115)
-                } else {
-                    Color32::from_rgb(205, 165, 65)
-                };
-                ui.colored_label(model_color, RichText::new(&self.model_status).strong());
-                ui.label("VRAM: 0");
-                ui.label(format!("Ek: {}", self.queued_attachments.len()));
-            });
-        });
+        ui.add_space(10.0);
+        egui::CollapsingHeader::new("GÖRÜNÜM AYARLARI")
+            .default_open(false)
+            .show(ui, |ui| self.show_preferences_controls(ui));
+    }
 
-        egui::SidePanel::left("controls")
-            .resizable(true)
-            .default_width(260.0)
-            .show(context, |ui| {
-                self.show_approval_controls(ui);
-                self.show_preferences_controls(ui);
-                ui.separator();
-                if ui.button("Modeli RAM'den çıkar").clicked() {
-                    self.status = match stop_local_model_server() {
-                        Ok(()) => "Model sunucusu durduruldu; RAM serbest bırakıldı.".into(),
-                        Err(error) => error,
-                    };
-                }
-                ui.small("Pencereyi kapatmak modeli durdurmaz.");
-            });
-
-        egui::TopBottomPanel::bottom("composer").show(context, |ui| {
+    fn show_chat_console(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            self.show_chat_composer(ui, context);
+            ui.add_space(6.0);
             ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Görsel ekle (Ctrl+O)").clicked() {
-                    self.add_attachment(context);
-                }
-                if !self.queued_attachments.is_empty() && ui.button("Tüm ekleri kaldır").clicked()
-                {
-                    self.queued_attachments.clear();
-                    self.previews.clear();
-                    self.status = "Ek kuyruğu temizlendi; hiçbir dosya silinmedi.".into();
-                }
-            });
-            let mut remove_attachment = None;
-            ui.horizontal_wrapped(|ui| {
-                for attachment in &self.queued_attachments {
-                    ui.group(|ui| {
-                        if let Some(texture) = self.previews.get(&attachment.attachment_id) {
-                            ui.add(egui::Image::new(texture).max_size(egui::vec2(96.0, 72.0)));
-                        }
-                        ui.label(&attachment.original_name);
-                        ui.small(format!("{}×{}", attachment.width, attachment.height));
-                        if ui.small_button("Kaldır").clicked() {
-                            remove_attachment = Some(attachment.attachment_id.clone());
-                        }
-                    });
-                }
-            });
-            if let Some(attachment_id) = remove_attachment {
-                self.queued_attachments
-                    .retain(|attachment| attachment.attachment_id != attachment_id);
-                self.previews.remove(&attachment_id);
-            }
-            if !self.queued_attachments.is_empty() {
-                ui.colored_label(
-                    Color32::from_rgb(205, 165, 65),
-                    "Vision modeli kurulana kadar ek görsel yalnız doğrulanmış metadata olarak taşınır; pikseller text modeline verilmez.",
-                );
-            }
-            let response = ui.add(
-                egui::TextEdit::multiline(&mut self.draft)
-                    .desired_rows(3)
-                    .hint_text("Mesajını yaz. Enter gönderir; Shift+Enter yeni satır ekler."),
-            );
-            let submit_with_enter = response.has_focus()
-                && ui.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.pending, egui::Button::new("Gönder"))
-                    .clicked()
-                    || submit_with_enter
-                {
-                    self.submit();
-                }
-                if self.pending {
-                    ui.spinner();
-                    ui.label("JARVIS yanıt üretiyor…");
-                }
-            });
-        });
+            ui.add_space(4.0);
 
-        egui::CentralPanel::default().show(context, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("jarvis-chat-history")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for message in self.messages.iter().filter(|message| {
+                        message_matches_filter(message, &self.message_search, self.role_filter)
+                    }) {
+                        let (label, fill, label_color) = match message.role {
+                            MessageRole::User => ("SEN", COLOR_USER, COLOR_GOLD),
+                            MessageRole::Jarvis => ("J.A.R.V.I.S", COLOR_PANEL_ALT, COLOR_TEAL),
+                            MessageRole::System => ("SİSTEM", COLOR_SYSTEM, COLOR_BLUE),
+                        };
+                        egui::Frame::group(ui.style())
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(label).small().strong().color(label_color));
+                                ui.add(egui::Label::new(&message.content).selectable(true).wrap());
+                            });
+                        ui.add_space(7.0);
+                    }
+                });
+
+            ui.add_space(5.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label("Geçmişte ara:");
+                ui.label(RichText::new("SOHBET ARŞİVİ").small().color(COLOR_TEAL));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.message_search)
                         .id(egui::Id::new("jarvis-message-search"))
-                        .hint_text("Bu oturumdaki mesajlarda ara"),
+                        .desired_width(130.0)
+                        .hint_text("Ara"),
                 );
                 for (role, label) in [
                     (None, "Tümü"),
@@ -642,40 +609,369 @@ impl eframe::App for JarvisDesktop {
                 ] {
                     ui.selectable_value(&mut self.role_filter, role, label);
                 }
-                let visible_count = self
-                    .messages
-                    .iter()
-                    .filter(|message| {
-                        message_matches_filter(message, &self.message_search, self.role_filter)
-                    })
-                    .count();
-                ui.small(format!("{visible_count}/{} tur", self.messages.len()));
             });
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for message in self.messages.iter().filter(|message| {
-                        message_matches_filter(message, &self.message_search, self.role_filter)
-                    }) {
-                        let (label, fill) = match message.role {
-                            MessageRole::User => ("SEN", Color32::from_rgb(73, 69, 41)),
-                            MessageRole::Jarvis => ("JARVIS", Color32::from_rgb(35, 76, 70)),
-                            MessageRole::System => ("SİSTEM", Color32::from_rgb(38, 61, 71)),
-                        };
-                        egui::Frame::group(ui.style()).fill(fill).show(ui, |ui| {
-                            ui.label(RichText::new(label).strong());
-                            ui.add(egui::Label::new(&message.content).selectable(true).wrap());
-                        });
-                        ui.add_space(8.0);
-                    }
-                });
         });
+    }
 
-        egui::TopBottomPanel::bottom("status")
-            .resizable(false)
-            .show(context, |ui| ui.small(&self.status));
+    fn show_chat_composer(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        hud_section_title(ui, "KOMUT GİRİŞİ");
+        ui.horizontal(|ui| {
+            if ui.button("GÖRSEL EKLE  Ctrl+O").clicked() {
+                self.add_attachment(context);
+            }
+            if !self.queued_attachments.is_empty() && ui.button("EKLERİ KALDIR").clicked() {
+                self.queued_attachments.clear();
+                self.previews.clear();
+                self.status = "Ek kuyruğu temizlendi; hiçbir dosya silinmedi.".into();
+            }
+        });
+        let mut remove_attachment = None;
+        ui.horizontal_wrapped(|ui| {
+            for attachment in &self.queued_attachments {
+                egui::Frame::group(ui.style())
+                    .fill(COLOR_PANEL_ALT)
+                    .show(ui, |ui| {
+                        if let Some(texture) = self.previews.get(&attachment.attachment_id) {
+                            ui.add(egui::Image::new(texture).max_size(egui::vec2(80.0, 60.0)));
+                        }
+                        ui.label(&attachment.original_name);
+                        if ui.small_button("Kaldır").clicked() {
+                            remove_attachment = Some(attachment.attachment_id.clone());
+                        }
+                    });
+            }
+        });
+        if let Some(attachment_id) = remove_attachment {
+            self.queued_attachments
+                .retain(|attachment| attachment.attachment_id != attachment_id);
+            self.previews.remove(&attachment_id);
+        }
+        if !self.queued_attachments.is_empty() {
+            ui.colored_label(
+                COLOR_GOLD,
+                "Vision modeli kurulana kadar ekler yalnız doğrulanmış metadata olarak taşınır.",
+            );
+        }
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut self.draft)
+                .desired_rows(3)
+                .hint_text("Mesajını yaz. Enter gönderir; Shift+Enter yeni satır ekler."),
+        );
+        let submit_with_enter = response.has_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.pending, egui::Button::new("GÖNDER  ›"))
+                .clicked()
+                || submit_with_enter
+            {
+                self.submit();
+            }
+            if self.pending {
+                ui.spinner();
+                ui.label(RichText::new("JARVIS YANIT ÜRETİYOR").color(COLOR_GOLD));
+            }
+        });
+    }
+
+    fn show_hud(&mut self, ui: &mut egui::Ui) {
+        let canvas = ui.max_rect();
+        paint_hud_background(ui.painter(), canvas);
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.05).min(22.0));
+            ui.label(
+                RichText::new("J . A . R . V . I . S")
+                    .size(20.0)
+                    .strong()
+                    .color(COLOR_TEAL),
+            );
+            ui.label(
+                RichText::new("LOCAL AI COMMAND INTERFACE")
+                    .small()
+                    .color(COLOR_TEAL_DIM),
+            );
+            ui.add_space(10.0);
+            let orb_side = ui
+                .available_width()
+                .min(ui.available_height() * 0.58)
+                .clamp(160.0, 360.0);
+            let (orb_rect, _) =
+                ui.allocate_exact_size(egui::vec2(orb_side, orb_side), egui::Sense::hover());
+            paint_orb(
+                ui.painter(),
+                orb_rect,
+                self.orb_phase,
+                self.pending,
+                self.model_status == "MODEL HAZIR",
+            );
+            ui.add_space(8.0);
+            let activity = hud_activity_label(self.pending, &self.model_status);
+            let activity_color = if self.pending { COLOR_GOLD } else { COLOR_TEAL };
+            ui.label(RichText::new(activity).strong().color(activity_color));
+            ui.label(
+                RichText::new("SİSTEM DURUMU: LOCAL / CPU / GOVERNED")
+                    .small()
+                    .color(COLOR_TEAL_DIM),
+            );
+        });
+    }
+}
+
+const COLOR_BG: Color32 = Color32::from_rgb(2, 12, 12);
+const COLOR_PANEL: Color32 = Color32::from_rgb(3, 15, 15);
+const COLOR_PANEL_ALT: Color32 = Color32::from_rgb(6, 25, 24);
+const COLOR_TEAL: Color32 = Color32::from_rgb(0, 212, 192);
+const COLOR_TEAL_DIM: Color32 = Color32::from_rgb(0, 106, 98);
+const COLOR_TEXT: Color32 = Color32::from_rgb(190, 244, 238);
+const COLOR_GREEN: Color32 = Color32::from_rgb(0, 255, 136);
+const COLOR_GOLD: Color32 = Color32::from_rgb(255, 204, 0);
+const COLOR_BLUE: Color32 = Color32::from_rgb(68, 136, 255);
+const COLOR_USER: Color32 = Color32::from_rgb(36, 39, 30);
+const COLOR_SYSTEM: Color32 = Color32::from_rgb(19, 38, 47);
+
+fn jarvis_dark_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = COLOR_BG;
+    visuals.window_fill = COLOR_PANEL;
+    visuals.extreme_bg_color = COLOR_BG;
+    visuals.faint_bg_color = COLOR_PANEL_ALT;
+    visuals.code_bg_color = COLOR_PANEL_ALT;
+    visuals.widgets.noninteractive.bg_fill = COLOR_PANEL;
+    visuals.widgets.noninteractive.fg_stroke.color = COLOR_TEXT;
+    visuals.widgets.inactive.bg_fill = COLOR_PANEL_ALT;
+    visuals.widgets.inactive.bg_stroke.color = COLOR_TEAL_DIM;
+    visuals.widgets.inactive.fg_stroke.color = COLOR_TEXT;
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(8, 49, 45);
+    visuals.widgets.hovered.bg_stroke.color = COLOR_TEAL;
+    visuals.widgets.hovered.fg_stroke.color = COLOR_TEAL;
+    visuals.widgets.active.bg_fill = Color32::from_rgb(0, 76, 69);
+    visuals.widgets.active.bg_stroke.color = COLOR_TEAL;
+    visuals.widgets.active.fg_stroke.color = Color32::WHITE;
+    visuals.selection.bg_fill = Color32::from_rgb(0, 91, 83);
+    visuals.selection.stroke.color = COLOR_TEAL;
+    visuals.hyperlink_color = COLOR_TEAL;
+    visuals.warn_fg_color = COLOR_GOLD;
+    visuals.error_fg_color = Color32::from_rgb(255, 70, 80);
+    visuals
+}
+
+fn hud_section_title(ui: &mut egui::Ui, title: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).small().strong().color(COLOR_TEAL));
+        let start = ui.cursor().min;
+        let end = egui::pos2(ui.max_rect().right(), start.y + 1.0);
+        ui.painter()
+            .line_segment([start, end], Stroke::new(1.0_f32, COLOR_TEAL_DIM));
+    });
+}
+
+fn hud_status_row(ui: &mut egui::Ui, name: &str, value: &str, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(name).small().color(COLOR_TEAL_DIM));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(value).small().strong().color(color));
+        });
+    });
+}
+
+fn hud_activity_label(pending: bool, model_status: &str) -> &'static str {
+    if pending {
+        "DÜŞÜNÜYOR"
+    } else if model_status == "MODEL HAZIR" {
+        "HAZIR / DİNLİYORUM"
+    } else {
+        "CORE BAŞLATILIYOR"
+    }
+}
+
+fn paint_hud_background(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 0.0, COLOR_BG);
+    let inset = 18.0;
+    let edge = 28.0;
+    let stroke = Stroke::new(1.0_f32, COLOR_TEAL_DIM);
+    let top_left = rect.left_top() + egui::vec2(inset, inset);
+    let top_right = rect.right_top() + egui::vec2(-inset, inset);
+    let bottom_left = rect.left_bottom() + egui::vec2(inset, -inset);
+    let bottom_right = rect.right_bottom() + egui::vec2(-inset, -inset);
+    for (corner, x_direction, y_direction) in [
+        (top_left, 1.0, 1.0),
+        (top_right, -1.0, 1.0),
+        (bottom_left, 1.0, -1.0),
+        (bottom_right, -1.0, -1.0),
+    ] {
+        painter.line_segment(
+            [corner, corner + egui::vec2(edge * x_direction, 0.0)],
+            stroke,
+        );
+        painter.line_segment(
+            [corner, corner + egui::vec2(0.0, edge * y_direction)],
+            stroke,
+        );
+    }
+    let center = rect.center();
+    for fraction in [0.24, 0.38, 0.52, 0.66] {
+        let radius = rect.width().min(rect.height()) * fraction;
+        painter.circle_stroke(
+            center,
+            radius,
+            Stroke::new(0.5_f32, Color32::from_rgba_unmultiplied(0, 106, 98, 44)),
+        );
+    }
+}
+
+fn paint_orb(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    phase: f32,
+    pending: bool,
+    model_ready: bool,
+) {
+    let center = rect.center();
+    let radius = rect.width().min(rect.height()) * 0.27;
+    let pulse = if pending {
+        1.0 + phase.sin() * 0.08
+    } else if model_ready {
+        1.0 + (phase * 0.45).sin() * 0.025
+    } else {
+        1.0
+    };
+    let energy = if pending { COLOR_GOLD } else { COLOR_TEAL };
+    painter.circle_filled(
+        center,
+        radius * 1.72 * pulse,
+        Color32::from_rgba_unmultiplied(energy.r(), energy.g(), energy.b(), 14),
+    );
+    painter.circle_filled(
+        center,
+        radius * 0.72 * pulse,
+        Color32::from_rgba_unmultiplied(energy.r(), energy.g(), energy.b(), 50),
+    );
+    painter.circle_filled(center, radius * 0.48 * pulse, COLOR_PANEL_ALT);
+    painter.circle_stroke(center, radius * 0.48 * pulse, Stroke::new(2.0_f32, energy));
+    painter.circle_stroke(
+        center,
+        radius * 0.82,
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0, 212, 192, 160)),
+    );
+    painter.circle_stroke(
+        center,
+        radius * 1.13,
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0, 106, 98, 210)),
+    );
+    for (index, (radius_scale, span)) in [(1.33, 0.95), (1.53, 0.68), (1.75, 0.45)]
+        .into_iter()
+        .enumerate()
+    {
+        let start = phase * (0.4 + index as f32 * 0.12) + index as f32 * 2.1;
+        let points = (0..42)
+            .map(|step| {
+                let angle = start + span * step as f32 / 41.0;
+                center
+                    + egui::vec2(
+                        angle.cos() * radius * radius_scale,
+                        angle.sin() * radius * radius_scale,
+                    )
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            Stroke::new(2.0_f32, if pending { COLOR_GOLD } else { COLOR_TEAL }),
+        ));
+    }
+    for point in 0..12 {
+        let angle = phase * 0.7 + point as f32 * std::f32::consts::TAU / 12.0;
+        let orbit = radius * 1.45;
+        painter.circle_filled(
+            center + egui::vec2(angle.cos() * orbit, angle.sin() * orbit),
+            if point % 3 == 0 { 2.2 } else { 1.2 },
+            COLOR_TEAL,
+        );
+    }
+}
+
+impl eframe::App for JarvisDesktop {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_worker();
+        self.refresh_model_state();
+        self.apply_preferences(context);
+        self.orb_phase = (self.orb_phase + 0.028) % std::f32::consts::TAU;
+        context.request_repaint_after(std::time::Duration::from_millis(45));
+
+        let attach_shortcut = !self.pending
+            && context.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::O));
+        if attach_shortcut {
+            self.add_attachment(context);
+        }
+
+        egui::TopBottomPanel::top("jarvis-hud-header")
+            .exact_height(54.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(COLOR_PANEL)
+                    .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM)),
+            )
+            .show(context, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.heading(RichText::new("J . A . R . V . I . S").color(COLOR_TEAL));
+                    ui.label(
+                        RichText::new("LOCAL COMMAND INTERFACE")
+                            .small()
+                            .color(COLOR_TEAL_DIM),
+                    );
+                    ui.separator();
+                    let model_color = if self.model_status == "MODEL HAZIR" {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_GOLD
+                    };
+                    ui.colored_label(model_color, RichText::new(&self.model_status).strong());
+                    ui.label(RichText::new("VRAM 0").small().color(COLOR_TEAL_DIM));
+                    ui.label(
+                        RichText::new(format!("EK KUYRUĞU {}", self.queued_attachments.len()))
+                            .small()
+                            .color(COLOR_TEAL_DIM),
+                    );
+                });
+            });
+
+        egui::TopBottomPanel::bottom("jarvis-hud-status")
+            .exact_height(31.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(COLOR_PANEL)
+                    .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM)),
+            )
+            .show(context, |ui| {
+                ui.label(
+                    RichText::new(format!("[ CORE LOG ]  {}", self.status))
+                        .small()
+                        .color(COLOR_TEXT),
+                );
+            });
+
+        egui::SidePanel::left("jarvis-system-panel")
+            .exact_width(270.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(COLOR_PANEL)
+                    .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM)),
+            )
+            .show(context, |ui| self.show_system_panel(ui));
+
+        egui::SidePanel::right("jarvis-chat-panel")
+            .resizable(true)
+            .default_width(410.0)
+            .min_width(310.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(COLOR_PANEL)
+                    .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM)),
+            )
+            .show(context, |ui| self.show_chat_console(ui, context));
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(COLOR_BG))
+            .show(context, |ui| self.show_hud(ui));
     }
 }
 
@@ -814,8 +1110,8 @@ fn main() -> eframe::Result<()> {
     let initial_status = ensure_local_model_server(&provider);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1080.0, 760.0])
-            .with_min_inner_size([720.0, 520.0]),
+            .with_inner_size([1400.0, 860.0])
+            .with_min_inner_size([900.0, 620.0]),
         ..Default::default()
     };
     eframe::run_native(

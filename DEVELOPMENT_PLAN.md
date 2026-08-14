@@ -152,7 +152,8 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
   - Koşum kaydı model dosya/hash'i, CPU/RAM durumu, task ID ve kısa insan değerlendirmesi için alan içerir; kişisel prompt/yanıtı varsayılan olarak kaydetmez.
 - [x] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
   - Şablon: [docs/f2_bug_report_template.md](docs/f2_bug_report_template.md). Hassas sohbet/ek verisi yerine redakte özet ve correlation ID kullanılır.
-- [ ] Tek release komutu: format, test, clippy, dependency check, release build, servis health, kritik E2E smoke ve özet rapor.
+- [x] Tek release komutu: format, test, clippy, dependency check, release build, servis health, kritik E2E smoke ve özet rapor.
+  - Kanıt: `bash scripts/release_check.sh` offline format/test/Clippy/release build ile izole geçici SQLite üzerinde MCP `system.health` PASS ve unknown-tool DENY smoke çalıştırır. `--with-service` yalnız zaten açık loopback model servisinin health kontrolünü ekler; model başlatmaz.
 - [ ] F2.0 exit review: açık P0/P1 kullanım hatası kalmadığının manuel kabulü.
 
 Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 senaryoda tekrar üretilebilir; yeni dilimler bu regression setini geçmeden birleşmez.
@@ -194,9 +195,9 @@ Bu turda kanıtlanan alt dilim:
 
 #### F2 güncel çalışma kaydı — henüz exit gate değildir
 
-- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 80 test, strict Clippy ve release build çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
+- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 80 test, strict Clippy, release build ve izole MCP policy smoke çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
 - [x] TUI davranış regresyonu: çok satırlı paste, Türkçe/UTF-8 kelime silme, `Ctrl+V`, Wayland primary selection için mouse orta tuşu, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, terminal-control karakterleri, klavye/mouse scroll, `Home`/`End`, küçük terminalde scrollbar ve en yeni turun görünürlüğü testlere bağlandı.
-- [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde salt-okunur kartlar, ayrı composer, typing state, Türkçe harf farkını gözeten mesaj arama/rol filtresi, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, task-bound onay/red paneli, model-RAM kontrolü, stale-lock recovery'li ve sahiplik güvenli tek-pencere koruması, versioned yerel UI tercihleri (reset/export dahil) sunar. TUI davranışı korunur; `jarvis --desktop` sibling release binary'sini başlatır. Pencereyi kapatmak servisi durdurmaz.
+- [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde eski JARVIS HUD dilini izleyen teal/siyah merkez orb, sol sistem kontrolü ve sağ bağımsız sohbet konsolu sunar. Salt-okunur kartlar, ayrı composer, typing state, Türkçe harf farkını gözeten mesaj arama/rol filtresi, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, task-bound onay/red paneli, model-RAM kontrolü, stale-lock recovery'li ve sahiplik güvenli tek-pencere koruması, versioned yerel UI tercihleri (reset/export dahil) korunur. TUI davranışı değişmez; `jarvis --desktop` sibling release binary'sini başlatır. Pencereyi kapatmak servisi durdurmaz.
 - [x] Native bildirim contractı: kullanıcının notification tercihi kapalıysa hiçbir bildirim üretilmez; açıksa completed yanıt, `WaitingForUser` onayı ve failed/interrupted işlem için ayrı başlıklar test edilir. Notification daemon yoksa mevcut `notify-send` çağrısı best-effort kalır ve task sonucunu değiştirmez.
 - [x] Vision sınırı UX'i: TUI ve native composer seçilmiş PNG/JPEG için açıkça “metadata-only” sınırını gösterir; vision service/model kurulana dek text modelin piksel gördüğü izlenimi verilmez.
 - [ ] Native UI Wayland/Hyprland gerçek smoke: açılış, resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması kullanıcı masaüstüsünde doğrulanacak.

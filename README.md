@@ -46,7 +46,7 @@ Release derlemesi güncelse aynı pencereyi doğrudan şununla da açabilirsin:
 jarvis --desktop
 ```
 
-- Pencereyi `Super + Q` ile kapatmak model servisini durdurmaz; soldaki **Modeli RAM'den çıkar** düğmesi bunu açıkça yapar.
+- Arayüz, eski JARVIS tasarımındaki teal/siyah HUD dilini native olarak uygular: merkezde durum orb'u, solda sistem/ayar/onay paneli, sağda salt-okunur sohbet konsolu ve bağımsız composer bulunur. Pencereyi `Super + Q` ile kapatmak model servisini durdurmaz; soldaki **Modeli RAM'den çıkar** düğmesi bunu açıkça yapar.
 - Birden fazla native pencere açılmaz; kapanmamış/eski kilit güvenle temizlenir ve mevcut pencere kullanılmaya devam edilir.
 - Mesaj kartları düzenlenemez. Ortadaki arama alanı mevcut oturumda Türkçe büyük/küçük harf farkını gözetmeden arar; **Sen / JARVIS / Sistem** filtresiyle daraltılabilir.
 - Onay isteyen işler soldaki panelde task ID ile görünür; **Onayla** yalnız o task'ı core approval zincirinden geçirir, **Reddet** yan etkiyi çalıştırmadan iptal eder.
@@ -99,6 +99,8 @@ cargo run --offline --bin router_benchmark
 ```
 
 `router_benchmark`, local modelin dar desktop routing görevlerindeki ilk baseline ölçümüdür; genel model kalitesi veya security/coding benchmarkı değildir.
+
+`release_check.sh`, normal koşumda geçici bir SQLite dosyasıyla MCP `system.health` PASS ve bilinmeyen tool DENY smoke'unu da doğrular; kalıcı `jarvis.db` veya model servisini değiştirmez.
 
 ## MCP stdio
 
