@@ -1,4 +1,5 @@
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -120,6 +121,9 @@ fn refresh_model_state(app: &mut App, provider: &LlamaServerProvider) {
 }
 
 fn main() -> io::Result<()> {
+    if cli_requests_desktop() {
+        return run_native_desktop_client();
+    }
     let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let store = SqliteStore::open(
         project_root
@@ -132,6 +136,38 @@ fn main() -> io::Result<()> {
     let provider = LlamaServerProvider::local_default();
     let startup_note = ensure_local_model_server(&provider);
     run_tui(runtime, provider, startup_note)
+}
+
+fn cli_requests_desktop() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == "--desktop")
+}
+
+fn native_desktop_binary_path(current_executable: &Path) -> PathBuf {
+    current_executable.with_file_name("jarvis-desktop")
+}
+
+fn run_native_desktop_client() -> io::Result<()> {
+    let current_executable = std::env::current_exe()?;
+    let desktop_executable = native_desktop_binary_path(&current_executable);
+    if !desktop_executable.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "native JARVIS istemcisi bulunamadı: {}. `cargo build --release --offline` çalıştır.",
+                desktop_executable.display()
+            ),
+        ));
+    }
+    let status = Command::new(&desktop_executable).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "native JARVIS istemcisi başarısız kapandı: {status}"
+        )))
+    }
 }
 
 fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
@@ -1042,7 +1078,7 @@ mod tests {
         append_pasted_text, apply_history_key_scroll, apply_history_mouse_scroll,
         delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-        notification_preview, App, Message, MessageRole,
+        native_desktop_binary_path, notification_preview, App, Message, MessageRole,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use ratatui::{backend::TestBackend, Terminal};
@@ -1184,5 +1220,14 @@ mod tests {
         assert!(apply_history_key_scroll(&mut scroll, KeyCode::Home));
         assert_eq!(scroll, u16::MAX);
         assert!(!apply_history_key_scroll(&mut scroll, KeyCode::Char('x')));
+    }
+
+    #[test]
+    fn desktop_launcher_uses_a_sibling_binary_instead_of_the_working_directory() {
+        let executable = std::path::Path::new("/opt/jarvis/bin/jarvis");
+        assert_eq!(
+            native_desktop_binary_path(executable),
+            std::path::PathBuf::from("/opt/jarvis/bin/jarvis-desktop")
+        );
     }
 }

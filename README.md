@@ -40,6 +40,12 @@ cd /home/mehmet/jarvis/jarvis
 cargo run --offline --bin jarvis-desktop
 ```
 
+Release derlemesi güncelse aynı pencereyi doğrudan şununla da açabilirsin:
+
+```bash
+jarvis --desktop
+```
+
 - Pencereyi `Super + Q` ile kapatmak model servisini durdurmaz; soldaki **Modeli RAM'den çıkar** düğmesi bunu açıkça yapar.
 - Birden fazla native pencere açılmaz; kapanmamış/eski kilit güvenle temizlenir ve mevcut pencere kullanılmaya devam edilir.
 - Mesaj kartları düzenlenemez. Ortadaki arama alanı mevcut oturumda Türkçe büyük/küçük harf farkını gözetmeden arar; **Sen / JARVIS / Sistem** filtresiyle daraltılabilir.
