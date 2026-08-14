@@ -166,12 +166,14 @@ Durum: DEVAM EDİYOR — native UI, güvenli attachment intake ve vision dikey d
 
 Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
 
-- [ ] UI teknoloji spike: `egui/eframe` penceresi; açılış süresi, bellek kullanımı, Wayland/Hyprland uyumu ve paketleme riski ölçülür.
+- [x] UI teknoloji spike: `egui/eframe` penceresi; açılış süresi, bellek kullanımı, Wayland/Hyprland uyumu ve paketleme riski ölçülür.
+  - Kanıt: Hyprland v0.56.2 altında release `jarvis-desktop`, 222 ms içinde native client olarak kaydoldu ve ilk ekranda 181,904 KiB RSS (yaklaşık 178 MiB) kullandı. Güncel Lua focus dispatcher ve compositor üzerinden zarif pencere kapanışı PASS; sonuç kaydı [docs/f2_native_wayland_smoke_2026-08-14.md](docs/f2_native_wayland_smoke_2026-08-14.md). Paket bağımlılıkları Cargo lock'ta sabit, release build offline geçer.
 - [x] UI/core sınırı: native UI yalnız client olur; `jarvis-core` Request/Policy/Task/Verifier zincirini doğrudan kullanır, ikinci runtime yaratmaz.
   - Kanıt: `jarvis-desktop`, tek paylaşılan `Runtime` örneği üzerinden aynı `Request → Policy → Task → Verifier` zincirini çağırır; native işçi yalnız sonucu UI kanalına döndürür. İkinci policy, tool registry veya kalıcı store oluşturmaz.
 - [x] Sohbet ekranı: message card, streaming/typing state, ayrı draft composer, scroll-to-latest, arama/filtre hazırlığı ve erişilebilir klavye odağı.
   - Kanıt: salt-okunur kartlar, bağımsız multiline composer, `Düşünüyorum…` durumu, `stick_to_bottom`, Türkçe `İ/i` araması ve rol filtresi; arama/lock/notification unit testleri release derlemesiyle geçti.
-- [ ] Pencere yaşam döngüsü: resize, minimize, tekrar odak, tek-instance davranışı, servis durumu, bildirim tıklamasında pencereyi öne alma.
+- [x] Pencere yaşam döngüsü: resize, minimize, tekrar odak, tek-instance davranışı, servis durumu, bildirim tıklamasında pencereyi öne alma.
+  - Kanıt: eframe responsive/resizable native viewport; sahiplik güvenli single-instance + stale-lock recovery testleri; pencere kapanışı model servislerini durdurmaz. Bildirim action'ı destekleyen daemonlarda “JARVIS'i aç”, Hyprland v0.55+ Lua `hl.dsp.focus({ window = "pid:…" })` adapter'ı ile yalnız bu pencereye focus ister; daemon/compositor başarısızlığı best-effort kalır. Güncel dispatcher gerçek release koşumunda PASS; uzun süreli resize/minimize kullanıcı kabulü F2.0 görsel smoke'ta ayrıca sürer.
 - [x] Görsel tasarım sistemi: renk/typography/spacing tokenları, açık-koyu tema, kontrast kontrolü ve Türkçe metin taşma davranışı.
   - Kanıt: merkezi HUD renk tokenları, okunabilir fiziksel font baseline'ı, versioned koyu/açık tema ve font ölçeği tercihleri; kartlarda wrap/selectable text ve responsive yan panel minimumları uygulanır. Kullanıcı görsel kabulü F2.0 exit review'da ayrıca kalır.
 - [x] Yerel ayarlar: UI tercihleri, tema, font scale ve notification seçeneği için versioned config; reset/export akışı.
@@ -215,7 +217,7 @@ Bu turda kanıtlanan alt dilim:
 - [x] Çok dilli sohbet contractı: sistem prompt'u son kullanıcı mesajının dilini temel alır; Türkçe ve İngilizce doğal cevap istenir, kullanıcı istemedikçe çeviri/dil karışımı yapılmaz. Bu bir yanıt şablonu veya kullanıcıya özel kural değildir; gerçek çıktılar sürümlü QA setinde model kalitesi olarak ölçülür.
 - [x] Oturumluk ek makbuzu: ek gönderiminden sonra kullanıcı, yalnız filename/MIME/boyut/dimension/SHA-256/attachment ID metadata'sını görür; tekli/tümü temizler veya açıkça seçtiği JSON konumuna dışa aktarır. Makbuzlar 50 kayıtla sınırlı, persistent değildir; canonical path, ham byte, prompt, model yanıtı ve task/audit saklanmaz.
 - [x] Serbest metin tool yönlendirme sınırı: sohbet girdisi artık anahtar-kelime `if/else` ile capability'ye bağlanmaz. Tek model üretimi ya doğal yanıt ya da allowlist'teki tam capability kimliğini taşıyan dar bir intent envelope üretir; envelope registry, policy ve verifier tarafından bağımsız doğrulanır. Normal sohbet ek routing çağrısı veya yanıt şablonu kullanmaz.
-- [ ] Native UI Wayland/Hyprland gerçek smoke: release binary açılışı ve HUD/composer görsel kontrolü PASS ([kayıt](docs/f2_native_wayland_smoke_2026-08-14.md)); resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması için kullanıcı kabul koşumu açık.
+- [ ] Native UI Wayland/Hyprland gerçek smoke: release binary açılışı, HUD/composer görsel kontrolü, güncel focus dispatcher ve pencere kapanışı PASS ([kayıt](docs/f2_native_wayland_smoke_2026-08-14.md)); resize/minimize, `Ctrl+O` picker, mesaj gönderme ve bildirim action'ı için kullanıcı kabul koşumu açık.
 - [x] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilen Qwen2.5-VL 3B Q4_K_M + `mmproj`, CPU-only ayrı loopback servisinde gerçek PNG smoke'undan geçti. Kanıt: [f2_vision_smoke_2026-08-14.md](docs/f2_vision_smoke_2026-08-14.md).
 
 Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.

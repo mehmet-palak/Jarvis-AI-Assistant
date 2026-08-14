@@ -1256,6 +1256,8 @@ fn notification_preview(content: &str) -> String {
     preview
 }
 
+const NOTIFICATION_FOCUS_ACTION: &str = "focus-jarvis";
+
 fn desktop_notification(
     task_state: TaskState,
     content: &str,
@@ -1289,34 +1291,69 @@ fn model_unavailable_notification(
 }
 
 fn notify_desktop(title: &str, content: &str) {
-    let _ = try_notify_desktop(title, content, |arguments| {
-        Command::new("notify-send")
-            .args(arguments)
-            .status()
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+    let title = title.to_owned();
+    let content = content.to_owned();
+    let window_pid = std::process::id();
+    // `--action` makes notify-send wait for a click or expiry. Keep that waiting outside the UI
+    // frame loop; a missing daemon/action support remains purely best-effort.
+    std::thread::spawn(move || {
+        let action = send_notification_with(&title, &content, |arguments| {
+            Command::new("notify-send")
+                .args(arguments)
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .map_err(|error| error.to_string())
+        });
+        if action
+            .as_deref()
+            .is_ok_and(notification_requests_jarvis_focus)
+        {
+            let _ = focus_jarvis_window_with(window_pid, |arguments| {
+                Command::new("hyprctl")
+                    .args(arguments)
+                    .status()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+        }
     });
 }
 
 /// Desktop notification is intentionally observational. Its transport may be absent on a
 /// minimal Wayland session, but that must not change an already-determined task outcome.
-fn try_notify_desktop<F>(title: &str, content: &str, sender: F) -> bool
+fn send_notification_with<F>(title: &str, content: &str, sender: F) -> Result<String, String>
 where
-    F: FnOnce(&[String]) -> Result<(), String>,
+    F: FnOnce(&[String]) -> Result<String, String>,
 {
     let preview = notification_preview(content);
     if preview.is_empty() {
-        return false;
+        return Ok(String::new());
     }
     let arguments = vec![
         "--app-name=JARVIS".into(),
         "--icon=dialog-information".into(),
         "--expire-time=6000".into(),
+        format!("--action={NOTIFICATION_FOCUS_ACTION}=JARVIS'i aç"),
         title.into(),
         preview,
     ];
-    let _ = sender(&arguments);
-    true
+    sender(&arguments)
+}
+
+fn notification_requests_jarvis_focus(action: &str) -> bool {
+    action
+        .lines()
+        .any(|line| line.trim() == NOTIFICATION_FOCUS_ACTION)
+}
+
+fn focus_jarvis_window_with<F>(window_pid: u32, focus: F) -> Result<(), String>
+where
+    F: FnOnce(&[String]) -> Result<(), String>,
+{
+    focus(&[
+        "dispatch".into(),
+        format!("hl.dsp.focus({{ window = \"pid:{window_pid}\" }})"),
+    ])
 }
 
 fn main() -> eframe::Result<()> {
@@ -1363,9 +1400,10 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_desktop_instance_lock, desktop_notification, message_matches_filter,
-        model_unavailable_notification, try_notify_desktop, turkish_search_fold, Message,
-        MessageRole,
+        acquire_desktop_instance_lock, desktop_notification, focus_jarvis_window_with,
+        message_matches_filter, model_unavailable_notification, notification_requests_jarvis_focus,
+        send_notification_with, turkish_search_fold, Message, MessageRole,
+        NOTIFICATION_FOCUS_ACTION,
     };
     use jarvis_core::TaskState;
     use std::fs;
@@ -1455,10 +1493,33 @@ mod tests {
             "JARVIS işlem hatası"
         );
         assert!(desktop_notification(TaskState::Cancelled, "iptal", true).is_none());
-        assert!(try_notify_desktop("JARVIS", "hazır", |_arguments| {
+        assert!(send_notification_with("JARVIS", "hazır", |_arguments| {
             Err("notification daemon unavailable".into())
-        }));
-        assert!(!try_notify_desktop("JARVIS", "\n  ", |_arguments| Ok(())));
+        })
+        .is_err());
+        assert_eq!(
+            send_notification_with("JARVIS", "\n  ", |_arguments| {
+                panic!("empty notification must not invoke daemon")
+            })
+            .expect("empty notification ignored"),
+            ""
+        );
+        let focus_arguments =
+            send_notification_with("JARVIS", "hazır", |arguments| Ok(arguments.join("\n")))
+                .expect("notification arguments");
+        assert!(focus_arguments.contains(&format!("--action={NOTIFICATION_FOCUS_ACTION}")));
+        assert!(notification_requests_jarvis_focus("focus-jarvis\n"));
+        assert!(!notification_requests_jarvis_focus("dismissed"));
+        let mut captured_focus_arguments = Vec::new();
+        focus_jarvis_window_with(42, |arguments| {
+            captured_focus_arguments = arguments.to_vec();
+            Ok(())
+        })
+        .expect("focus dispatcher");
+        assert_eq!(
+            captured_focus_arguments,
+            vec!["dispatch", "hl.dsp.focus({ window = \"pid:42\" })"]
+        );
         assert!(
             model_unavailable_notification("MODEL HAZIR", "MODEL BAŞLATILIYOR", true).is_some()
         );
