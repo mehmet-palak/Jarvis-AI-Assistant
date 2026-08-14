@@ -330,13 +330,11 @@ fn event_loop(
             delete_previous_word(&mut app.input);
             continue;
         }
-        if is_clear_draft_shortcut(key) {
+        if should_clear_draft(key) {
             app.input.clear();
-            app.status = "Taslak temizlendi.".into();
-            continue;
-        }
-        if key.code == KeyCode::Esc {
-            app.input.clear();
+            if is_clear_draft_shortcut(key) {
+                app.status = "Taslak temizlendi.".into();
+            }
             continue;
         }
         match key.code {
@@ -364,6 +362,10 @@ fn is_delete_previous_word_shortcut(key: KeyEvent) -> bool {
 
 fn is_clear_draft_shortcut(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('u' | 'U'))
+}
+
+fn should_clear_draft(key: KeyEvent) -> bool {
+    is_clear_draft_shortcut(key) || key.code == KeyCode::Esc
 }
 
 fn apply_history_mouse_scroll(scroll: &mut u16, kind: MouseEventKind) -> bool {
@@ -720,7 +722,7 @@ fn submit(
         return;
     }
     // A newly submitted turn should always return the view to the newest conversation content.
-    app.scroll = 0;
+    return_to_latest(&mut app.scroll);
     let attachments = std::mem::take(&mut app.attachments);
     let attachment_summary = if attachments.is_empty() {
         String::new()
@@ -794,6 +796,10 @@ fn submit(
             sources,
         });
     });
+}
+
+fn return_to_latest(scroll: &mut u16) {
+    *scroll = 0;
 }
 
 fn notification_preview(content: &str) -> String {
@@ -1103,8 +1109,8 @@ mod tests {
         append_pasted_text, apply_history_key_scroll, apply_history_mouse_scroll,
         delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-        is_primary_selection_paste, native_desktop_binary_path, notification_preview, App, Message,
-        MessageRole,
+        is_primary_selection_paste, native_desktop_binary_path, notification_preview,
+        return_to_latest, should_clear_draft, App, Message, MessageRole,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{backend::TestBackend, Terminal};
@@ -1191,6 +1197,10 @@ mod tests {
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
+        assert!(should_clear_draft(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
         assert!(!is_delete_previous_word_shortcut(KeyEvent::new(
             KeyCode::Backspace,
             KeyModifiers::NONE,
@@ -1246,6 +1256,8 @@ mod tests {
         assert!(apply_history_key_scroll(&mut scroll, KeyCode::Home));
         assert_eq!(scroll, u16::MAX);
         assert!(!apply_history_key_scroll(&mut scroll, KeyCode::Char('x')));
+        return_to_latest(&mut scroll);
+        assert_eq!(scroll, 0);
     }
 
     #[test]

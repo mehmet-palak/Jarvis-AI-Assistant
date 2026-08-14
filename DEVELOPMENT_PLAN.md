@@ -139,8 +139,10 @@ Durum: DEVAM EDİYOR
 
 Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını görünür ve tekrar üretilebilir hale getirmek.
 
-- [ ] Girdi otomasyonu: paste, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, `Esc`, UTF-8/Türkçe ve çok satırlı metin senaryoları.
-- [ ] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
+- [x] Girdi otomasyonu: paste, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, `Esc`, UTF-8/Türkçe ve çok satırlı metin senaryoları.
+  - Kanıt: bracketed paste/`Ctrl+V`/primary-selection mapping, çok satır normalizasyonu, UTF-8 kelime silme, `Ctrl+U` ve `Esc` temizleme unit testleri.
+- [x] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
+  - Kanıt: keyboard/mouse navigation, explicit latest-reset ve küçük terminal TestBackend render/scrollbar regression testleri.
 - [ ] Yaşam döngüsü otomasyonu: ilk açılış, servis yükleme, `/quit`, `Ctrl+C`, terminal kapanması, `exit`, yeniden açılış ve DB recovery.
 - [ ] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
