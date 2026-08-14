@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,6 +38,7 @@ struct WorkerReply {
     sources: Vec<String>,
     attachment_receipts: Vec<AttachmentReceipt>,
     notification: Option<DesktopNotification>,
+    close_window: bool,
 }
 
 struct DesktopNotification {
@@ -118,6 +119,8 @@ struct JarvisDesktop {
     queued_attachments: Vec<AttachmentRef>,
     sent_attachment_receipts: Vec<AttachmentReceipt>,
     previews: HashMap<String, TextureHandle>,
+    attachment_picker: Option<mpsc::Receiver<Option<PathBuf>>>,
+    attachment_picker_open: bool,
     pending_approval_tasks: Vec<String>,
     pending: bool,
     status: String,
@@ -127,6 +130,8 @@ struct JarvisDesktop {
     preferences: DesktopPreferences,
     baseline_pixels_per_point: f32,
     orb_phase: f32,
+    scroll_to_latest: bool,
+    close_requested: bool,
 }
 
 impl JarvisDesktop {
@@ -177,6 +182,8 @@ impl JarvisDesktop {
             queued_attachments: vec![],
             sent_attachment_receipts: vec![],
             previews: HashMap::new(),
+            attachment_picker: None,
+            attachment_picker_open: false,
             pending_approval_tasks,
             pending: false,
             status: preferences_status.unwrap_or(initial_status),
@@ -188,6 +195,8 @@ impl JarvisDesktop {
             // user's font-scale preference, but give the HUD a readable physical baseline.
             baseline_pixels_per_point: context.pixels_per_point().max(1.25),
             orb_phase: 0.0,
+            scroll_to_latest: true,
+            close_requested: false,
         }
     }
 
@@ -201,12 +210,31 @@ impl JarvisDesktop {
                 }
             }
             self.pending = false;
+            self.scroll_to_latest = true;
+            self.close_requested |= reply.close_window;
             self.status = reply.status;
             self.record_attachment_receipts(reply.attachment_receipts);
             if let Some(notification) = reply.notification {
                 notify_desktop(notification.title, &notification.content);
             }
             self.refresh_pending_approvals();
+        }
+    }
+
+    fn poll_attachment_picker(&mut self, context: &egui::Context) {
+        let picked = self
+            .attachment_picker
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        let Some(picked) = picked else {
+            return;
+        };
+        self.attachment_picker = None;
+        self.attachment_picker_open = false;
+        if let Some(path) = picked {
+            self.queue_attachment(context, &path);
+        } else {
+            self.status = "Dosya seçimi iptal edildi.".into();
         }
     }
 
@@ -309,15 +337,28 @@ impl JarvisDesktop {
         }
     }
 
-    fn add_attachment(&mut self, context: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Görseller", &["png", "jpg", "jpeg"])
-            .add_filter("Belgeler", &["txt", "md", "markdown", "pdf"])
-            .pick_file()
-        else {
+    fn add_attachment(&mut self, _context: &egui::Context) {
+        if self.attachment_picker_open {
             return;
-        };
-        let attachment = match inspect_local_attachment(&path) {
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.attachment_picker = Some(receiver);
+        self.attachment_picker_open = true;
+        self.status = "Dosya seçici açıldı; seçim bekleniyor…".into();
+        std::thread::spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .add_filter("Görseller", &["png", "jpg", "jpeg"])
+                    .add_filter("Belgeler", &["txt", "md", "markdown", "pdf"])
+                    .pick_file(),
+            )
+            .map(|file| file.path().to_path_buf());
+            let _ = sender.send(picked);
+        });
+    }
+
+    fn queue_attachment(&mut self, context: &egui::Context, path: &Path) {
+        let attachment = match inspect_local_attachment(path) {
             Ok(attachment) => attachment,
             Err(error) => {
                 self.status = format!("Ek alınamadı: {error}");
@@ -368,6 +409,42 @@ impl JarvisDesktop {
             return;
         }
         self.draft.clear();
+        if is_explicit_model_exit(&content) {
+            self.queued_attachments.clear();
+            self.previews.clear();
+            self.messages.push(Message {
+                role: MessageRole::User,
+                content,
+            });
+            let placeholder_index = self.messages.len();
+            self.messages.push(Message {
+                role: MessageRole::System,
+                content: "Model RAM'den çıkarılıyor…".into(),
+            });
+            self.pending = true;
+            self.status = "JARVIS kapatılıyor; model sunucuları durduruluyor…".into();
+            let sender = self.sender.clone();
+            std::thread::spawn(move || {
+                let result = stop_local_model_server();
+                let (content, status) = match result {
+                    Ok(()) => (
+                        "JARVIS kapandı; text ve vision model sunucuları RAM'den çıkarıldı.".into(),
+                        "JARVIS kapandı; model RAM'den çıkarıldı.".into(),
+                    ),
+                    Err(error) => (error.clone(), error),
+                };
+                let _ = sender.send(WorkerReply {
+                    placeholder_index,
+                    content,
+                    status,
+                    sources: vec![],
+                    attachment_receipts: vec![],
+                    notification: None,
+                    close_window: true,
+                });
+            });
+            return;
+        }
         let attachments = std::mem::take(&mut self.queued_attachments);
         let attachment_receipts = attachments
             .iter()
@@ -392,6 +469,7 @@ impl JarvisDesktop {
             role: MessageRole::User,
             content: format!("{content}{attachment_summary}"),
         });
+        self.scroll_to_latest = true;
         let placeholder_index = self.messages.len();
         self.messages.push(Message {
             role: MessageRole::Jarvis,
@@ -479,6 +557,7 @@ impl JarvisDesktop {
                 sources,
                 attachment_receipts,
                 notification,
+                close_window: false,
             });
         });
     }
@@ -719,7 +798,11 @@ impl JarvisDesktop {
                         });
                     ui.add_space(7.0);
                 }
+                if self.scroll_to_latest {
+                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                }
             });
+        self.scroll_to_latest = false;
 
         ui.add_space(6.0);
         ui.separator();
@@ -1059,6 +1142,11 @@ fn paint_orb(
 impl eframe::App for JarvisDesktop {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_worker();
+        self.poll_attachment_picker(context);
+        if self.close_requested {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         self.refresh_model_state();
         self.apply_preferences(context);
         self.orb_phase = (self.orb_phase + 0.028) % std::f32::consts::TAU;
@@ -1140,6 +1228,10 @@ impl eframe::App for JarvisDesktop {
             .frame(egui::Frame::new().fill(COLOR_BG))
             .show(context, |ui| self.show_hud(ui));
     }
+}
+
+fn is_explicit_model_exit(input: &str) -> bool {
+    matches!(input.trim(), "exit" | "/exit")
 }
 
 fn message_matches_filter(
@@ -1401,9 +1493,9 @@ fn main() -> eframe::Result<()> {
 mod tests {
     use super::{
         acquire_desktop_instance_lock, desktop_notification, focus_jarvis_window_with,
-        message_matches_filter, model_unavailable_notification, notification_requests_jarvis_focus,
-        send_notification_with, turkish_search_fold, Message, MessageRole,
-        NOTIFICATION_FOCUS_ACTION,
+        is_explicit_model_exit, message_matches_filter, model_unavailable_notification,
+        notification_requests_jarvis_focus, send_notification_with, turkish_search_fold, Message,
+        MessageRole, NOTIFICATION_FOCUS_ACTION,
     };
     use jarvis_core::TaskState;
     use std::fs;
@@ -1442,6 +1534,14 @@ mod tests {
             Some(MessageRole::Jarvis)
         ));
         assert!(!message_matches_filter(&user_message, "ankara", None));
+    }
+
+    #[test]
+    fn desktop_exit_command_requires_the_explicit_exit_form() {
+        assert!(is_explicit_model_exit("exit"));
+        assert!(is_explicit_model_exit(" /exit "));
+        assert!(!is_explicit_model_exit("/quit"));
+        assert!(!is_explicit_model_exit("çıkış"));
     }
 
     #[test]

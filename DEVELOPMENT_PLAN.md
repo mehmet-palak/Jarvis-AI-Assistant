@@ -129,7 +129,7 @@ Durum: TAMAMLANDI
 
 ### F2 — Günlük masaüstü ürünü ve multimodal ekler
 
-Durum: TEST/ACCEPTANCE — F2 uygulama geliştirmesi tamam; insan görsel kabulü ve exit review açık.
+Durum: TAMAMLANDI — F2 uygulama geliştirmesi, kullanıcı kabulü ve release gate tamamlandı.
 
 Amaç: Terminal MVP'yi korurken, gerçek günlük kullanım için native masaüstü deneyimi, dosya/görsel ekleri ve ölçülebilir UX kalitesi oluşturmak.
 
@@ -212,7 +212,8 @@ Bu turda kanıtlanan alt dilim:
 - [x] TUI davranış regresyonu: çok satırlı paste, Türkçe/UTF-8 kelime silme, `Ctrl+V`, Wayland primary selection için mouse orta tuşu, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, terminal-control karakterleri, klavye/mouse scroll, `Home`/`End`, küçük terminalde scrollbar ve en yeni turun görünürlüğü testlere bağlandı.
 - [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde eski JARVIS HUD dilini izleyen teal/siyah merkez orb, sol sistem kontrolü ve sağ bağımsız sohbet konsolu sunar. Salt-okunur kartlar, ayrı composer, typing state, Türkçe harf farkını gözeten mesaj arama/rol filtresi, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, task-bound onay/red paneli, model-RAM kontrolü, stale-lock recovery'li ve sahiplik güvenli tek-pencere koruması, versioned yerel UI tercihleri (reset/export dahil) korunur. TUI davranışı değişmez; `jarvis --desktop` sibling release binary'sini başlatır. Pencereyi kapatmak servisi durdurmaz.
 - [x] Native bildirim contractı: kullanıcının notification tercihi kapalıysa hiçbir bildirim üretilmez; açıksa completed yanıt, `WaitingForUser` onayı ve failed/interrupted işlem için ayrı başlıklar test edilir. Notification daemon yoksa mevcut `notify-send` çağrısı best-effort kalır ve task sonucunu değiştirmez.
-- Audit integrity notu: TUI ve native client arasındaki SQLite audit sequence yarışı atomik `IMMEDIATE` transaction, busy timeout ve duplicate-sequence recovery ile düzeltildi. Mevcut kullanıcı DB'si silinmeden yedeklendi; 83 core test ve release gate PASS, native gerçek pencere retest'i açık.
+- Audit integrity notu: TUI ve native client arasındaki SQLite audit sequence yarışı atomik `IMMEDIATE` transaction, busy timeout ve duplicate-sequence recovery ile düzeltildi. Mevcut kullanıcı DB'si silinmeden yedeklendi; release gate ve native kullanıcı kabulü PASS.
+- [x] F2 kullanıcı bulguları düzeltme paketi: model-tabanlı governed routing, gerçek sistem health snapshot'ı, asenkron dosya seçici, explicit desktop exit, stale attachment hata ayrımı, Türkçe approval metinleri ve latest-message scroll düzeltildi. Ek kapanış kısayolu sonraki UX backlog'unda tutuluyor.
 - [x] Vision sınırı UX'i: TUI ve native composer seçilmiş PNG/JPEG için görselin yalnız ayrı local vision servisine gideceğini; normal chat modelinin ham piksel veya yerel path görmediğini açıkça belirtir.
 - [x] Doküman sınırı UX'i: TUI `/attach` ve native `Ctrl+O`, TXT/Markdown/PDF'yi seçebilir; belge içeriğinin modele veya tool'a gitmediğini, indekslemenin ayrı açık onaylı RAG akışı olduğunu belirtir.
 - [x] Çok dilli sohbet contractı: sistem prompt'u son kullanıcı mesajının dilini temel alır; Türkçe ve İngilizce doğal cevap istenir, kullanıcı istemedikçe çeviri/dil karışımı yapılmaz. Bu bir yanıt şablonu veya kullanıcıya özel kural değildir; gerçek çıktılar sürümlü QA setinde model kalitesi olarak ölçülür.

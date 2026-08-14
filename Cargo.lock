@@ -1775,6 +1775,8 @@ dependencies = [
  "crossterm",
  "eframe",
  "image",
+ "libc",
+ "pollster",
  "ratatui",
  "rfd",
  "rusqlite",
