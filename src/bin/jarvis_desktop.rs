@@ -35,7 +35,12 @@ struct WorkerReply {
     content: String,
     status: String,
     sources: Vec<String>,
-    notify_user: bool,
+    notification: Option<DesktopNotification>,
+}
+
+struct DesktopNotification {
+    title: &'static str,
+    content: String,
 }
 
 /// A small Linux-first lock for the native shell. The model server remains independently
@@ -174,13 +179,8 @@ impl JarvisDesktop {
             }
             self.pending = false;
             self.status = reply.status;
-            if reply.notify_user {
-                notify_response_ready(
-                    self.messages
-                        .get(reply.placeholder_index)
-                        .map(|message| message.content.as_str())
-                        .unwrap_or_default(),
-                );
+            if let Some(notification) = reply.notification {
+                notify_desktop(notification.title, &notification.content);
             }
         }
     }
@@ -299,9 +299,7 @@ impl JarvisDesktop {
                 .map(|source| format!("• {source}"))
                 .collect();
             let content = tool.error.clone().unwrap_or(tool.output);
-            let notify_user = notifications_enabled
-                && task.state == TaskState::Completed
-                && !content.trim().is_empty();
+            let notification = desktop_notification(task.state, &content, notifications_enabled);
             let status = match task.state {
                 TaskState::WaitingForUser => {
                     "İşlem onayını bekliyor; TUI komut akışı kullanılabilir.".into()
@@ -319,7 +317,7 @@ impl JarvisDesktop {
                 content,
                 status,
                 sources,
-                notify_user,
+                notification,
             });
         });
     }
@@ -646,7 +644,27 @@ fn notification_preview(content: &str) -> String {
     preview
 }
 
-fn notify_response_ready(content: &str) {
+fn desktop_notification(
+    task_state: TaskState,
+    content: &str,
+    notifications_enabled: bool,
+) -> Option<DesktopNotification> {
+    if !notifications_enabled || content.trim().is_empty() {
+        return None;
+    }
+    let title = match task_state {
+        TaskState::Completed => "JARVIS yanıtı hazır",
+        TaskState::WaitingForUser => "JARVIS onayı bekliyor",
+        TaskState::Failed | TaskState::Interrupted => "JARVIS işlem hatası",
+        TaskState::Queued | TaskState::Running | TaskState::Cancelled => return None,
+    };
+    Some(DesktopNotification {
+        title,
+        content: content.into(),
+    })
+}
+
+fn notify_desktop(title: &str, content: &str) {
     let preview = notification_preview(content);
     if preview.is_empty() {
         return;
@@ -656,7 +674,7 @@ fn notify_response_ready(content: &str) {
             "--app-name=JARVIS",
             "--icon=dialog-information",
             "--expire-time=6000",
-            "JARVIS yanıtı hazır",
+            title,
             &preview,
         ])
         .status();
@@ -704,9 +722,10 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_desktop_instance_lock, message_matches_filter, turkish_search_fold, Message,
-        MessageRole,
+        acquire_desktop_instance_lock, desktop_notification, message_matches_filter,
+        turkish_search_fold, Message, MessageRole,
     };
+    use jarvis_core::TaskState;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -759,5 +778,29 @@ mod tests {
         drop(recovered_lock);
         assert!(!path.exists());
         fs::remove_dir(path.parent().expect("test lock parent")).expect("test cleanup");
+    }
+
+    #[test]
+    fn notifications_respect_the_user_preference_and_task_outcome() {
+        assert!(desktop_notification(TaskState::Completed, "hazır", false).is_none());
+        assert_eq!(
+            desktop_notification(TaskState::Completed, "hazır", true)
+                .expect("completed notification")
+                .title,
+            "JARVIS yanıtı hazır"
+        );
+        assert_eq!(
+            desktop_notification(TaskState::WaitingForUser, "onay gerek", true)
+                .expect("approval notification")
+                .title,
+            "JARVIS onayı bekliyor"
+        );
+        assert_eq!(
+            desktop_notification(TaskState::Failed, "model erişilemedi", true)
+                .expect("failure notification")
+                .title,
+            "JARVIS işlem hatası"
+        );
+        assert!(desktop_notification(TaskState::Cancelled, "iptal", true).is_none());
     }
 }
