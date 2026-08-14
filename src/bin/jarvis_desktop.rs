@@ -177,7 +177,9 @@ impl JarvisDesktop {
             model_status: "kontrol ediliyor".into(),
             preferences_path,
             preferences,
-            baseline_pixels_per_point: context.pixels_per_point(),
+            // Native egui defaults look too small on a high-resolution desktop. Keep the
+            // user's font-scale preference, but give the HUD a readable physical baseline.
+            baseline_pixels_per_point: context.pixels_per_point().max(1.25),
             orb_phase: 0.0,
         }
     }
@@ -535,8 +537,17 @@ impl JarvisDesktop {
             .fill(COLOR_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
             .show(ui, |ui| {
-                ui.label(RichText::new("GÜVENLİK SINIRI").small().color(COLOR_TEAL));
-                ui.small("Onay gerektiren bir işlem, yalnız kendi task kimliği için çalışır.");
+                ui.label(
+                    RichText::new("GÜVENLİK SINIRI")
+                        .size(12.0)
+                        .color(COLOR_TEAL),
+                );
+                ui.label(
+                    RichText::new(
+                        "Onay gerektiren bir işlem, yalnız kendi task kimliği için çalışır.",
+                    )
+                    .size(12.0),
+                );
             });
         self.show_approval_controls(ui);
 
@@ -553,7 +564,7 @@ impl JarvisDesktop {
                 Err(error) => error,
             };
         }
-        ui.small("Pencereyi kapatmak modeli durdurmaz.");
+        ui.label(RichText::new("Pencereyi kapatmak modeli durdurmaz.").size(12.0));
 
         ui.add_space(10.0);
         egui::CollapsingHeader::new("GÖRÜNÜM AYARLARI")
@@ -562,55 +573,60 @@ impl JarvisDesktop {
     }
 
     fn show_chat_console(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            self.show_chat_composer(ui, context);
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(4.0);
+        hud_section_title(ui, "SOHBET KONSOLU");
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("ARŞİV").size(12.0).strong().color(COLOR_TEAL));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.message_search)
+                    .id(egui::Id::new("jarvis-message-search"))
+                    .desired_width(145.0)
+                    .hint_text("Mesajlarda ara"),
+            );
+            for (role, label) in [
+                (None, "Tümü"),
+                (Some(MessageRole::User), "Sen"),
+                (Some(MessageRole::Jarvis), "JARVIS"),
+                (Some(MessageRole::System), "Sistem"),
+            ] {
+                ui.selectable_value(&mut self.role_filter, role, label);
+            }
+        });
+        ui.separator();
 
-            egui::ScrollArea::vertical()
-                .id_salt("jarvis-chat-history")
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for message in self.messages.iter().filter(|message| {
-                        message_matches_filter(message, &self.message_search, self.role_filter)
-                    }) {
-                        let (label, fill, label_color) = match message.role {
-                            MessageRole::User => ("SEN", COLOR_USER, COLOR_GOLD),
-                            MessageRole::Jarvis => ("J.A.R.V.I.S", COLOR_PANEL_ALT, COLOR_TEAL),
-                            MessageRole::System => ("SİSTEM", COLOR_SYSTEM, COLOR_BLUE),
-                        };
-                        egui::Frame::group(ui.style())
-                            .fill(fill)
-                            .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(label).small().strong().color(label_color));
-                                ui.add(egui::Label::new(&message.content).selectable(true).wrap());
-                            });
-                        ui.add_space(7.0);
-                    }
-                });
-
-            ui.add_space(5.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("SOHBET ARŞİVİ").small().color(COLOR_TEAL));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.message_search)
-                        .id(egui::Id::new("jarvis-message-search"))
-                        .desired_width(130.0)
-                        .hint_text("Ara"),
-                );
-                for (role, label) in [
-                    (None, "Tümü"),
-                    (Some(MessageRole::User), "Sen"),
-                    (Some(MessageRole::Jarvis), "JARVIS"),
-                    (Some(MessageRole::System), "Sistem"),
-                ] {
-                    ui.selectable_value(&mut self.role_filter, role, label);
+        let composer_reserve = if self.queued_attachments.is_empty() {
+            190.0
+        } else {
+            290.0
+        };
+        let history_height = (ui.available_height() - composer_reserve).max(150.0);
+        egui::ScrollArea::vertical()
+            .id_salt("jarvis-chat-history")
+            .max_height(history_height)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for message in self.messages.iter().filter(|message| {
+                    message_matches_filter(message, &self.message_search, self.role_filter)
+                }) {
+                    let (label, fill, label_color) = match message.role {
+                        MessageRole::User => ("SEN", COLOR_USER, COLOR_GOLD),
+                        MessageRole::Jarvis => ("J.A.R.V.I.S", COLOR_PANEL_ALT, COLOR_TEAL),
+                        MessageRole::System => ("SİSTEM", COLOR_SYSTEM, COLOR_BLUE),
+                    };
+                    egui::Frame::group(ui.style())
+                        .fill(fill)
+                        .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(label).size(12.0).strong().color(label_color));
+                            ui.add(egui::Label::new(&message.content).selectable(true).wrap());
+                        });
+                    ui.add_space(7.0);
                 }
             });
-        });
+
+        ui.add_space(6.0);
+        ui.separator();
+        self.show_chat_composer(ui, context);
     }
 
     fn show_chat_composer(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
@@ -678,23 +694,25 @@ impl JarvisDesktop {
         let canvas = ui.max_rect();
         paint_hud_background(ui.painter(), canvas);
         ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.05).min(22.0));
+            let orb_side = ui
+                .available_width()
+                .min(ui.available_height() * 0.64)
+                .clamp(280.0, 560.0);
+            let content_height = orb_side + 112.0;
+            let top_padding = ((ui.available_height() - content_height) * 0.46).max(24.0);
+            ui.add_space(top_padding);
             ui.label(
                 RichText::new("J . A . R . V . I . S")
-                    .size(20.0)
+                    .size(24.0)
                     .strong()
                     .color(COLOR_TEAL),
             );
             ui.label(
                 RichText::new("LOCAL AI COMMAND INTERFACE")
-                    .small()
+                    .size(13.0)
                     .color(COLOR_TEAL_DIM),
             );
-            ui.add_space(10.0);
-            let orb_side = ui
-                .available_width()
-                .min(ui.available_height() * 0.58)
-                .clamp(160.0, 360.0);
+            ui.add_space(15.0);
             let (orb_rect, _) =
                 ui.allocate_exact_size(egui::vec2(orb_side, orb_side), egui::Sense::hover());
             paint_orb(
@@ -707,10 +725,15 @@ impl JarvisDesktop {
             ui.add_space(8.0);
             let activity = hud_activity_label(self.pending, &self.model_status);
             let activity_color = if self.pending { COLOR_GOLD } else { COLOR_TEAL };
-            ui.label(RichText::new(activity).strong().color(activity_color));
+            ui.label(
+                RichText::new(activity)
+                    .size(16.0)
+                    .strong()
+                    .color(activity_color),
+            );
             ui.label(
                 RichText::new("SİSTEM DURUMU: LOCAL / CPU / GOVERNED")
-                    .small()
+                    .size(12.0)
                     .color(COLOR_TEAL_DIM),
             );
         });
@@ -757,7 +780,7 @@ fn jarvis_dark_visuals() -> egui::Visuals {
 
 fn hud_section_title(ui: &mut egui::Ui, title: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).small().strong().color(COLOR_TEAL));
+        ui.label(RichText::new(title).size(14.0).strong().color(COLOR_TEAL));
         let start = ui.cursor().min;
         let end = egui::pos2(ui.max_rect().right(), start.y + 1.0);
         ui.painter()
@@ -767,9 +790,9 @@ fn hud_section_title(ui: &mut egui::Ui, title: &str) {
 
 fn hud_status_row(ui: &mut egui::Ui, name: &str, value: &str, color: Color32) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(name).small().color(COLOR_TEAL_DIM));
+        ui.label(RichText::new(name).size(12.0).color(COLOR_TEAL_DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).small().strong().color(color));
+            ui.label(RichText::new(value).size(12.0).strong().color(color));
         });
     });
 }
@@ -915,7 +938,7 @@ impl eframe::App for JarvisDesktop {
                     ui.heading(RichText::new("J . A . R . V . I . S").color(COLOR_TEAL));
                     ui.label(
                         RichText::new("LOCAL COMMAND INTERFACE")
-                            .small()
+                            .size(12.0)
                             .color(COLOR_TEAL_DIM),
                     );
                     ui.separator();
@@ -925,10 +948,10 @@ impl eframe::App for JarvisDesktop {
                         COLOR_GOLD
                     };
                     ui.colored_label(model_color, RichText::new(&self.model_status).strong());
-                    ui.label(RichText::new("VRAM 0").small().color(COLOR_TEAL_DIM));
+                    ui.label(RichText::new("VRAM 0").size(12.0).color(COLOR_TEAL_DIM));
                     ui.label(
                         RichText::new(format!("EK KUYRUĞU {}", self.queued_attachments.len()))
-                            .small()
+                            .size(12.0)
                             .color(COLOR_TEAL_DIM),
                     );
                 });
@@ -944,7 +967,7 @@ impl eframe::App for JarvisDesktop {
             .show(context, |ui| {
                 ui.label(
                     RichText::new(format!("[ CORE LOG ]  {}", self.status))
-                        .small()
+                        .size(12.0)
                         .color(COLOR_TEXT),
                 );
             });
