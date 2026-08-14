@@ -20,7 +20,7 @@ Komut hangi klasörden çalıştırılırsa çalıştırılsın bundled model ve
 ## Sohbet ekranı
 
 - Mesaj gönder: `Enter`
-- Metin kısayolları: `Ctrl+V` yapıştır; `Ctrl+Backspace` veya `Ctrl+W` önceki kelimeyi sil; `Ctrl+U` ve `Esc` taslağı temizler.
+- Metin kısayolları: `Ctrl+V` normal panoyu, mouse orta tuşu Wayland primary selection'ı yapıştırır; `Ctrl+Backspace` veya `Ctrl+W` önceki kelimeyi siler; `Ctrl+U` ve `Esc` taslağı temizler.
 - Uzun taslak: giriş kutusu tek satırdan başlayıp yazdıkça yukarı doğru büyür; ekran yüksekliğine göre sınıra ulaşınca en yeni bölüm görünür kalır.
 - Geçmişte gezin: `↑` / `↓`, `PageUp` / `PageDown` veya mouse tekerleği; geçmiş taşınca sağda ayrı bir scrollbar ve `↑↓ kaydır` başlığı görünür. Uzun mesajlar geçmişte tam olarak tutulur; görünmeyen bölümler bu yolla okunur.
 - Yanıt bildirimi: JARVIS bir yanıtı tamamladığında Hyprland bildirim alanında kısa bir önizleme gösterir.

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -278,6 +278,19 @@ fn event_loop(
             }
             Event::Paste(_) => continue,
             Event::Mouse(mouse) => {
+                if is_primary_selection_paste(mouse.kind) && !app.pending {
+                    match primary_selection_text() {
+                        Ok(pasted) if !pasted.is_empty() => {
+                            append_pasted_text(&mut app.input, &pasted);
+                            app.status = "Birincil seçim taslağa eklendi • Enter gönder".into();
+                        }
+                        Ok(_) => app.status = "Birincil seçimde metin yok.".into(),
+                        Err(error) => {
+                            app.status = format!("Birincil seçim yapıştırılamadı: {error}")
+                        }
+                    }
+                    continue;
+                }
                 apply_history_mouse_scroll(&mut app.scroll, mouse.kind);
                 continue;
             }
@@ -362,6 +375,10 @@ fn apply_history_mouse_scroll(scroll: &mut u16, kind: MouseEventKind) -> bool {
     true
 }
 
+fn is_primary_selection_paste(kind: MouseEventKind) -> bool {
+    matches!(kind, MouseEventKind::Down(MouseButton::Middle))
+}
+
 fn apply_history_key_scroll(scroll: &mut u16, key: KeyCode) -> bool {
     match key {
         KeyCode::Up => *scroll = scroll.saturating_add(3),
@@ -393,8 +410,16 @@ fn append_pasted_text(input: &mut String, pasted: &str) {
 }
 
 fn clipboard_text() -> Result<String, String> {
+    clipboard_text_from(&["--no-newline"])
+}
+
+fn primary_selection_text() -> Result<String, String> {
+    clipboard_text_from(&["--primary", "--no-newline"])
+}
+
+fn clipboard_text_from(arguments: &[&str]) -> Result<String, String> {
     let output = Command::new("wl-paste")
-        .arg("--no-newline")
+        .args(arguments)
         .output()
         .map_err(|error| format!("wl-paste çalıştırılamadı: {error}"))?;
     if !output.status.success() {
@@ -1078,9 +1103,10 @@ mod tests {
         append_pasted_text, apply_history_key_scroll, apply_history_mouse_scroll,
         delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-        native_desktop_binary_path, notification_preview, App, Message, MessageRole,
+        is_primary_selection_paste, native_desktop_binary_path, notification_preview, App, Message,
+        MessageRole,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
@@ -1229,5 +1255,16 @@ mod tests {
             native_desktop_binary_path(executable),
             std::path::PathBuf::from("/opt/jarvis/bin/jarvis-desktop")
         );
+    }
+
+    #[test]
+    fn middle_mouse_is_reserved_for_wayland_primary_selection_paste() {
+        assert!(is_primary_selection_paste(MouseEventKind::Down(
+            MouseButton::Middle
+        )));
+        assert!(!is_primary_selection_paste(MouseEventKind::ScrollDown));
+        assert!(!is_primary_selection_paste(MouseEventKind::Down(
+            MouseButton::Left
+        )));
     }
 }
