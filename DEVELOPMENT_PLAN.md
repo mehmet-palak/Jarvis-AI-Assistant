@@ -148,7 +148,8 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
   - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu; sonuçlar henüz `NOT RUN`.
 - [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
   - Koşum kaydı model dosya/hash'i, CPU/RAM durumu, task ID ve kısa insan değerlendirmesi için alan içerir; kişisel prompt/yanıtı varsayılan olarak kaydetmez.
-- [ ] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
+- [x] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
+  - Şablon: [docs/f2_bug_report_template.md](docs/f2_bug_report_template.md). Hassas sohbet/ek verisi yerine redakte özet ve correlation ID kullanılır.
 - [ ] Tek release komutu: format, test, clippy, dependency check, release build, servis health, kritik E2E smoke ve özet rapor.
 - [ ] F2.0 exit review: açık P0/P1 kullanım hatası kalmadığının manuel kabulü.
 
