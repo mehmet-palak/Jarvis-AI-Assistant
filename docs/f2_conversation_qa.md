@@ -77,6 +77,7 @@ Bu bölüm 14 Ağustos 2026'daki gerçek TUI koşumunda, düzeltme yapılmadan g
 | C15 | PASS / UX PARTIAL | Eklenen görsel gönderimden önce taşındığında/silindiğinde analiz yapılmadı. Güvenli stale-reference reddi doğru; fakat kullanıcı mesajı dosyanın değiştiğini ve vision'ın hazır olmadığını aynı belirsiz metinde birleştiriyor. |
 | C16 | PASS / UX PARTIAL | Normal yanıt ve approval için masaüstü bildirimi göründü; hata bildirimi C15'te de görüldü. Approval açıklaması İngilizce (`creates a persistent file`) kaldı. |
 | C17 | PARTIAL | Desktop içinden `exit` sonrası `jarvis-llama.service` aktif kaldı; `Super+Q` sonrası aktif kalması beklenen davranış olarak doğrulandı. Desktop `exit` servis kapatma akışında hata var. |
+| C18 | PASS | Desktop mesaj araması ve “Sen / JARVIS” rol filtreleri çalıştı; mesaj geçmişi değiştirilmeden doğru şekilde daraltıldı. |
 
 Ek UI backlog bulguları: fareyle metin seçimi yok; `Ctrl+Sol/Sağ`, `Ctrl+Backspace`, `Home/End`
 composer içinde doğru çalışmıyor veya history navigation ile karışıyor. Mouse tekerleğiyle primary
@@ -112,7 +113,7 @@ Mevcut kullanıcı DB'si yedeklendi: `jarvis.db.audit-race-backup-20260814.db`.
 | C15 | Ek seçildikten sonra dosyayı değiştir/sil | Gönderim stale reference olarak reddedilir; başka dosya analiz edilmez. | task + audit | PASS — güvenlik; UX mesajı belirsiz |
 | C16 | Native pencerede yanıt/onay/hata | Notification tercihi açıksa uygun bildirim; kapalıysa bildirim yok. | ekran + preference | PASS — bildirim; approval dili UX backlog |
 | C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | `/quit`, `Ctrl+C` ve pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | PARTIAL — desktop `exit` servisi durdurmadı; `Super+Q` davranışı PASS |
-| C18 | Native mesaj araması ve rol filtresi | Salt-okunur kartlarda Türkçe arama/rol filtresi doğru daraltır; mesajı değiştirmez. | ekran | NOT RUN |
+| C18 | Native mesaj araması ve rol filtresi | Salt-okunur kartlarda Türkçe arama/rol filtresi doğru daraltır; mesajı değiştirmez. | ekran | PASS |
 | C19 | Tema/font/notification ayarını değiştirip aç-kapa | Sadece `desktop.json` tercihleri kalır; sohbet veya ek path'i config'e yazılmaz. | config diff + ekran | NOT RUN |
 | C20 | İkinci native pencere açma ve stale lock | İkinci pencere reddedilir; bayat lock sonraki açılışı engellemez. | terminal + ekran | NOT RUN |
 
