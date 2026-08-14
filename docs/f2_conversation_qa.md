@@ -73,7 +73,7 @@ Bu bölüm 14 Ağustos 2026'daki gerçek TUI koşumunda, düzeltme yapılmadan g
 | C11 | PASS / UX ISSUE | Model kapalıyken draft korundu; model loading durumunda Enter ile retry kullanıcı için belirsiz/etkisiz kaldı. |
 | C12 | FAIL | Uzun yanıtta gereksiz tekrar, yüksek latency ve scrollbar'ın en alta tam inmeme problemi görüldü. |
 | C13 | PASS / PERF ISSUE | Uzun yanıt cümleleri tamamlandı; latency yine beklenenden yüksek. |
-| C14 | BLOCKED → RETEST | Boşluklu path ilk denemede reddedildi, ikinci denemede JPEG kuyruğa alındı. Audit integrity panic'inin kökü iki süreçli audit sequence yarışıydı; atomik SQLite tahsisi ve duplicate-chain recovery düzeltildi. Gerçek native pencere/vision gönderimi retest bekliyor. |
+| C14 | PARTIAL — RETEST | Audit panic düzeltmesinden sonra native görsel turu çalıştı. Ancak CPU vision yanıtı beklenenden uzun sürdü ve gözlem gereğinden kısa kaldı; mevcut vision isteği `max_tokens=96` ile sınırlı. Dosya seçici sırasında zaman zaman “Uygulama yanıt vermiyor” uyarısı da görüldü. Yanıt kapsamı, ilk-token latency'si ve picker UX'i ayrı backlog bulguları olarak tutuluyor. |
 
 Ek UI backlog bulguları: fareyle metin seçimi yok; `Ctrl+Sol/Sağ`, `Ctrl+Backspace`, `Home/End`
 composer içinde doğru çalışmıyor veya history navigation ile karışıyor. Mouse tekerleğiyle primary
@@ -105,7 +105,7 @@ Mevcut kullanıcı DB'si yedeklendi: `jarvis.db.audit-race-backup-20260814.db`.
 | C11 | Model servisi kapalıyken mesaj gönderme | Taslak kaybolmaz; kullanıcıya modelin hazır olmadığı anlaşılır. | Manuel TUI koşumu + service state | PASS — retry UX backlog |
 | C12 | Uzun kullanıcı turu ardından yanıt | Kullanıcı turu history'de eksiksiz görünür; scrollbar en yeni yanıtı saklamaz. | Manuel TUI koşumu | FAIL — scrollbar/latency/repetition |
 | C13 | Yanıt token limitine yaklaşan istek | Cümle yarım kalmadan bounded continuation veya açık hata görülür. | Local smoke + insan notu | SMOKE PASS — insan değerlendirmesi bekliyor |
-| C14 | PNG/JPEG ekleyip `ne görüyorsun?` | Vision hazırsa yalnız local vision gözlemiyle yanıt verir; hazır değilse güvenli hata döner ve gördüğünü iddia etmez. | Manuel TUI attachment + native launch | BLOCKED — audit integrity panic |
+| C14 | PNG/JPEG ekleyip `ne görüyorsun?` | Vision hazırsa yalnız local vision gözlemiyle yanıt verir; hazır değilse güvenli hata döner ve gördüğünü iddia etmez. | Manuel TUI attachment + native launch | PARTIAL — vision çalıştı; latency yüksek, yanıt kapsamı kısa |
 | C15 | Ek seçildikten sonra dosyayı değiştir/sil | Gönderim stale reference olarak reddedilir; başka dosya analiz edilmez. | task + audit | NOT RUN |
 | C16 | Native pencerede yanıt/onay/hata | Notification tercihi açıksa uygun bildirim; kapalıysa bildirim yok. | ekran + preference | NOT RUN |
 | C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | `/quit`, `Ctrl+C` ve pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | `exit`, `/quit`, `Ctrl+C` ve terminal-close PASS ([smoke](f2_lifecycle_smoke_2026-08-14.md)); native pencere kapanışı PENDING |
