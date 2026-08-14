@@ -41,6 +41,7 @@ cargo run --offline --bin jarvis-desktop
 ```
 
 - Pencereyi `Super + Q` ile kapatmak model servisini durdurmaz; soldaki **Modeli RAM'den çıkar** düğmesi bunu açıkça yapar.
+- Mesaj kartları düzenlenemez. Ortadaki arama alanı mevcut oturumda Türkçe büyük/küçük harf farkını gözetmeden arar; **Sen / JARVIS / Sistem** filtresiyle daraltılabilir.
 - Tema, yazı ölçeği ve bildirim tercihi yalnız `~/.config/jarvis/desktop.json` içinde tutulur; ekrandan varsayılanlara döndürülebilir veya kullanıcı seçtiği konuma dışa aktarılabilir. Sohbet içeriği, ek dosya yolu veya kimlik bilgisi bu dosyaya yazılmaz.
 - `Ctrl+O` veya **Görsel ekle** ile PNG/JPEG seçilir; önizleme ve kaldırma işlemi dosyayı silmez. Mevcut text-only model görsel piksellerini henüz analiz etmez; vision GGUF ve `mmproj` indirilene kadar ek sadece doğrulanmış metadata olarak taşınır.
 

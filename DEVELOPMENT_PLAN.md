@@ -185,9 +185,9 @@ Bu turda kanıtlanan alt dilim:
 
 #### F2 güncel çalışma kaydı — henüz exit gate değildir
 
-- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 72 test, strict Clippy ve release build çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
+- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 73 test, strict Clippy ve release build çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
 - [x] TUI davranış regresyonu: çok satırlı paste, Türkçe/UTF-8 kelime silme, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, terminal-control karakterleri, klavye/mouse scroll, `Home`/`End`, küçük terminalde scrollbar ve en yeni turun görünürlüğü testlere bağlandı.
-- [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde salt-okunur kartlar, ayrı composer, typing state, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, model-RAM kontrolü ve versioned yerel UI tercihleri (reset/export dahil) sunar. Pencereyi kapatmak servisi durdurmaz.
+- [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde salt-okunur kartlar, ayrı composer, typing state, Türkçe harf farkını gözeten mesaj arama/rol filtresi, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, model-RAM kontrolü ve versioned yerel UI tercihleri (reset/export dahil) sunar. Pencereyi kapatmak servisi durdurmaz.
 - [ ] Native UI Wayland/Hyprland gerçek smoke: açılış, resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması kullanıcı masaüstüsünde doğrulanacak.
 - [ ] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilecek model + `mmproj` olmadan görsel pikselleri modele verilemez; mevcut davranış güvenli metadata-only fallback'tir.
 

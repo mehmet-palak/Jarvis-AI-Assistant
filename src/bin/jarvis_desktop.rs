@@ -15,7 +15,7 @@ use jarvis_core::{
     Request, Runtime, SqliteStore, TaskState, ThemePreference,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageRole {
     User,
     Jarvis,
@@ -42,6 +42,8 @@ struct JarvisDesktop {
     receiver: mpsc::Receiver<WorkerReply>,
     sender: mpsc::Sender<WorkerReply>,
     messages: Vec<Message>,
+    message_search: String,
+    role_filter: Option<MessageRole>,
     draft: String,
     queued_attachments: Vec<AttachmentRef>,
     previews: HashMap<String, TextureHandle>,
@@ -88,6 +90,8 @@ impl JarvisDesktop {
                 role: MessageRole::System,
                 content: "JARVIS desktop hazır. Mesajlar salt-okunur kartlarda görünür; yalnız alttaki composer düzenlenebilir. Pencereyi kapatmak model sunucusunu RAM'den çıkarmaz.".into(),
             }],
+            message_search: String::new(),
+            role_filter: None,
             draft: String::new(),
             queued_attachments: vec![],
             previews: HashMap::new(),
@@ -455,11 +459,38 @@ impl eframe::App for JarvisDesktop {
         });
 
         egui::CentralPanel::default().show(context, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Geçmişte ara:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.message_search)
+                        .id(egui::Id::new("jarvis-message-search"))
+                        .hint_text("Bu oturumdaki mesajlarda ara"),
+                );
+                for (role, label) in [
+                    (None, "Tümü"),
+                    (Some(MessageRole::User), "Sen"),
+                    (Some(MessageRole::Jarvis), "JARVIS"),
+                    (Some(MessageRole::System), "Sistem"),
+                ] {
+                    ui.selectable_value(&mut self.role_filter, role, label);
+                }
+                let visible_count = self
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        message_matches_filter(message, &self.message_search, self.role_filter)
+                    })
+                    .count();
+                ui.small(format!("{visible_count}/{} tur", self.messages.len()));
+            });
+            ui.separator();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for message in &self.messages {
+                    for message in self.messages.iter().filter(|message| {
+                        message_matches_filter(message, &self.message_search, self.role_filter)
+                    }) {
                         let (label, fill) = match message.role {
                             MessageRole::User => ("SEN", Color32::from_rgb(73, 69, 41)),
                             MessageRole::Jarvis => ("JARVIS", Color32::from_rgb(35, 76, 70)),
@@ -478,6 +509,27 @@ impl eframe::App for JarvisDesktop {
             .resizable(false)
             .show(context, |ui| ui.small(&self.status));
     }
+}
+
+fn message_matches_filter(
+    message: &Message,
+    search: &str,
+    role_filter: Option<MessageRole>,
+) -> bool {
+    role_filter.is_none_or(|role| message.role == role)
+        && turkish_search_fold(&message.content).contains(&turkish_search_fold(search))
+}
+
+fn turkish_search_fold(value: &str) -> String {
+    let mut folded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            'I' => folded.push('ı'),
+            'İ' => folded.push('i'),
+            _ => folded.extend(character.to_lowercase()),
+        }
+    }
+    folded
 }
 
 fn load_preview(
@@ -583,4 +635,30 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{message_matches_filter, turkish_search_fold, Message, MessageRole};
+
+    #[test]
+    fn message_search_is_case_insensitive_for_turkish_i_variants_and_role_scoped() {
+        let user_message = Message {
+            role: MessageRole::User,
+            content: "İstanbul'da bugün hava nasıl?".into(),
+        };
+        assert_eq!(turkish_search_fold("İSTANBUL"), "istanbul");
+        assert!(message_matches_filter(&user_message, "istanbul", None));
+        assert!(message_matches_filter(
+            &user_message,
+            "hava",
+            Some(MessageRole::User)
+        ));
+        assert!(!message_matches_filter(
+            &user_message,
+            "hava",
+            Some(MessageRole::Jarvis)
+        ));
+        assert!(!message_matches_filter(&user_message, "ankara", None));
+    }
 }
