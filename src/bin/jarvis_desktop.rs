@@ -51,7 +51,12 @@ struct DesktopInstanceLock {
 
 impl Drop for DesktopInstanceLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let owns_lock = fs::read_to_string(&self.path)
+            .ok()
+            .is_some_and(|content| content.trim() == std::process::id().to_string());
+        if owns_lock {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -777,6 +782,17 @@ mod tests {
             acquire_desktop_instance_lock(path.clone()).expect("stale lock recovery");
         drop(recovered_lock);
         assert!(!path.exists());
+        fs::remove_dir(path.parent().expect("test lock parent")).expect("test cleanup");
+    }
+
+    #[test]
+    fn desktop_lock_drop_never_removes_a_replaced_lock() {
+        let path = temporary_lock_path();
+        let lock = acquire_desktop_instance_lock(path.clone()).expect("first lock");
+        fs::write(&path, "another-process\n").expect("replacement fixture");
+        drop(lock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "another-process\n");
+        fs::remove_file(&path).expect("fixture cleanup");
         fs::remove_dir(path.parent().expect("test lock parent")).expect("test cleanup");
     }
 
