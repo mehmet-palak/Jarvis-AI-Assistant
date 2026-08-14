@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -242,11 +242,7 @@ fn event_loop(
             }
             Event::Paste(_) => continue,
             Event::Mouse(mouse) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => app.scroll = app.scroll.saturating_add(3),
-                    MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
-                    _ => {}
-                }
+                apply_history_mouse_scroll(&mut app.scroll, mouse.kind);
                 continue;
             }
             Event::Key(key) => key,
@@ -261,28 +257,8 @@ fn event_loop(
             app.running = false;
             continue;
         }
-        match key.code {
-            KeyCode::Up => {
-                app.scroll = app.scroll.saturating_add(3);
-                continue;
-            }
-            KeyCode::PageUp => {
-                app.scroll = app.scroll.saturating_add(8);
-                continue;
-            }
-            KeyCode::Down => {
-                app.scroll = app.scroll.saturating_sub(3);
-                continue;
-            }
-            KeyCode::PageDown | KeyCode::End => {
-                app.scroll = 0;
-                continue;
-            }
-            KeyCode::Home => {
-                app.scroll = u16::MAX;
-                continue;
-            }
-            _ => {}
+        if apply_history_key_scroll(&mut app.scroll, key.code) {
+            continue;
         }
         if app.pending {
             if key.code == KeyCode::Esc {
@@ -290,10 +266,7 @@ fn event_loop(
             }
             continue;
         }
-        let control_paste = (key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('v' | 'V')))
-            || matches!(key.code, KeyCode::Char('\u{16}'));
-        if control_paste {
+        if is_clipboard_paste_shortcut(key) {
             match clipboard_text() {
                 Ok(pasted) if !pasted.is_empty() => {
                     append_pasted_text(&mut app.input, &pasted);
@@ -304,18 +277,17 @@ fn event_loop(
             }
             continue;
         }
-        let control_word_delete = (key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Backspace | KeyCode::Char('w' | 'W')))
-            || matches!(key.code, KeyCode::Char('\u{17}'));
-        if control_word_delete {
+        if is_delete_previous_word_shortcut(key) {
             delete_previous_word(&mut app.input);
             continue;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('u' | 'U'))
-        {
+        if is_clear_draft_shortcut(key) {
             app.input.clear();
             app.status = "Taslak temizlendi.".into();
+            continue;
+        }
+        if key.code == KeyCode::Esc {
+            app.input.clear();
             continue;
         }
         match key.code {
@@ -324,11 +296,46 @@ fn event_loop(
                 app.input.pop();
             }
             KeyCode::Char(character) => app.input.push(character),
-            KeyCode::Esc => app.input.clear(),
             _ => {}
         }
     }
     Ok(())
+}
+
+fn is_clipboard_paste_shortcut(key: KeyEvent) -> bool {
+    (key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('v' | 'V')))
+        || matches!(key.code, KeyCode::Char('\u{16}'))
+}
+
+fn is_delete_previous_word_shortcut(key: KeyEvent) -> bool {
+    (key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Backspace | KeyCode::Char('w' | 'W')))
+        || matches!(key.code, KeyCode::Char('\u{17}'))
+}
+
+fn is_clear_draft_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('u' | 'U'))
+}
+
+fn apply_history_mouse_scroll(scroll: &mut u16, kind: MouseEventKind) -> bool {
+    match kind {
+        MouseEventKind::ScrollUp => *scroll = scroll.saturating_add(3),
+        MouseEventKind::ScrollDown => *scroll = scroll.saturating_sub(3),
+        _ => return false,
+    }
+    true
+}
+
+fn apply_history_key_scroll(scroll: &mut u16, key: KeyCode) -> bool {
+    match key {
+        KeyCode::Up => *scroll = scroll.saturating_add(3),
+        KeyCode::PageUp => *scroll = scroll.saturating_add(8),
+        KeyCode::Down => *scroll = scroll.saturating_sub(3),
+        KeyCode::PageDown | KeyCode::End => *scroll = 0,
+        KeyCode::Home => *scroll = u16::MAX,
+        _ => return false,
+    }
+    true
 }
 
 fn append_pasted_text(input: &mut String, pasted: &str) {
@@ -1032,9 +1039,13 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_pasted_text, delete_previous_word, draft_rows, history_line_count, history_lines,
-        input_view, notification_preview, Message, MessageRole,
+        append_pasted_text, apply_history_key_scroll, apply_history_mouse_scroll,
+        delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
+        is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
+        notification_preview, App, Message, MessageRole,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn long_draft_keeps_its_tail_visible() {
@@ -1094,5 +1105,84 @@ mod tests {
         assert_eq!(input, "merhaba dünya");
         delete_previous_word(&mut input);
         assert_eq!(input, "merhaba");
+    }
+
+    #[test]
+    fn editing_shortcuts_cover_terminal_and_control_character_variants() {
+        assert!(is_clipboard_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_clipboard_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('\u{16}'),
+            KeyModifiers::NONE,
+        )));
+        assert!(is_delete_previous_word_shortcut(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_delete_previous_word_shortcut(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_clear_draft_shortcut(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!is_delete_previous_word_shortcut(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+    }
+
+    #[test]
+    fn compact_terminal_still_shows_the_latest_turn_and_a_scrollbar() {
+        let backend = TestBackend::new(56, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new("ready");
+        app.messages.push(Message {
+            role: MessageRole::User,
+            content: "önceki kullanıcı mesajı ".repeat(18),
+        });
+        app.messages.push(Message {
+            role: MessageRole::Jarvis,
+            content: "EN_YENI_YANIT görünür kalmalı".into(),
+        });
+        terminal
+            .draw(|frame| super::draw(frame.area(), frame, &app))
+            .expect("render compact terminal");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("EN_YENI_YANIT"));
+        assert!(rendered.contains("Mesajlar — ↑↓ kaydır"));
+    }
+
+    #[test]
+    fn keyboard_and_mouse_navigation_follow_and_leave_the_latest_turn() {
+        let mut scroll = 0;
+        assert!(apply_history_key_scroll(&mut scroll, KeyCode::Up));
+        assert_eq!(scroll, 3);
+        assert!(apply_history_mouse_scroll(
+            &mut scroll,
+            MouseEventKind::ScrollUp
+        ));
+        assert_eq!(scroll, 6);
+        assert!(apply_history_key_scroll(&mut scroll, KeyCode::PageUp));
+        assert_eq!(scroll, 14);
+        assert!(apply_history_mouse_scroll(
+            &mut scroll,
+            MouseEventKind::ScrollDown
+        ));
+        assert_eq!(scroll, 11);
+        assert!(apply_history_key_scroll(&mut scroll, KeyCode::End));
+        assert_eq!(scroll, 0);
+        assert!(apply_history_key_scroll(&mut scroll, KeyCode::Home));
+        assert_eq!(scroll, u16::MAX);
+        assert!(!apply_history_key_scroll(&mut scroll, KeyCode::Char('x')));
     }
 }

@@ -5,12 +5,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use image::GenericImageView;
 use sha2::{Digest, Sha256};
 
 use crate::{ContentProvenance, DataSensitivity};
 
 pub const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
-pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+pub const MAX_IMAGE_PIXELS: u64 = 20_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {
@@ -98,6 +99,14 @@ pub fn inspect_local_image(path: impl AsRef<Path>) -> Result<AttachmentRef, Stri
             "attachment exceeds {} megapixel safety limit",
             MAX_IMAGE_PIXELS / 1_000_000
         ));
+    }
+    // Header dimensions alone are not enough: a malformed or compressed-bomb payload can claim
+    // sane dimensions and still fail during decode. Decode once before an attachment reaches UI,
+    // model or any later vision adapter.
+    let decoded = image::load_from_memory(&bytes)
+        .map_err(|error| format!("attachment image decode failed: {error}"))?;
+    if decoded.dimensions() != (width, height) {
+        return Err("attachment decoder dimensions do not match its header".into());
     }
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
     let attachment_id = format!("attachment-{}", &sha256[..16]);
@@ -265,13 +274,22 @@ mod tests {
         path
     }
 
+    fn valid_image_bytes(kind: AttachmentKind, width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
+        let format = match kind {
+            AttachmentKind::Png => image::ImageFormat::Png,
+            AttachmentKind::Jpeg => image::ImageFormat::Jpeg,
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut cursor, format)
+            .expect("image fixture should encode");
+        cursor.into_inner()
+    }
+
     #[test]
     fn png_intake_uses_magic_bytes_hash_and_canonical_path() {
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        png.extend_from_slice(&[0, 0, 0, 13]);
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&2_u32.to_be_bytes());
-        png.extend_from_slice(&3_u32.to_be_bytes());
+        let png = valid_image_bytes(AttachmentKind::Png, 2, 3);
         let path = temporary_file("valid", &png);
         let attachment = inspect_local_image(&path).expect("valid PNG accepted");
         assert_eq!(attachment.kind, AttachmentKind::Png);
@@ -302,11 +320,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_unbounded_or_noncanonical_attachment_records() {
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        png.extend_from_slice(&[0, 0, 0, 13]);
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&1_u32.to_be_bytes());
-        png.extend_from_slice(&1_u32.to_be_bytes());
+        let png = valid_image_bytes(AttachmentKind::Png, 1, 1);
         let path = temporary_file("record", &png);
         let mut attachment = inspect_local_image(&path).expect("valid PNG accepted");
         attachment.canonical_path = PathBuf::from("relative.png");
@@ -318,17 +332,23 @@ mod tests {
 
     #[test]
     fn queued_attachment_is_rejected_after_file_replacement_or_deletion() {
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        png.extend_from_slice(&[0, 0, 0, 13]);
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&1_u32.to_be_bytes());
-        png.extend_from_slice(&1_u32.to_be_bytes());
+        let png = valid_image_bytes(AttachmentKind::Png, 1, 1);
         let path = temporary_file("stale", &png);
         let attachment = inspect_local_image(&path).expect("valid PNG accepted");
         fs::write(&path, b"replaced").expect("fixture replacement");
         assert!(revalidate_local_attachment(&attachment)
             .unwrap_err()
             .contains("no longer usable"));
+        fs::remove_file(path).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn jpeg_intake_uses_magic_bytes_and_full_decode() {
+        let jpeg = valid_image_bytes(AttachmentKind::Jpeg, 4, 2);
+        let path = temporary_file("jpeg", &jpeg);
+        let attachment = inspect_local_image(&path).expect("valid JPEG accepted");
+        assert_eq!(attachment.kind, AttachmentKind::Jpeg);
+        assert_eq!((attachment.width, attachment.height), (4, 2));
         fs::remove_file(path).expect("fixture should be removed");
     }
 

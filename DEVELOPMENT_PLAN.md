@@ -68,8 +68,8 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F0 | Mimari, typed core, persistence ve güvenlik contractları | TAMAMLANDI | — |
 | F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
-| F3 | Kontrollü bellek, profil ve gerçek RAG | DEVAM EDİYOR | F2 attachment/provenance temeli |
-| F4 | Onaylı, izole coding ve yerel iş workbench'i | DEVAM EDİYOR | F2 + OS-isolated worker |
+| F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
+| F4 | Onaylı, izole coding ve yerel iş workbench'i | BEKLENİYOR — F2 exit gate | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
@@ -170,6 +170,8 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
 - [ ] Dosya doğrulama: MIME magic-byte kontrolü, canonical path, allowlist, boyut/piksel limitleri, decode bomb/bozuk dosya reddi ve SHA-256.
 - [ ] Metin/doküman ekleri: ilk aşamada yalnız güvenli metadata + ayrı RAG ingestion kuyruğu; ekin ham içeriği tool talimatı sayılmaz.
 - [ ] Vision model kararı: CPU uyumlu multimodal GGUF + eşleşen `mmproj` adayları, lisans, disk/RAM/latency karşılaştırması. **İndirme ancak kullanıcı onayından sonra.**
+
+> Kullanıcı kararı — 14 Ağustos 2026: normal geliştirme indirimi önce boyutu bildirilerek **en fazla 100–200 MB** olabilir. Vision GGUF (yaklaşık 2–4 GB) ve `mmproj` (yaklaşık 0.4–1 GB) şimdilik ertelendi; birkaç saat sonraki durum güncellemesinde kullanıcıya yeniden hatırlatılacak. Bu dosyalar için açık “indir” onayı olmadan hiçbir indirme başlatılmaz.
 - [ ] Vision service: text modelinden ayrı loopback-only endpoint, health/lifecycle, attachment byte/path passing ve timeout/cancel sınırı.
 - [ ] Vision response policy: yalnız görüntü açıklaması/analizi; görüntü OCR metni untrusted data, tool authority yok; desteklenmeyen/hassas içerik için açık hata.
 - [ ] Attachment privacy UX: ek geçmişini görme, tekli/tüm ekleri silme, ek gönderilmeden önce local-only uyarısı ve export.
@@ -181,11 +183,19 @@ Bu turda kanıtlanan alt dilim:
 - [x] PNG/JPEG magic-byte/header doğrulaması, boyut/piksel limiti, path containment, stale/replaced-file reddi ve attribute-escaping regresyon testleri eklendi.
 - [x] TUI ek kuyruğu: `/attach <PNG/JPEG-yolu>`, `/attachments` ve `/attachments clear`; gönderilen ekler yalnız metadata/data envelope olarak modele taşınır. Text-only model için görsel analiz iddiası yapılmaz.
 
+#### F2 güncel çalışma kaydı — henüz exit gate değildir
+
+- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 72 test, strict Clippy ve release build çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
+- [x] TUI davranış regresyonu: çok satırlı paste, Türkçe/UTF-8 kelime silme, `Ctrl+V`, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, terminal-control karakterleri, klavye/mouse scroll, `Home`/`End`, küçük terminalde scrollbar ve en yeni turun görünürlüğü testlere bağlandı.
+- [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde salt-okunur kartlar, ayrı composer, typing state, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, model-RAM kontrolü ve versioned yerel UI tercihleri sunar. Pencereyi kapatmak servisi durdurmaz.
+- [ ] Native UI Wayland/Hyprland gerçek smoke: açılış, resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması kullanıcı masaüstüsünde doğrulanacak.
+- [ ] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilecek model + `mmproj` olmadan görsel pikselleri modele verilemez; mevcut davranış güvenli metadata-only fallback'tir.
+
 Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.
 
 ### F3 — Kullanıcı profili, kontrollü bellek ve gerçek RAG
 
-Durum: DEVAM EDİYOR — onaylı bellek ve FTS-RAG ilk dikey dilimi tamamlandı.
+Durum: BEKLENİYOR — F2 exit gate kapanana kadar yeni F3 işi yapılmaz; mevcut temel kod park edilmiştir.
 
 Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir biçimde hatırlaması; belgelerden kaynaklı cevap vermesi.
 
@@ -218,7 +228,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: DEVAM EDİYOR — güvenli patch proposal/apply kontratı tamamlandı; worker operasyon sınırları açık.
+Durum: BEKLENİYOR — F2 exit gate kapanana kadar yeni F4 işi yapılmaz; mevcut temel kod park edilmiştir.
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 

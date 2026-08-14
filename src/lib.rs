@@ -1,11 +1,16 @@
 //! JARVIS implementation baseline: a small, typed, policy-gated vertical slice.
 
 pub mod attachments;
+pub mod desktop_config;
 pub mod workbench;
 
 pub use attachments::{
     inspect_local_image, revalidate_local_attachment, validate_attachment, AttachmentKind,
     AttachmentRef,
+};
+pub use desktop_config::{
+    default_desktop_preferences_path, load_desktop_preferences, save_desktop_preferences,
+    DesktopPreferences, ThemePreference,
 };
 pub use workbench::{
     apply_approved_patch, approve_patch, create_patch_proposal, create_read_only_coding_plan,

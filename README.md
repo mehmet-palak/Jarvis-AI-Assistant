@@ -12,7 +12,7 @@ Geliştirme sırasında:
 
 ```bash
 cd /home/mehmet/jarvis/jarvis
-cargo run
+cargo run --offline
 ```
 
 Komut hangi klasörden çalıştırılırsa çalıştırılsın bundled model ve runtime kurulum kökünden bulunur. İlk açılışta model sunucusu aktif değilse JARVIS onu otomatik başlatır; model RAM'e yüklenirken ekran açık kalır ve mesaj kutusu korunur.
@@ -30,6 +30,19 @@ Komut hangi klasörden çalıştırılırsa çalıştırılsın bundled model ve
 - `exit`: sohbet ekranını kapatır ve yerel model sunucusunu durdurur; RAM boşalır.
 
 Hyprland'de terminali `Super + Q` ile kapatmak da sadece arayüzü sonlandırır; model sunucusu çalışmaya devam eder. Sonraki `jarvis` açılışı model hâlâ RAM'deyse doğrudan kullanır, değilse otomatik başlatır.
+
+## Native masaüstü penceresi (F2 önizleme)
+
+Terminal arayüzü günlük kullanım için korunur. Aynı governed core'a bağlı, salt-okunur mesaj kartları ve ayrı composer kullanan native Wayland penceresi ise şu an F2 doğrulama aşamasındadır:
+
+```bash
+cd /home/mehmet/jarvis/jarvis
+cargo run --offline --bin jarvis-desktop
+```
+
+- Pencereyi `Super + Q` ile kapatmak model servisini durdurmaz; soldaki **Modeli RAM'den çıkar** düğmesi bunu açıkça yapar.
+- Tema, yazı ölçeği ve bildirim tercihi yalnız `~/.config/jarvis/desktop.json` içinde tutulur. Sohbet içeriği, ek dosya yolu veya kimlik bilgisi bu dosyaya yazılmaz.
+- `Ctrl+O` veya **Görsel ekle** ile PNG/JPEG seçilir; önizleme ve kaldırma işlemi dosyayı silmez. Mevcut text-only model görsel piksellerini henüz analiz etmez; vision GGUF ve `mmproj` indirilene kadar ek sadece doğrulanmış metadata olarak taşınır.
 
 ## Local model çalışma profili
 
@@ -70,10 +83,10 @@ Kalıcı not işlemleri kullanıcı onayı bekler. Notlar `notes/` altında olu�
 ## Doğrulama
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build --release
-cargo run --bin router_benchmark
+bash scripts/release_check.sh
+# Model servisinin yalnız loopback health kontrolünü de eklemek için:
+bash scripts/release_check.sh --with-service
+cargo run --offline --bin router_benchmark
 ```
 
 `router_benchmark`, local modelin dar desktop routing görevlerindeki ilk baseline ölçümüdür; genel model kalitesi veya security/coding benchmarkı değildir.
