@@ -49,6 +49,7 @@ jarvis --desktop
 - Pencereyi `Super + Q` ile kapatmak model servisini durdurmaz; soldaki **Modeli RAM'den çıkar** düğmesi bunu açıkça yapar.
 - Birden fazla native pencere açılmaz; kapanmamış/eski kilit güvenle temizlenir ve mevcut pencere kullanılmaya devam edilir.
 - Mesaj kartları düzenlenemez. Ortadaki arama alanı mevcut oturumda Türkçe büyük/küçük harf farkını gözetmeden arar; **Sen / JARVIS / Sistem** filtresiyle daraltılabilir.
+- Onay isteyen işler soldaki panelde task ID ile görünür; **Onayla** yalnız o task'ı core approval zincirinden geçirir, **Reddet** yan etkiyi çalıştırmadan iptal eder.
 - Tema, yazı ölçeği ve bildirim tercihi yalnız `~/.config/jarvis/desktop.json` içinde tutulur; ekrandan varsayılanlara döndürülebilir veya kullanıcı seçtiği konuma dışa aktarılabilir. Bildirim tercihi açıksa yanıt, onay bekleme ve işlem hatası bildirilir. Sohbet içeriği, ek dosya yolu veya kimlik bilgisi bu dosyaya yazılmaz.
 - `Ctrl+O` veya **Görsel ekle** ile PNG/JPEG seçilir; önizleme ve kaldırma işlemi dosyayı silmez. Mevcut text-only model görsel piksellerini henüz analiz etmez; vision GGUF ve `mmproj` indirilene kadar ek sadece doğrulanmış metadata olarak taşınır.
 

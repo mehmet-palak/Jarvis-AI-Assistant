@@ -114,6 +114,7 @@ struct JarvisDesktop {
     draft: String,
     queued_attachments: Vec<AttachmentRef>,
     previews: HashMap<String, TextureHandle>,
+    pending_approval_tasks: Vec<String>,
     pending: bool,
     status: String,
     last_model_check: Instant,
@@ -148,6 +149,13 @@ impl JarvisDesktop {
                 Some("UI ayar yolu bulunamadı; tercihler bu oturumda kalacak.".into()),
             ),
         };
+        let pending_approval_tasks = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .pending_approvals()
+            .into_iter()
+            .map(|approval| approval.task_id.clone())
+            .collect();
         Self {
             runtime,
             provider,
@@ -162,6 +170,7 @@ impl JarvisDesktop {
             draft: String::new(),
             queued_attachments: vec![],
             previews: HashMap::new(),
+            pending_approval_tasks,
             pending: false,
             status: preferences_status.unwrap_or(initial_status),
             last_model_check: Instant::now(),
@@ -187,7 +196,74 @@ impl JarvisDesktop {
             if let Some(notification) = reply.notification {
                 notify_desktop(notification.title, &notification.content);
             }
+            self.refresh_pending_approvals();
         }
+    }
+
+    fn refresh_pending_approvals(&mut self) {
+        self.pending_approval_tasks = self
+            .runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .pending_approvals()
+            .into_iter()
+            .map(|approval| approval.task_id.clone())
+            .collect();
+    }
+
+    fn approve_task(&mut self, task_id: &str) {
+        let result = self
+            .runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .approve(task_id);
+        match result {
+            Some((task, tool, verification)) => {
+                let content = tool.error.unwrap_or(tool.output);
+                self.messages.push(Message {
+                    role: MessageRole::System,
+                    content: format!(
+                        "Onaylı işlem tamamlandı ({}) • doğrulama: {:?}\n{}",
+                        task.task_id, verification.status, content
+                    ),
+                });
+                self.status = format!(
+                    "Onaylı işlem tamamlandı • doğrulama: {:?}",
+                    verification.status
+                );
+                if self.preferences.notifications_enabled {
+                    notify_desktop("JARVIS onaylı işlemi tamamladı", &content);
+                }
+            }
+            None => {
+                self.status =
+                    "Onay uygulanamadı; task bulunamadı, süresi doldu veya artık beklemiyor."
+                        .into();
+            }
+        }
+        self.refresh_pending_approvals();
+    }
+
+    fn reject_task(&mut self, task_id: &str) {
+        let task = self
+            .runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .cancel(task_id);
+        match task {
+            Some(task) => {
+                self.messages.push(Message {
+                    role: MessageRole::System,
+                    content: format!("İşlem reddedildi: {}", task.task_id),
+                });
+                self.status = "İşlem reddedildi; yan etki çalıştırılmadı.".into();
+            }
+            None => {
+                self.status =
+                    "Reddetme uygulanamadı; task bulunamadı veya artık beklemiyor.".into();
+            }
+        }
+        self.refresh_pending_approvals();
     }
 
     fn refresh_model_state(&mut self) {
@@ -417,6 +493,31 @@ impl JarvisDesktop {
             ui.small(format!("Ayar dosyası: {}", path.display()));
         }
     }
+
+    fn show_approval_controls(&mut self, ui: &mut egui::Ui) {
+        if self.pending_approval_tasks.is_empty() {
+            return;
+        }
+        ui.separator();
+        ui.heading("Onay bekleyen işlemler");
+        ui.colored_label(
+            Color32::from_rgb(205, 165, 65),
+            "Onay yalnız aşağıdaki task için geçerlidir. Reddetmek hiçbir yan etki çalıştırmaz.",
+        );
+        for task_id in self.pending_approval_tasks.clone() {
+            ui.group(|ui| {
+                ui.monospace(&task_id);
+                ui.horizontal(|ui| {
+                    if ui.button("Onayla").clicked() {
+                        self.approve_task(&task_id);
+                    }
+                    if ui.button("Reddet").clicked() {
+                        self.reject_task(&task_id);
+                    }
+                });
+            });
+        }
+    }
 }
 
 impl eframe::App for JarvisDesktop {
@@ -452,6 +553,7 @@ impl eframe::App for JarvisDesktop {
             .resizable(true)
             .default_width(260.0)
             .show(context, |ui| {
+                self.show_approval_controls(ui);
                 self.show_preferences_controls(ui);
                 ui.separator();
                 if ui.button("Modeli RAM'den çıkar").clicked() {
