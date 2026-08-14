@@ -74,6 +74,7 @@ Bu bölüm 14 Ağustos 2026'daki gerçek TUI koşumunda, düzeltme yapılmadan g
 | C12 | FAIL | Uzun yanıtta gereksiz tekrar, yüksek latency ve scrollbar'ın en alta tam inmeme problemi görüldü. |
 | C13 | PASS / PERF ISSUE | Uzun yanıt cümleleri tamamlandı; latency yine beklenenden yüksek. |
 | C14 | PARTIAL — RETEST | Audit panic düzeltmesinden sonra native görsel turu çalıştı. Ancak CPU vision yanıtı beklenenden uzun sürdü ve gözlem gereğinden kısa kaldı; mevcut vision isteği `max_tokens=96` ile sınırlı. Dosya seçici sırasında zaman zaman “Uygulama yanıt vermiyor” uyarısı da görüldü. Yanıt kapsamı, ilk-token latency'si ve picker UX'i ayrı backlog bulguları olarak tutuluyor. |
+| C15 | PASS / UX PARTIAL | Eklenen görsel gönderimden önce taşındığında/silindiğinde analiz yapılmadı. Güvenli stale-reference reddi doğru; fakat kullanıcı mesajı dosyanın değiştiğini ve vision'ın hazır olmadığını aynı belirsiz metinde birleştiriyor. |
 
 Ek UI backlog bulguları: fareyle metin seçimi yok; `Ctrl+Sol/Sağ`, `Ctrl+Backspace`, `Home/End`
 composer içinde doğru çalışmıyor veya history navigation ile karışıyor. Mouse tekerleğiyle primary
@@ -106,7 +107,7 @@ Mevcut kullanıcı DB'si yedeklendi: `jarvis.db.audit-race-backup-20260814.db`.
 | C12 | Uzun kullanıcı turu ardından yanıt | Kullanıcı turu history'de eksiksiz görünür; scrollbar en yeni yanıtı saklamaz. | Manuel TUI koşumu | FAIL — scrollbar/latency/repetition |
 | C13 | Yanıt token limitine yaklaşan istek | Cümle yarım kalmadan bounded continuation veya açık hata görülür. | Local smoke + insan notu | SMOKE PASS — insan değerlendirmesi bekliyor |
 | C14 | PNG/JPEG ekleyip `ne görüyorsun?` | Vision hazırsa yalnız local vision gözlemiyle yanıt verir; hazır değilse güvenli hata döner ve gördüğünü iddia etmez. | Manuel TUI attachment + native launch | PARTIAL — vision çalıştı; latency yüksek, yanıt kapsamı kısa |
-| C15 | Ek seçildikten sonra dosyayı değiştir/sil | Gönderim stale reference olarak reddedilir; başka dosya analiz edilmez. | task + audit | NOT RUN |
+| C15 | Ek seçildikten sonra dosyayı değiştir/sil | Gönderim stale reference olarak reddedilir; başka dosya analiz edilmez. | task + audit | PASS — güvenlik; UX mesajı belirsiz |
 | C16 | Native pencerede yanıt/onay/hata | Notification tercihi açıksa uygun bildirim; kapalıysa bildirim yok. | ekran + preference | NOT RUN |
 | C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | `/quit`, `Ctrl+C` ve pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | `exit`, `/quit`, `Ctrl+C` ve terminal-close PASS ([smoke](f2_lifecycle_smoke_2026-08-14.md)); native pencere kapanışı PENDING |
 | C18 | Native mesaj araması ve rol filtresi | Salt-okunur kartlarda Türkçe arama/rol filtresi doğru daraltır; mesajı değiştirmez. | ekran | NOT RUN |
