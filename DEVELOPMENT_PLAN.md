@@ -168,11 +168,15 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
 - [ ] Sohbet ekranı: message card, streaming/typing state, ayrı draft composer, scroll-to-latest, arama/filtre hazırlığı ve erişilebilir klavye odağı.
 - [ ] Pencere yaşam döngüsü: resize, minimize, tekrar odak, tek-instance davranışı, servis durumu, bildirim tıklamasında pencereyi öne alma.
 - [ ] Görsel tasarım sistemi: renk/typography/spacing tokenları, açık-koyu tema, kontrast kontrolü ve Türkçe metin taşma davranışı.
-- [ ] Yerel ayarlar: UI tercihleri, tema, font scale ve notification seçeneği için versioned config; reset/export akışı.
-- [ ] Attachment contract: `AttachmentRef` (ID, canonical local path, MIME, byte size, SHA-256, oluşturulma zamanı, provenance, sensitivity) ve task/audit ilişkisi.
-- [ ] Attachment storage policy: orijinal dosya yerinde referans mı yoksa uygulama kasasında kopya mı; retention, local delete ve stale-reference davranışı için ADR.
+- [x] Yerel ayarlar: UI tercihleri, tema, font scale ve notification seçeneği için versioned config; reset/export akışı.
+  - Kanıt: `DesktopPreferences` schema v1, validation, atomik save/load ve invalid-config regression testleri; UI'da reset/export kontrolleri.
+- [x] Attachment contract: `AttachmentRef` (ID, canonical local path, MIME, byte size, SHA-256, oluşturulma zamanı, provenance, sensitivity) ve task/audit ilişkisi.
+  - Kanıt: metadata-only descriptor, task-bound audit ID ve canonical local path/ham byte'ın model context'inden dışlanması testleri.
+- [x] Attachment storage policy: orijinal dosya yerinde referans mı yoksa uygulama kasasında kopya mı; retention, local delete ve stale-reference davranışı için ADR.
+  - Kanıt: [ADR-0002](docs/adr/0002-attachment-reference-retention.md); stale/replaced-file reject ve UI “kaldır = referansı kaldır” semantiği.
 - [ ] Güvenli dosya seçimi: `Ctrl+O`/ataç düğmesi, kullanıcı görünür dosya adı/önizleme ve gönderimden önce kaldırma.
-- [ ] Dosya doğrulama: MIME magic-byte kontrolü, canonical path, allowlist, boyut/piksel limitleri, decode bomb/bozuk dosya reddi ve SHA-256.
+- [x] Dosya doğrulama: MIME magic-byte kontrolü, canonical path, allowlist, boyut/piksel limitleri, decode bomb/bozuk dosya reddi ve SHA-256.
+  - Kanıt: PNG/JPEG magic/header + full decoder doğrulaması, 10 MiB/20 MP limiti, SHA-256 ve bozuk/stale dosya testleri.
 - [ ] Metin/doküman ekleri: ilk aşamada yalnız güvenli metadata + ayrı RAG ingestion kuyruğu; ekin ham içeriği tool talimatı sayılmaz.
 - [ ] Vision model kararı: CPU uyumlu multimodal GGUF + eşleşen `mmproj` adayları, lisans, disk/RAM/latency karşılaştırması. **İndirme ancak kullanıcı onayından sonra.**
 
