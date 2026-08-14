@@ -285,6 +285,19 @@ impl JarvisDesktop {
         };
     }
 
+    fn export_preferences(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("jarvis-desktop.json")
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match save_desktop_preferences(&path, &self.preferences) {
+            Ok(()) => format!("UI ayarları dışa aktarıldı: {}", path.display()),
+            Err(error) => format!("UI ayarları dışa aktarılamadı: {error}"),
+        };
+    }
+
     fn show_preferences_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Görünüm");
         ui.label("Bu tercihler yalnız yerel UI ayarlarıdır; sohbet veya ek yolu kaydedilmez.");
@@ -327,10 +340,15 @@ impl JarvisDesktop {
         if changed {
             self.save_preferences();
         }
-        if ui.button("Varsayılanlara dön").clicked() {
-            self.preferences = DesktopPreferences::default();
-            self.save_preferences();
-        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Varsayılanlara dön").clicked() {
+                self.preferences = DesktopPreferences::default();
+                self.save_preferences();
+            }
+            if ui.button("Dışa aktar").clicked() {
+                self.export_preferences();
+            }
+        });
         if let Some(path) = &self.preferences_path {
             ui.small(format!("Ayar dosyası: {}", path.display()));
         }
