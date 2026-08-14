@@ -120,7 +120,7 @@ Durum: TAMAMLANDI
 - [x] Girdi ergonomisi: native paste, `Ctrl+V`, kelime silme, draft temizleme, klavye/mouse ile history navigation.
 - [x] Yanıt davranışı: bounded chat history, `finish_reason=length` continuation ve Hyprland yanıt bildirimi.
 - [x] Local model runtime: Qwen3-8B-Q4_K_M ile CPU sohbeti, model açık/kapalı kullanıcı semantiği ve VRAM=0.
-- [x] Güvenli ilk capability'ler: system health/time, workspace read, project/coding/docs summary ve approval-gated note.
+- [x] Güvenli ilk capability'ler: system health/time doğrudan; workspace read, project/coding/docs summary ve note.create task-bound approval-gated.
 - [x] MCP stdio transportu: initialize, tool list, typed call ve bilinmeyen tool deny.
 - [x] İlk security scope contractı ve teacher-example intake contractı.
 - [x] MVP regression gate: 51 test, Clippy, release build, service health ve interaktif smoke.
@@ -129,13 +129,13 @@ Durum: TAMAMLANDI
 
 ### F2 — Günlük masaüstü ürünü ve multimodal ekler
 
-Durum: DEVAM EDİYOR — attachment/TUI ilk dilimi tamamlandı; native pencere ve vision açık.
+Durum: TEST/ACCEPTANCE — F2 uygulama geliştirmesi tamam; insan görsel kabulü ve exit review açık.
 
 Amaç: Terminal MVP'yi korurken, gerçek günlük kullanım için native masaüstü deneyimi, dosya/görsel ekleri ve ölçülebilir UX kalitesi oluşturmak.
 
 #### F2.0 — MVP stabilizasyonu ve ürün kalite kapısı
 
-Durum: DEVAM EDİYOR
+Durum: TEST/ACCEPTANCE — otomasyon tamam; gerçek terminal/ekran kabulü açık.
 
 Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını görünür ve tekrar üretilebilir hale getirmek.
 
@@ -149,7 +149,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
   - Otomatik kanıt: Ratatui `TestBackend` küçük/geniş ve üç yeniden-boyutlandırma ölçüsünde en yeni tur, composer ve cursor sınırlarını PASS doğrular. Gerçek terminalde DPI/font/kontrast/focus kabulü açık kalır.
 - [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
-  - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu. C01/C03/C04/C05/C07 için kayıtsız local model smoke PASS; tam task/audit ve insan değerlendirmesi henüz açık.
+  - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu. C01–C07 ve C13 için kayıtsız local model smoke, C08–C10 için core task/audit regression geçti; tam insan değerlendirmesi ve ekran kabulü açık.
 - [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
   - Koşum kaydı model dosya/hash'i, CPU/RAM durumu, task ID ve kısa insan değerlendirmesi için alan içerir; kişisel prompt/yanıtı varsayılan olarak kaydetmez.
 - [x] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
@@ -162,7 +162,7 @@ Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 sen
 
 #### F2.1 — Native desktop kabuğu ve gerçek görsel ekler
 
-Durum: DEVAM EDİYOR — native UI, güvenli attachment intake ve vision dikey dilimi kod/test olarak tamam; teknoloji spike ve gerçek pencere kabulü açık.
+Durum: TEST/ACCEPTANCE — native UI, güvenli attachment intake ve vision dikey dilimi kod/test olarak tamam; gerçek pencere kabulü açık.
 
 Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
 
@@ -194,7 +194,7 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
 - [x] Vision service: text modelinden ayrı loopback-only endpoint, health/lifecycle, attachment byte/path passing ve timeout/cancel sınırı.
   - Kanıt: `jarvis-vision.service`, yalnız `127.0.0.1:8089`, `-ngl 0`, 6 CPU thread, CORS `localhost`/credentials kapalı; ek baytlarını yalnız bu endpoint alır. İlk görsel isteğinde başlar; `exit` ve native RAM düğmesi iki modeli de kapatır.
 - [x] Vision response policy: yalnız görüntü açıklaması/analizi; görüntü OCR metni untrusted data, tool authority yok; desteklenmeyen/hassas içerik için açık hata.
-  - Kanıt: vision system contractı, 96-token gözlem limiti, `VisionAnalysis` XML-escape + user-data envelope; PNG/JPEG dışı, stale veya erişilemeyen servis path-safe failure verir.
+  - Kanıt: vision system contractı, 96-token gözlem limiti, `VisionAnalysis` XML-escape + user-data envelope; RAG, attachment veya vision verisi bağlamında modelin ürettiği capability etiketi core tarafından bastırılır ve audit'e yazılır. PNG/JPEG dışı, stale veya erişilemeyen servis path-safe failure verir.
 - [x] Attachment privacy UX: ek geçmişini görme, tekli/tüm ekleri silme, ek gönderilmeden önce local-only uyarısı ve export.
   - Kanıt: native ve TUI, gönderilen ek için en fazla 50 adet **oturumluk metadata makbuzu** tutar. Tekli/tümü kaldırma orijinal dosyaya dokunmaz. Native UI'da “OTURUM EK MAKBUZLARI” + kullanıcı seçimli JSON export; TUI'da `/attachment-history`, `/attachment-history remove <id>|clear` ve `/attachment-export <dosya-yolu>` vardır. Export testinde canonical path, ham byte, prompt, model yanıtı ve task audit'in bulunmadığı doğrulandı.
 - [x] E2E: JPEG/PNG başarı; bozuk MIME, boyut/piksel limiti, stale dosya, model kapalı, injection/EXIF izolasyonu ve TUI fallback.
