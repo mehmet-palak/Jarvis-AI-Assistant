@@ -144,7 +144,8 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
 - [x] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
   - Kanıt: keyboard/mouse navigation, explicit latest-reset ve küçük terminal TestBackend render/scrollbar regression testleri.
 - [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış, `/quit`, `Ctrl+C`, terminal kapanması, yeniden açılış ve DB recovery koşumları açık.
-- [ ] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
+- [x] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
+  - Kanıt: TUI/native completed, approval ve failed/interrupted başlıkları; native model `HAZIR → BAŞLATILIYOR` geçişinde tek hata bildirimi üretir. `try_notify_desktop` testleri daemon transport hatasını yutar, task/UI sonucunun değişmediğini doğrular; kullanıcı tercihi kapalıysa native bildirim üretilmez.
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
 - [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
   - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu; sonuçlar henüz `NOT RUN`.

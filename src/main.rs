@@ -1036,10 +1036,26 @@ fn notification_arguments(title: &str, content: &str) -> Option<Vec<String>> {
 /// Notifications are best-effort: a missing notification daemon must never affect a completed
 /// task or the terminal UI. `notify-send` integrates with Hyprland's standard notification path.
 fn notify_desktop(title: &str, content: &str) {
+    let _ = try_notify_desktop(title, content, |arguments| {
+        Command::new("notify-send")
+            .args(arguments)
+            .status()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+}
+
+/// Returns whether a valid notification was attempted. The sender error is deliberately ignored:
+/// desktop notification infrastructure is display-only and never changes task/UI state.
+fn try_notify_desktop<F>(title: &str, content: &str, sender: F) -> bool
+where
+    F: FnOnce(&[String]) -> Result<(), String>,
+{
     let Some(arguments) = notification_arguments(title, content) else {
-        return;
+        return false;
     };
-    let _ = Command::new("notify-send").args(arguments).status();
+    let _ = sender(&arguments);
+    true
 }
 
 fn single_pending_task_id(runtime: &Arc<Mutex<Runtime>>) -> Result<String, String> {
@@ -1323,7 +1339,8 @@ mod tests {
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
         is_primary_selection_paste, native_desktop_binary_path, notification_arguments,
         notification_preview, return_to_latest, should_clear_draft, should_close_tui_for_key,
-        submit, tui_exit_action, tui_notification, App, Message, MessageRole, TuiExitAction,
+        submit, try_notify_desktop, tui_exit_action, tui_notification, App, Message, MessageRole,
+        TuiExitAction,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use jarvis_core::{LlamaServerProvider, LlamaVisionServerProvider, Runtime, TaskState};
@@ -1401,6 +1418,10 @@ mod tests {
         assert_eq!(arguments[0], "--app-name=JARVIS");
         assert_eq!(arguments[3], "JARVIS");
         assert_eq!(arguments[4], "ilk satır ikinci satır");
+        assert!(try_notify_desktop("JARVIS", "hazır", |_arguments| {
+            Err("notification daemon unavailable".into())
+        }));
+        assert!(!try_notify_desktop("JARVIS", "\n  ", |_arguments| Ok(())));
     }
 
     #[test]

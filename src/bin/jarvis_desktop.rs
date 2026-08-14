@@ -295,10 +295,18 @@ impl JarvisDesktop {
         self.last_model_check = Instant::now();
         let mut health_provider = self.provider.clone();
         health_provider.timeout_seconds = 1;
+        let previous_status = self.model_status.clone();
         self.model_status = match health_provider.runtime_state() {
             jarvis_core::ModelRuntimeState::Ready => "MODEL HAZIR".into(),
             _ => "MODEL BAŞLATILIYOR".into(),
         };
+        if let Some(notification) = model_unavailable_notification(
+            &previous_status,
+            &self.model_status,
+            self.preferences.notifications_enabled,
+        ) {
+            notify_desktop(notification.title, &notification.content);
+        }
     }
 
     fn add_attachment(&mut self, context: &egui::Context) {
@@ -1268,20 +1276,47 @@ fn desktop_notification(
     })
 }
 
+fn model_unavailable_notification(
+    previous_status: &str,
+    current_status: &str,
+    notifications_enabled: bool,
+) -> Option<DesktopNotification> {
+    (notifications_enabled && previous_status == "MODEL HAZIR" && current_status != "MODEL HAZIR")
+        .then(|| DesktopNotification {
+            title: "JARVIS model hatası",
+            content: "Local model sunucusuna ulaşılamıyor; gönderilmemiş taslak korunur.".into(),
+        })
+}
+
 fn notify_desktop(title: &str, content: &str) {
+    let _ = try_notify_desktop(title, content, |arguments| {
+        Command::new("notify-send")
+            .args(arguments)
+            .status()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+}
+
+/// Desktop notification is intentionally observational. Its transport may be absent on a
+/// minimal Wayland session, but that must not change an already-determined task outcome.
+fn try_notify_desktop<F>(title: &str, content: &str, sender: F) -> bool
+where
+    F: FnOnce(&[String]) -> Result<(), String>,
+{
     let preview = notification_preview(content);
     if preview.is_empty() {
-        return;
+        return false;
     }
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=JARVIS",
-            "--icon=dialog-information",
-            "--expire-time=6000",
-            title,
-            &preview,
-        ])
-        .status();
+    let arguments = vec![
+        "--app-name=JARVIS".into(),
+        "--icon=dialog-information".into(),
+        "--expire-time=6000".into(),
+        title.into(),
+        preview,
+    ];
+    let _ = sender(&arguments);
+    true
 }
 
 fn main() -> eframe::Result<()> {
@@ -1329,7 +1364,8 @@ fn main() -> eframe::Result<()> {
 mod tests {
     use super::{
         acquire_desktop_instance_lock, desktop_notification, message_matches_filter,
-        turkish_search_fold, Message, MessageRole,
+        model_unavailable_notification, try_notify_desktop, turkish_search_fold, Message,
+        MessageRole,
     };
     use jarvis_core::TaskState;
     use std::fs;
@@ -1419,5 +1455,19 @@ mod tests {
             "JARVIS işlem hatası"
         );
         assert!(desktop_notification(TaskState::Cancelled, "iptal", true).is_none());
+        assert!(try_notify_desktop("JARVIS", "hazır", |_arguments| {
+            Err("notification daemon unavailable".into())
+        }));
+        assert!(!try_notify_desktop("JARVIS", "\n  ", |_arguments| Ok(())));
+        assert!(
+            model_unavailable_notification("MODEL HAZIR", "MODEL BAŞLATILIYOR", true).is_some()
+        );
+        assert!(
+            model_unavailable_notification("MODEL BAŞLATILIYOR", "MODEL BAŞLATILIYOR", true)
+                .is_none()
+        );
+        assert!(
+            model_unavailable_notification("MODEL HAZIR", "MODEL BAŞLATILIYOR", false).is_none()
+        );
     }
 }
