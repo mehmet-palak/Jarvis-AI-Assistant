@@ -143,7 +143,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
   - Kanıt: bracketed paste/`Ctrl+V`/primary-selection mapping, çok satır normalizasyonu, UTF-8 kelime silme, `Ctrl+U` ve `Esc` temizleme unit testleri.
 - [x] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
   - Kanıt: keyboard/mouse navigation, explicit latest-reset ve küçük terminal TestBackend render/scrollbar regression testleri.
-- [ ] Yaşam döngüsü otomasyonu: ilk açılış, servis yükleme, `/quit`, `Ctrl+C`, terminal kapanması, `exit`, yeniden açılış ve DB recovery.
+- [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış, `/quit`, `Ctrl+C`, terminal kapanması, yeniden açılış ve DB recovery koşumları açık.
 - [ ] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
 - [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
