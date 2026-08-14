@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection, Result as SqlResult, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -1237,19 +1237,21 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
         let connection = Connection::open(path)?;
-        let store = Self { connection };
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let mut store = Self { connection };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn in_memory() -> SqlResult<Self> {
         let connection = Connection::open_in_memory()?;
-        let store = Self { connection };
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let mut store = Self { connection };
         store.migrate()?;
         Ok(store)
     }
 
-    fn migrate(&self) -> SqlResult<()> {
+    fn migrate(&mut self) -> SqlResult<()> {
         self.connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -1321,6 +1323,12 @@ impl SqliteStore {
         self.ensure_audit_column("previous_hash", "TEXT NOT NULL DEFAULT ''")?;
         self.ensure_audit_column("event_hash", "TEXT NOT NULL DEFAULT ''")?;
         self.backfill_legacy_audit_chain()?;
+        if self.repair_concurrent_audit_chain()? {
+            self.append_audit_chain(
+                "system-audit-recovery",
+                "audit.recovered.concurrent_sequence",
+            )?;
+        }
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'initial task/audit/approval schema')",
             [],
@@ -1402,6 +1410,48 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Repairs only the known multi-process race shape: duplicate event sequences. The original
+    /// rows and insertion order remain intact, while their sequence/hash links are rebuilt in
+    /// durable insertion order. A tampered chain without duplicate sequences is not auto-repaired
+    /// and still fails the integrity gate. The caller adds a visible recovery audit event.
+    fn repair_concurrent_audit_chain(&mut self) -> SqlResult<bool> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let duplicate_sequences: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM (SELECT event_sequence FROM audit_events GROUP BY event_sequence HAVING COUNT(*) > 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        if duplicate_sequences == 0 {
+            return Ok(false);
+        }
+        let rows = {
+            let mut statement = transaction
+                .prepare("SELECT id, task_id, event FROM audit_events ORDER BY id ASC")?;
+            let mapped = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            mapped.collect::<SqlResult<Vec<_>>>()?
+        };
+        let mut previous_hash = "GENESIS".to_owned();
+        for (index, (id, task_id, event)) in rows.into_iter().enumerate() {
+            let sequence = (index + 1) as u64;
+            let event_hash = audit_hash(sequence, &previous_hash, &task_id, &event);
+            transaction.execute(
+                "UPDATE audit_events SET event_sequence=?1, previous_hash=?2, event_hash=?3 WHERE id=?4",
+                params![sequence as i64, previous_hash, event_hash, id],
+            )?;
+            previous_hash = event_hash;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     fn save_task(&self, task: &Task) -> SqlResult<()> {
         self.connection.execute(
             "INSERT INTO tasks(task_id, request_id, state, capability) VALUES (?1, ?2, ?3, ?4)
@@ -1411,12 +1461,47 @@ impl SqliteStore {
         Ok(())
     }
 
+    #[cfg(test)]
     fn append_audit(&self, event: &AuditEvent) -> SqlResult<()> {
         self.connection.execute(
             "INSERT INTO audit_events(task_id, event, event_sequence, previous_hash, event_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![event.task_id, event.event, event.sequence as i64, event.previous_hash, event.event_hash],
         )?;
         Ok(())
+    }
+
+    /// Allocates and persists the next audit event while holding SQLite's write lock. Runtime
+    /// instances can exist in both the TUI and native desktop process, so a cached tail is not a
+    /// safe source of sequence numbers. The transaction reads the current tail after acquiring
+    /// the lock, then inserts one event and commits the matching hash in the same critical section.
+    fn append_audit_chain(&mut self, task_id: &str, event: &str) -> SqlResult<AuditEvent> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (sequence, previous_hash) = transaction
+            .query_row(
+                "SELECT event_sequence, event_hash FROM audit_events ORDER BY event_sequence DESC, id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?)),
+            )
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok((0, "GENESIS".into())),
+                error => Err(error),
+            })?;
+        let sequence = sequence + 1;
+        let event_hash = audit_hash(sequence, &previous_hash, task_id, event);
+        transaction.execute(
+            "INSERT INTO audit_events(task_id, event, event_sequence, previous_hash, event_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, event, sequence as i64, previous_hash, event_hash],
+        )?;
+        transaction.commit()?;
+        Ok(AuditEvent {
+            task_id: task_id.into(),
+            event: event.into(),
+            sequence,
+            previous_hash,
+            event_hash,
+        })
     }
 
     fn save_approval(&self, approval: &Approval) -> SqlResult<()> {
@@ -1965,18 +2050,19 @@ impl Runtime {
     }
 
     fn record_audit(&mut self, mut event: AuditEvent) {
-        event.sequence = self.audit_sequence + 1;
-        event.previous_hash = self.audit_hash.clone();
-        event.event_hash = audit_hash(
-            event.sequence,
-            &event.previous_hash,
-            &event.task_id,
-            &event.event,
-        );
-        if let Some(store) = &self.store {
-            store
-                .append_audit(&event)
+        if let Some(store) = self.store.as_mut() {
+            event = store
+                .append_audit_chain(&event.task_id, &event.event)
                 .expect("audit persistence must succeed");
+        } else {
+            event.sequence = self.audit_sequence + 1;
+            event.previous_hash = self.audit_hash.clone();
+            event.event_hash = audit_hash(
+                event.sequence,
+                &event.previous_hash,
+                &event.task_id,
+                &event.event,
+            );
         }
         self.audit_sequence = event.sequence;
         self.audit_hash = event.event_hash.clone();
@@ -4370,6 +4456,61 @@ mod tests {
         assert_eq!(store.audit_count().unwrap(), 5);
         assert_eq!(store.schema_version().unwrap(), 5);
         assert!(store.audit_chain_is_valid().unwrap());
+    }
+
+    #[test]
+    fn sqlite_audit_allocation_reads_the_latest_tail_across_store_instances() {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-audit-concurrency-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let mut first = SqliteStore::open(path.to_str().expect("utf-8 test path")).unwrap();
+        let mut second = SqliteStore::open(path.to_str().expect("utf-8 test path")).unwrap();
+        let first_event = first
+            .append_audit_chain("task-a", "task.queued")
+            .expect("first writer appends");
+        let second_event = second
+            .append_audit_chain("task-b", "task.queued")
+            .expect("second writer appends after latest tail");
+        assert_eq!(first_event.sequence, 1);
+        assert_eq!(second_event.sequence, 2);
+        assert_eq!(second_event.previous_hash, first_event.event_hash);
+        assert!(second.audit_chain_is_valid().unwrap());
+        fs::remove_file(path).expect("test database cleanup");
+    }
+
+    #[test]
+    fn sqlite_startup_repairs_duplicate_sequences_without_erasing_events() {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-audit-recovery-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        {
+            let store = SqliteStore::open(path.to_str().expect("utf-8 test path")).unwrap();
+            for (task_id, event) in [("task-a", "task.queued"), ("task-b", "task.queued")] {
+                let duplicate = AuditEvent {
+                    task_id: task_id.into(),
+                    event: event.into(),
+                    sequence: 1,
+                    previous_hash: "GENESIS".into(),
+                    event_hash: audit_hash(1, "GENESIS", task_id, event),
+                };
+                store.append_audit(&duplicate).unwrap();
+            }
+            assert!(!store.audit_chain_is_valid().unwrap());
+        }
+        let recovered = SqliteStore::open(path.to_str().expect("utf-8 test path")).unwrap();
+        assert!(recovered.audit_chain_is_valid().unwrap());
+        assert_eq!(recovered.audit_count().unwrap(), 3);
+        fs::remove_file(path).expect("test database cleanup");
     }
 
     #[test]

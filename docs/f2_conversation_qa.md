@@ -73,11 +73,20 @@ Bu bölüm 14 Ağustos 2026'daki gerçek TUI koşumunda, düzeltme yapılmadan g
 | C11 | PASS / UX ISSUE | Model kapalıyken draft korundu; model loading durumunda Enter ile retry kullanıcı için belirsiz/etkisiz kaldı. |
 | C12 | FAIL | Uzun yanıtta gereksiz tekrar, yüksek latency ve scrollbar'ın en alta tam inmeme problemi görüldü. |
 | C13 | PASS / PERF ISSUE | Uzun yanıt cümleleri tamamlandı; latency yine beklenenden yüksek. |
-| C14 | BLOCKED | Boşluklu path ilk denemede reddedildi, ikinci denemede JPEG kuyruğa alındı; `jarvis --desktop` audit integrity panic'i ile açılmadığı için vision gönderimi yapılamadı. |
+| C14 | BLOCKED → RETEST | Boşluklu path ilk denemede reddedildi, ikinci denemede JPEG kuyruğa alındı. Audit integrity panic'inin kökü iki süreçli audit sequence yarışıydı; atomik SQLite tahsisi ve duplicate-chain recovery düzeltildi. Gerçek native pencere/vision gönderimi retest bekliyor. |
 
 Ek UI backlog bulguları: fareyle metin seçimi yok; `Ctrl+Sol/Sağ`, `Ctrl+Backspace`, `Home/End`
 composer içinde doğru çalışmıyor veya history navigation ile karışıyor. Mouse tekerleğiyle primary
 selection paste ise çalışıyor.
+
+### Audit integrity düzeltme kaydı
+
+Native başlangıç panic'inin nedeni, TUI ve native client'ın aynı SQLite audit kuyruğunu ayrı cached
+tail değerleriyle yazmasıydı. `append_audit_chain` artık SQLite `IMMEDIATE` write transaction içinde
+mevcut tail'i okuyup sıra/hash tahsis ediyor; bağlantıda 5 saniyelik busy timeout var. Startup yalnızca
+duplicate sequence ile tanınan bu yarış şeklini insertion order'ı koruyarak onarıyor ve
+`system-audit-recovery` olayı ekliyor. Hash uyuşmazlığı/tekil tamper durumu otomatik onarılmıyor.
+Mevcut kullanıcı DB'si yedeklendi: `jarvis.db.audit-race-backup-20260814.db`.
 
 ## Sohbet ve güvenlik senaryoları
 
