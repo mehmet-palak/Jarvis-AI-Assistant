@@ -165,17 +165,21 @@ Durum: DEVAM EDİYOR — güvenli attachment intake ve TUI kuyruğu eklendi; nat
 Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
 
 - [ ] UI teknoloji spike: `egui/eframe` penceresi; açılış süresi, bellek kullanımı, Wayland/Hyprland uyumu ve paketleme riski ölçülür.
-- [ ] UI/core sınırı: native UI yalnız client olur; `jarvis-core` Request/Policy/Task/Verifier zincirini doğrudan kullanır, ikinci runtime yaratmaz.
-- [ ] Sohbet ekranı: message card, streaming/typing state, ayrı draft composer, scroll-to-latest, arama/filtre hazırlığı ve erişilebilir klavye odağı.
+- [x] UI/core sınırı: native UI yalnız client olur; `jarvis-core` Request/Policy/Task/Verifier zincirini doğrudan kullanır, ikinci runtime yaratmaz.
+  - Kanıt: `jarvis-desktop`, tek paylaşılan `Runtime` örneği üzerinden aynı `Request → Policy → Task → Verifier` zincirini çağırır; native işçi yalnız sonucu UI kanalına döndürür. İkinci policy, tool registry veya kalıcı store oluşturmaz.
+- [x] Sohbet ekranı: message card, streaming/typing state, ayrı draft composer, scroll-to-latest, arama/filtre hazırlığı ve erişilebilir klavye odağı.
+  - Kanıt: salt-okunur kartlar, bağımsız multiline composer, `Düşünüyorum…` durumu, `stick_to_bottom`, Türkçe `İ/i` araması ve rol filtresi; arama/lock/notification unit testleri release derlemesiyle geçti.
 - [ ] Pencere yaşam döngüsü: resize, minimize, tekrar odak, tek-instance davranışı, servis durumu, bildirim tıklamasında pencereyi öne alma.
-- [ ] Görsel tasarım sistemi: renk/typography/spacing tokenları, açık-koyu tema, kontrast kontrolü ve Türkçe metin taşma davranışı.
+- [x] Görsel tasarım sistemi: renk/typography/spacing tokenları, açık-koyu tema, kontrast kontrolü ve Türkçe metin taşma davranışı.
+  - Kanıt: merkezi HUD renk tokenları, okunabilir fiziksel font baseline'ı, versioned koyu/açık tema ve font ölçeği tercihleri; kartlarda wrap/selectable text ve responsive yan panel minimumları uygulanır. Kullanıcı görsel kabulü F2.0 exit review'da ayrıca kalır.
 - [x] Yerel ayarlar: UI tercihleri, tema, font scale ve notification seçeneği için versioned config; reset/export akışı.
   - Kanıt: `DesktopPreferences` schema v1, validation, atomik save/load ve invalid-config regression testleri; UI'da reset/export kontrolleri.
 - [x] Attachment contract: `AttachmentRef` (ID, canonical local path, MIME, byte size, SHA-256, oluşturulma zamanı, provenance, sensitivity) ve task/audit ilişkisi.
   - Kanıt: metadata-only descriptor, task-bound audit ID ve canonical local path/ham byte'ın model context'inden dışlanması testleri.
 - [x] Attachment storage policy: orijinal dosya yerinde referans mı yoksa uygulama kasasında kopya mı; retention, local delete ve stale-reference davranışı için ADR.
   - Kanıt: [ADR-0002](docs/adr/0002-attachment-reference-retention.md); stale/replaced-file reject ve UI “kaldır = referansı kaldır” semantiği.
-- [ ] Güvenli dosya seçimi: `Ctrl+O`/ataç düğmesi, kullanıcı görünür dosya adı/önizleme ve gönderimden önce kaldırma.
+- [x] Güvenli dosya seçimi: `Ctrl+O`/ataç düğmesi, kullanıcı görünür dosya adı/önizleme ve gönderimden önce kaldırma.
+  - Kanıt: native `rfd` dosya seçici yalnız PNG/JPEG/TXT/Markdown/PDF filtreleriyle açılır; `inspect_local_attachment` doğrulamasından sonra isim/önizleme görünür, tekli veya tüm kuyruk referansları orijinal dosyayı silmeden kaldırılır. TUI eşdeğeri `/attach` ve `/attachments clear` ile vardır.
 - [x] Dosya doğrulama: MIME magic-byte kontrolü, canonical path, allowlist, boyut/piksel limitleri, decode bomb/bozuk dosya reddi ve SHA-256.
   - Kanıt: PNG/JPEG magic/header + full decoder doğrulaması, 10 MiB/20 MP limiti, SHA-256 ve bozuk/stale dosya testleri.
 - [x] Metin/doküman ekleri: TXT, Markdown ve PDF ilk aşamada yalnız güvenli metadata ile seçilir; ham içerik ayrı RAG ingestion/onay akışı olmadan modele veya tool'a taşınmaz.
@@ -187,7 +191,8 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
   - Kanıt: `jarvis-vision.service`, yalnız `127.0.0.1:8089`, `-ngl 0`, 6 CPU thread, CORS `localhost`/credentials kapalı; ek baytlarını yalnız bu endpoint alır. İlk görsel isteğinde başlar; `exit` ve native RAM düğmesi iki modeli de kapatır.
 - [x] Vision response policy: yalnız görüntü açıklaması/analizi; görüntü OCR metni untrusted data, tool authority yok; desteklenmeyen/hassas içerik için açık hata.
   - Kanıt: vision system contractı, 96-token gözlem limiti, `VisionAnalysis` XML-escape + user-data envelope; PNG/JPEG dışı, stale veya erişilemeyen servis path-safe failure verir.
-- [ ] Attachment privacy UX: ek geçmişini görme, tekli/tüm ekleri silme, ek gönderilmeden önce local-only uyarısı ve export.
+- [x] Attachment privacy UX: ek geçmişini görme, tekli/tüm ekleri silme, ek gönderilmeden önce local-only uyarısı ve export.
+  - Kanıt: native ve TUI, gönderilen ek için en fazla 50 adet **oturumluk metadata makbuzu** tutar. Tekli/tümü kaldırma orijinal dosyaya dokunmaz. Native UI'da “OTURUM EK MAKBUZLARI” + kullanıcı seçimli JSON export; TUI'da `/attachment-history`, `/attachment-history remove <id>|clear` ve `/attachment-export <dosya-yolu>` vardır. Export testinde canonical path, ham byte, prompt, model yanıtı ve task audit'in bulunmadığı doğrulandı.
 - [x] E2E: JPEG/PNG başarı; bozuk MIME, boyut/piksel limiti, stale dosya, model kapalı, injection/EXIF izolasyonu ve TUI fallback.
   - Kanıt: Rust attachment/vision regression testleri ve [F2 local vision smoke](docs/f2_vision_smoke_2026-08-14.md). Gerçek PNG ve JPEG endpoint smoke yalnız sistem örnekleriyle yapıldı; user path/ham byte text modele verilmedi, vision'a geçmeden önce EXIF/ancillary metadata'dan arındırılmış JPEG taşınır.
 
@@ -206,6 +211,7 @@ Bu turda kanıtlanan alt dilim:
 - [x] Vision sınırı UX'i: TUI ve native composer seçilmiş PNG/JPEG için görselin yalnız ayrı local vision servisine gideceğini; normal chat modelinin ham piksel veya yerel path görmediğini açıkça belirtir.
 - [x] Doküman sınırı UX'i: TUI `/attach` ve native `Ctrl+O`, TXT/Markdown/PDF'yi seçebilir; belge içeriğinin modele veya tool'a gitmediğini, indekslemenin ayrı açık onaylı RAG akışı olduğunu belirtir.
 - [x] Çok dilli sohbet contractı: sistem prompt'u son kullanıcı mesajının dilini temel alır; Türkçe ve İngilizce doğal cevap istenir, kullanıcı istemedikçe çeviri/dil karışımı yapılmaz. Bu bir yanıt şablonu veya kullanıcıya özel kural değildir; gerçek çıktılar sürümlü QA setinde model kalitesi olarak ölçülür.
+- [x] Oturumluk ek makbuzu: ek gönderiminden sonra kullanıcı, yalnız filename/MIME/boyut/dimension/SHA-256/attachment ID metadata'sını görür; tekli/tümü temizler veya açıkça seçtiği JSON konumuna dışa aktarır. Makbuzlar 50 kayıtla sınırlı, persistent değildir; canonical path, ham byte, prompt, model yanıtı ve task/audit saklanmaz.
 - [x] Serbest metin tool yönlendirme sınırı: sohbet girdisi artık anahtar-kelime `if/else` ile capability'ye bağlanmaz. Tek model üretimi ya doğal yanıt ya da allowlist'teki tam capability kimliğini taşıyan dar bir intent envelope üretir; envelope registry, policy ve verifier tarafından bağımsız doğrulanır. Normal sohbet ek routing çağrısı veya yanıt şablonu kullanmaz.
 - [ ] Native UI Wayland/Hyprland gerçek smoke: release binary açılışı ve HUD/composer görsel kontrolü PASS ([kayıt](docs/f2_native_wayland_smoke_2026-08-14.md)); resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması için kullanıcı kabul koşumu açık.
 - [x] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilen Qwen2.5-VL 3B Q4_K_M + `mmproj`, CPU-only ayrı loopback servisinde gerçek PNG smoke'undan geçti. Kanıt: [f2_vision_smoke_2026-08-14.md](docs/f2_vision_smoke_2026-08-14.md).

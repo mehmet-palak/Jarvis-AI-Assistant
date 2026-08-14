@@ -52,6 +52,7 @@ jarvis --desktop
 - Onay isteyen işler soldaki panelde task ID ile görünür; **Onayla** yalnız o task'ı core approval zincirinden geçirir, **Reddet** yan etkiyi çalıştırmadan iptal eder.
 - Tema, yazı ölçeği ve bildirim tercihi yalnız `~/.config/jarvis/desktop.json` içinde tutulur; ekrandan varsayılanlara döndürülebilir veya kullanıcı seçtiği konuma dışa aktarılabilir. Bildirim tercihi açıksa yanıt, onay bekleme ve işlem hatası bildirilir. Sohbet içeriği, ek dosya yolu veya kimlik bilgisi bu dosyaya yazılmaz.
 - `Ctrl+O` veya **Dosya ekle** ile PNG/JPEG/TXT/Markdown/PDF seçilir; önizleme ve kaldırma işlemi dosyayı silmez. PNG/JPEG gönderildiğinde piksel baytları yalnız ayrı local vision sunucusuna gider; normal chat modeline yerel yol veya ham piksel verilmez. Vision betimlemesi normal modele escaped, güvenilmeyen veri olarak iletilir. TXT/Markdown/PDF içeriği ise ayrı RAG onayı verilene kadar yalnız doğrulanmış metadata olarak kalır.
+- Gönderimden sonra **Oturum ek makbuzları** bölümünde yalnız dosya adı, MIME, boyut/dimension, SHA-256 ve attachment ID görünür. Bu liste 50 kayıtla sınırlı ve geçicidir; tekli/tümü temizlenebilir veya kullanıcı seçtiği JSON konumuna metadata olarak dışa aktarılabilir. Yerel yol, ham dosya, prompt ve model yanıtı export'a girmez. TUI eşdeğerleri: `/attachment-history`, `/attachment-history remove <id>|clear`, `/attachment-export <dosya-yolu>`.
 
 ## Local model çalışma profili
 

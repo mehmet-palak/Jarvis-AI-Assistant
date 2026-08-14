@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::GenericImageView;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{ContentProvenance, DataSensitivity};
@@ -57,6 +58,85 @@ pub struct AttachmentRef {
     pub created_at: u64,
     pub provenance: ContentProvenance,
     pub sensitivity: DataSensitivity,
+}
+
+/// A deliberately path-free, byte-free receipt for an attachment that entered a JARVIS task.
+///
+/// Receipts live only in the client session unless the user explicitly exports this small
+/// metadata manifest. They are not an attachment vault or a second copy of the user's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentReceipt {
+    pub schema_version: u16,
+    pub attachment_id: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub byte_size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub sha256: String,
+}
+
+impl AttachmentReceipt {
+    pub fn from_attachment(attachment: &AttachmentRef) -> Self {
+        Self {
+            schema_version: 1,
+            attachment_id: attachment.attachment_id.clone(),
+            original_name: attachment.original_name.clone(),
+            mime_type: attachment.mime_type().into(),
+            byte_size: attachment.byte_size,
+            width: attachment.width,
+            height: attachment.height,
+            sha256: attachment.sha256.clone(),
+        }
+    }
+
+    pub fn display_summary(&self) -> String {
+        let details = if self.width == 0 || self.height == 0 {
+            format!("{} KiB", self.byte_size.div_ceil(1024))
+        } else {
+            format!("{}×{}", self.width, self.height)
+        };
+        format!(
+            "{} • {} • {} • {}…",
+            self.original_name,
+            self.mime_type,
+            details,
+            self.attachment_id
+                .strip_prefix("attachment-")
+                .unwrap_or(&self.attachment_id)
+        )
+    }
+}
+
+/// Creates a user-exportable manifest. It intentionally contains no local path, image/document
+/// bytes, prompt, model response, task audit or timestamp. The export is therefore useful for
+/// the user's own attachment audit without becoming a conversation or file-retention store.
+pub fn attachment_receipt_manifest(receipts: &[AttachmentReceipt]) -> Result<String, String> {
+    let entries = receipts
+        .iter()
+        .map(|receipt| {
+            let dimensions = (receipt.width != 0 && receipt.height != 0)
+                .then(|| format!("{}x{}", receipt.width, receipt.height));
+            json!({
+                "schema_version": receipt.schema_version,
+                "attachment_id": receipt.attachment_id,
+                "original_name": receipt.original_name,
+                "mime_type": receipt.mime_type,
+                "byte_size": receipt.byte_size,
+                "dimensions": dimensions,
+                "sha256": receipt.sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&json!({
+        "schema_version": 1,
+        "kind": "jarvis-attachment-receipts",
+        "session_only": true,
+        "retention": "No local path, file bytes, prompt, model response or task audit is included.",
+        "entries": entries,
+    }))
+    .map(|serialized| format!("{serialized}\n"))
+    .map_err(|error| format!("attachment receipt manifest serialization failed: {error}"))
 }
 
 impl AttachmentRef {
@@ -547,6 +627,22 @@ mod tests {
         assert!(revalidate_local_attachment(&attachment)
             .unwrap_err()
             .contains("changed"));
+        fs::remove_file(path).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn receipt_manifest_is_path_and_content_free_but_keeps_user_visible_metadata() {
+        let path = temporary_file("receipt", &valid_image_bytes(AttachmentKind::Png, 2, 3));
+        let attachment = inspect_local_image(&path).expect("valid PNG accepted");
+        let receipt = AttachmentReceipt::from_attachment(&attachment);
+        let manifest =
+            attachment_receipt_manifest(std::slice::from_ref(&receipt)).expect("manifest");
+        assert!(manifest.contains(&attachment.original_name));
+        assert!(manifest.contains(&attachment.attachment_id));
+        assert!(manifest.contains(&attachment.sha256));
+        assert!(!manifest.contains(&attachment.canonical_path.display().to_string()));
+        assert!(!manifest.contains("canonical_path"));
+        assert!(receipt.display_summary().contains("2×3"));
         fs::remove_file(path).expect("fixture cleanup");
     }
 }

@@ -13,9 +13,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    inspect_local_attachment, propose_memory, AttachmentRef, DataSensitivity, InputType,
-    LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, Request,
-    Runtime, SqliteStore, TaskState, VisionProvider,
+    attachment_receipt_manifest, inspect_local_attachment, propose_memory, AttachmentReceipt,
+    AttachmentRef, DataSensitivity, InputType, LlamaServerProvider, LlamaVisionServerProvider,
+    MemoryNamespace, MemoryProposal, Request, Runtime, SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -53,6 +53,7 @@ struct WorkerReply {
     approval_pending: bool,
     notification: Option<TuiNotification>,
     sources: Vec<String>,
+    attachment_receipts: Vec<AttachmentReceipt>,
 }
 
 struct TuiNotification {
@@ -70,6 +71,7 @@ struct App {
     pending: bool,
     running: bool,
     attachments: Vec<AttachmentRef>,
+    sent_attachment_receipts: Vec<AttachmentReceipt>,
     pending_memory: Option<MemoryProposal>,
 }
 
@@ -93,6 +95,7 @@ impl App {
             pending: false,
             running: true,
             attachments: vec![],
+            sent_attachment_receipts: vec![],
             pending_memory: None,
         }
     }
@@ -102,6 +105,18 @@ impl App {
             role: MessageRole::System,
             content: content.into(),
         });
+    }
+
+    fn record_attachment_receipts(&mut self, receipts: Vec<AttachmentReceipt>) {
+        const MAX_SESSION_ATTACHMENT_RECEIPTS: usize = 50;
+        self.sent_attachment_receipts.extend(receipts);
+        let excess = self
+            .sent_attachment_receipts
+            .len()
+            .saturating_sub(MAX_SESSION_ATTACHMENT_RECEIPTS);
+        if excess > 0 {
+            self.sent_attachment_receipts.drain(..excess);
+        }
     }
 }
 
@@ -307,6 +322,7 @@ fn event_loop(
             }
             app.status = reply.status;
             app.pending = false;
+            app.record_attachment_receipts(reply.attachment_receipts);
             if let Some(notification) = reply.notification {
                 notify_desktop(notification.title, &notification.content);
             }
@@ -570,6 +586,69 @@ fn submit(
         }
         return;
     }
+    if input == "/attachment-history clear" {
+        let count = app.sent_attachment_receipts.len();
+        app.sent_attachment_receipts.clear();
+        app.push_system(format!(
+            "{count} oturum ek makbuzu temizlendi; hiçbir orijinal dosya silinmedi."
+        ));
+        return;
+    }
+    if let Some(attachment_id) = input
+        .strip_prefix("/attachment-history remove ")
+        .map(str::trim)
+        .filter(|attachment_id| !attachment_id.is_empty())
+    {
+        if let Some(index) = app
+            .sent_attachment_receipts
+            .iter()
+            .position(|receipt| receipt.attachment_id == attachment_id)
+        {
+            app.sent_attachment_receipts.remove(index);
+            app.push_system("Ek makbuzu kaldırıldı; hiçbir orijinal dosya silinmedi.");
+        } else {
+            app.push_system("Bu ID ile oturum ek makbuzu yok.");
+        }
+        return;
+    }
+    if let Some(path) = input
+        .strip_prefix("/attachment-export ")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        match attachment_receipt_manifest(&app.sent_attachment_receipts).and_then(|manifest| {
+            std::fs::write(path, manifest)
+                .map_err(|error| format!("attachment receipt manifest write failed: {error}"))
+        }) {
+            Ok(()) => app.push_system(
+                "Ek metadata makbuzları dışa aktarıldı; yerel yol, dosya içeriği, prompt veya model yanıtı içermez.",
+            ),
+            Err(error) => app.push_system(format!("Ek makbuzları dışa aktarılamadı: {error}")),
+        }
+        return;
+    }
+    if input == "/attachment-history" {
+        if app.sent_attachment_receipts.is_empty() {
+            app.push_system("Oturum ek makbuzu yok.");
+        } else {
+            let receipts = app
+                .sent_attachment_receipts
+                .iter()
+                .map(|receipt| {
+                    format!(
+                        "{}\n  Kaldır: /attachment-history remove {}",
+                        receipt.display_summary(),
+                        receipt.attachment_id
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            app.push_system(format!(
+                "Bu oturumdaki ek metadata makbuzları (yerel yol/byte/prompt yok):\n{receipts}\nTümü: /attachment-history clear • JSON dışa aktar: /attachment-export <dosya-yolu>"
+            ));
+        }
+        return;
+    }
     if let Some(specification) = input.strip_prefix("/remember ").map(str::trim) {
         match specification {
             "approve" => {
@@ -759,7 +838,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -800,6 +879,10 @@ fn submit(
     // A newly submitted turn should always return the view to the newest conversation content.
     return_to_latest(&mut app.scroll);
     let attachments = std::mem::take(&mut app.attachments);
+    let attachment_receipts = attachments
+        .iter()
+        .map(AttachmentReceipt::from_attachment)
+        .collect::<Vec<_>>();
     let needs_vision = attachments
         .iter()
         .any(|attachment| attachment.kind.is_image());
@@ -901,6 +984,7 @@ fn submit(
             approval_pending,
             notification,
             sources,
+            attachment_receipts,
         });
     });
 }

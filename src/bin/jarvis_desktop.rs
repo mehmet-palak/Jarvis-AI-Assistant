@@ -12,10 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
-    default_desktop_preferences_path, inspect_local_attachment, load_desktop_preferences,
-    save_desktop_preferences, AttachmentRef, DesktopPreferences, InputType, LlamaServerProvider,
-    LlamaVisionServerProvider, Request, Runtime, SqliteStore, TaskState, ThemePreference,
-    VisionProvider,
+    attachment_receipt_manifest, default_desktop_preferences_path, inspect_local_attachment,
+    load_desktop_preferences, save_desktop_preferences, AttachmentReceipt, AttachmentRef,
+    DesktopPreferences, InputType, LlamaServerProvider, LlamaVisionServerProvider, Request,
+    Runtime, SqliteStore, TaskState, ThemePreference, VisionProvider,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,7 @@ struct WorkerReply {
     content: String,
     status: String,
     sources: Vec<String>,
+    attachment_receipts: Vec<AttachmentReceipt>,
     notification: Option<DesktopNotification>,
 }
 
@@ -115,6 +116,7 @@ struct JarvisDesktop {
     role_filter: Option<MessageRole>,
     draft: String,
     queued_attachments: Vec<AttachmentRef>,
+    sent_attachment_receipts: Vec<AttachmentReceipt>,
     previews: HashMap<String, TextureHandle>,
     pending_approval_tasks: Vec<String>,
     pending: bool,
@@ -173,6 +175,7 @@ impl JarvisDesktop {
             role_filter: None,
             draft: String::new(),
             queued_attachments: vec![],
+            sent_attachment_receipts: vec![],
             previews: HashMap::new(),
             pending_approval_tasks,
             pending: false,
@@ -199,6 +202,7 @@ impl JarvisDesktop {
             }
             self.pending = false;
             self.status = reply.status;
+            self.record_attachment_receipts(reply.attachment_receipts);
             if let Some(notification) = reply.notification {
                 notify_desktop(notification.title, &notification.content);
             }
@@ -215,6 +219,18 @@ impl JarvisDesktop {
             .into_iter()
             .map(|approval| approval.task_id.clone())
             .collect();
+    }
+
+    fn record_attachment_receipts(&mut self, receipts: Vec<AttachmentReceipt>) {
+        const MAX_SESSION_ATTACHMENT_RECEIPTS: usize = 50;
+        self.sent_attachment_receipts.extend(receipts);
+        let excess = self
+            .sent_attachment_receipts
+            .len()
+            .saturating_sub(MAX_SESSION_ATTACHMENT_RECEIPTS);
+        if excess > 0 {
+            self.sent_attachment_receipts.drain(..excess);
+        }
     }
 
     fn approve_task(&mut self, task_id: &str) {
@@ -345,6 +361,10 @@ impl JarvisDesktop {
         }
         self.draft.clear();
         let attachments = std::mem::take(&mut self.queued_attachments);
+        let attachment_receipts = attachments
+            .iter()
+            .map(AttachmentReceipt::from_attachment)
+            .collect::<Vec<_>>();
         let needs_vision = attachments
             .iter()
             .any(|attachment| attachment.kind.is_image());
@@ -449,6 +469,7 @@ impl JarvisDesktop {
                 content,
                 status,
                 sources,
+                attachment_receipts,
                 notification,
             });
         });
@@ -486,6 +507,25 @@ impl JarvisDesktop {
             Ok(()) => format!("UI ayarları dışa aktarıldı: {}", path.display()),
             Err(error) => format!("UI ayarları dışa aktarılamadı: {error}"),
         };
+    }
+
+    fn export_attachment_receipts(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("jarvis-attachment-receipts.json")
+            .save_file()
+        else {
+            return;
+        };
+        self.status =
+            match attachment_receipt_manifest(&self.sent_attachment_receipts).and_then(|manifest| {
+                fs::write(&path, manifest)
+                    .map_err(|error| format!("attachment receipt manifest write failed: {error}"))
+            }) {
+                Ok(()) => {
+                    "Ek metadata makbuzları dışa aktarıldı; dosya yolu veya içerik yok.".into()
+                }
+                Err(error) => format!("Ek makbuzları dışa aktarılamadı: {error}"),
+            };
     }
 
     fn show_preferences_controls(&mut self, ui: &mut egui::Ui) {
@@ -719,6 +759,7 @@ impl JarvisDesktop {
                 "Görseller gönderildiğinde yalnız ayrı local vision sunucusuna gider; belgeler ayrı RAG onayı verilene kadar metadata olarak kalır.",
             );
         }
+        self.show_attachment_receipts(ui);
         let response = ui.add(
             egui::TextEdit::multiline(&mut self.draft)
                 .desired_rows(3)
@@ -739,6 +780,50 @@ impl JarvisDesktop {
                 ui.label(RichText::new("JARVIS YANIT ÜRETİYOR").color(COLOR_GOLD));
             }
         });
+    }
+
+    fn show_attachment_receipts(&mut self, ui: &mut egui::Ui) {
+        if self.sent_attachment_receipts.is_empty() {
+            return;
+        }
+        let receipt_count = self.sent_attachment_receipts.len();
+        egui::CollapsingHeader::new(format!("OTURUM EK MAKBUZLARI {receipt_count}"))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.small(
+                    "Bu liste yalnız bu pencere oturumunda tutulur. Yerel yol, dosya baytı, prompt ve model yanıtı saklanmaz.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("TÜMÜNÜ TEMİZLE").clicked() {
+                        self.sent_attachment_receipts.clear();
+                        self.status = "Oturum ek makbuzları temizlendi; hiçbir orijinal dosya silinmedi."
+                            .into();
+                    }
+                    if ui.button("METADATA DIŞA AKTAR").clicked() {
+                        self.export_attachment_receipts();
+                    }
+                });
+                let mut remove_attachment_id = None;
+                for receipt in &self.sent_attachment_receipts {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(receipt.display_summary());
+                        if ui.small_button("Kaldır").clicked() {
+                            remove_attachment_id = Some(receipt.attachment_id.clone());
+                        }
+                    });
+                }
+                if let Some(attachment_id) = remove_attachment_id {
+                    if let Some(index) = self
+                        .sent_attachment_receipts
+                        .iter()
+                        .position(|receipt| receipt.attachment_id == attachment_id)
+                    {
+                        self.sent_attachment_receipts.remove(index);
+                        self.status = "Ek makbuzu kaldırıldı; hiçbir orijinal dosya silinmedi."
+                            .into();
+                    }
+                }
+            });
     }
 
     fn show_hud(&mut self, ui: &mut egui::Ui) {

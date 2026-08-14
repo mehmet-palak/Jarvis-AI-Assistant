@@ -22,6 +22,11 @@ reddedilir ve kullanıcı dosyayı yeniden seçer.
   asla silmez.
 - Başarılı/başarısız task audit'i attachment ID'yi içerir; canonical path veya görüntü byte'ı audit
   eventine yazılmaz.
+- Native ve TUI, gönderim tamamlandığında en fazla 50 adet **oturumluk ek makbuzu** gösterebilir.
+  Makbuz yalnız kullanıcı görünür dosya adı, MIME, boyut/dimension, SHA-256 ve attachment ID
+  içerir. Yerel yol, ham byte, prompt, model yanıtı veya task/audit içermez; pencere/TUI kapanınca
+  kaybolur. Kullanıcı tekli/tümü kaldırabilir veya yalnız bu metadata'yı açıkça seçtiği JSON
+  dosyasına dışa aktarabilir.
 - Gelecekte vision modelinin kendi cache'i olursa ayrı, süreli retention ve tekli/tüm cache silme
   UX'i ile bu ADR güncellenecektir.
 

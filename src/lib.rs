@@ -6,8 +6,9 @@ pub mod vision;
 pub mod workbench;
 
 pub use attachments::{
-    inspect_local_attachment, inspect_local_document, inspect_local_image,
-    revalidate_local_attachment, validate_attachment, AttachmentKind, AttachmentRef,
+    attachment_receipt_manifest, inspect_local_attachment, inspect_local_document,
+    inspect_local_image, revalidate_local_attachment, validate_attachment, AttachmentKind,
+    AttachmentReceipt, AttachmentRef,
 };
 pub use desktop_config::{
     default_desktop_preferences_path, load_desktop_preferences, save_desktop_preferences,
