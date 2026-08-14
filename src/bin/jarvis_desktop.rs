@@ -3,6 +3,8 @@
 //! request that from the status panel.
 
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
@@ -34,6 +36,61 @@ struct WorkerReply {
     status: String,
     sources: Vec<String>,
     notify_user: bool,
+}
+
+/// A small Linux-first lock for the native shell. The model server remains independently
+/// persistent; this lock only prevents two desktop windows from racing over one UI session.
+struct DesktopInstanceLock {
+    path: PathBuf,
+}
+
+impl Drop for DesktopInstanceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn default_desktop_lock_path() -> PathBuf {
+    let runtime_root = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    runtime_root.join("jarvis").join("desktop.lock")
+}
+
+fn acquire_desktop_instance_lock(path: PathBuf) -> Result<DesktopInstanceLock, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "desktop lock path needs a parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("desktop lock directory cannot be created: {error}"))?;
+
+    for _ in 0..2 {
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = writeln!(file, "{}", std::process::id()) {
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("desktop lock cannot be written: {error}"));
+                }
+                return Ok(DesktopInstanceLock { path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let lock_pid = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|content| content.trim().parse::<u32>().ok());
+                let live_lock = lock_pid
+                    .map(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+                    .unwrap_or(true);
+                if live_lock {
+                    return Err("JARVIS desktop zaten açık; mevcut pencereyi kullan.".into());
+                }
+                fs::remove_file(&path).map_err(|remove_error| {
+                    format!("bayat desktop lock kaldırılamadı: {remove_error}")
+                })?;
+            }
+            Err(error) => return Err(format!("desktop lock oluşturulamadı: {error}")),
+        }
+    }
+    Err("desktop lock alınamadı; tekrar dene.".into())
 }
 
 struct JarvisDesktop {
@@ -606,6 +663,13 @@ fn notify_response_ready(content: &str) {
 }
 
 fn main() -> eframe::Result<()> {
+    let _instance_lock = match acquire_desktop_instance_lock(default_desktop_lock_path()) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("{error}");
+            return Ok(());
+        }
+    };
     let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let store = SqliteStore::open(
         project_root
@@ -639,7 +703,26 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_matches_filter, turkish_search_fold, Message, MessageRole};
+    use super::{
+        acquire_desktop_instance_lock, message_matches_filter, turkish_search_fold, Message,
+        MessageRole,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_lock_path() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "jarvis-desktop-lock-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock after epoch")
+                    .as_nanos()
+            ))
+            .join("desktop.lock")
+    }
 
     #[test]
     fn message_search_is_case_insensitive_for_turkish_i_variants_and_role_scoped() {
@@ -660,5 +743,21 @@ mod tests {
             Some(MessageRole::Jarvis)
         ));
         assert!(!message_matches_filter(&user_message, "ankara", None));
+    }
+
+    #[test]
+    fn desktop_lock_is_single_instance_and_recovers_from_a_stale_pid() {
+        let path = temporary_lock_path();
+        let first_lock = acquire_desktop_instance_lock(path.clone()).expect("first lock");
+        assert!(acquire_desktop_instance_lock(path.clone()).is_err());
+        drop(first_lock);
+        assert!(!path.exists());
+
+        fs::write(&path, "4294967295\n").expect("stale lock fixture");
+        let recovered_lock =
+            acquire_desktop_instance_lock(path.clone()).expect("stale lock recovery");
+        drop(recovered_lock);
+        assert!(!path.exists());
+        fs::remove_dir(path.parent().expect("test lock parent")).expect("test cleanup");
     }
 }
