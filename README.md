@@ -51,7 +51,7 @@ jarvis --desktop
 - Mesaj kartları düzenlenemez. Ortadaki arama alanı mevcut oturumda Türkçe büyük/küçük harf farkını gözetmeden arar; **Sen / JARVIS / Sistem** filtresiyle daraltılabilir.
 - Onay isteyen işler soldaki panelde task ID ile görünür; **Onayla** yalnız o task'ı core approval zincirinden geçirir, **Reddet** yan etkiyi çalıştırmadan iptal eder.
 - Tema, yazı ölçeği ve bildirim tercihi yalnız `~/.config/jarvis/desktop.json` içinde tutulur; ekrandan varsayılanlara döndürülebilir veya kullanıcı seçtiği konuma dışa aktarılabilir. Bildirim tercihi açıksa yanıt, onay bekleme ve işlem hatası bildirilir. Sohbet içeriği, ek dosya yolu veya kimlik bilgisi bu dosyaya yazılmaz.
-- `Ctrl+O` veya **Görsel ekle** ile PNG/JPEG seçilir; önizleme ve kaldırma işlemi dosyayı silmez. Mevcut text-only model görsel piksellerini henüz analiz etmez; vision GGUF ve `mmproj` indirilene kadar ek sadece doğrulanmış metadata olarak taşınır.
+- `Ctrl+O` veya **Dosya ekle** ile PNG/JPEG/TXT/Markdown/PDF seçilir; önizleme ve kaldırma işlemi dosyayı silmez. Görsel pikselleri vision GGUF ve `mmproj` indirilene kadar, belge içeriği ise ayrı RAG onayı verilene kadar modele taşınmaz; her ikisi de yalnız doğrulanmış metadata olarak kalır.
 
 ## Local model çalışma profili
 

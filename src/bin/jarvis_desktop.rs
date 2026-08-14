@@ -12,7 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
-    default_desktop_preferences_path, inspect_local_image, load_desktop_preferences,
+    default_desktop_preferences_path, inspect_local_attachment, load_desktop_preferences,
     save_desktop_preferences, AttachmentRef, DesktopPreferences, InputType, LlamaServerProvider,
     Request, Runtime, SqliteStore, TaskState, ThemePreference,
 };
@@ -284,11 +284,12 @@ impl JarvisDesktop {
     fn add_attachment(&mut self, context: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Görseller", &["png", "jpg", "jpeg"])
+            .add_filter("Belgeler", &["txt", "md", "markdown", "pdf"])
             .pick_file()
         else {
             return;
         };
-        let attachment = match inspect_local_image(&path) {
+        let attachment = match inspect_local_attachment(&path) {
             Ok(attachment) => attachment,
             Err(error) => {
                 self.status = format!("Ek alınamadı: {error}");
@@ -300,7 +301,16 @@ impl JarvisDesktop {
             .iter()
             .any(|queued| queued.sha256 == attachment.sha256)
         {
-            self.status = "Bu görsel zaten ek kuyruğunda.".into();
+            self.status = "Bu ek zaten ek kuyruğunda.".into();
+            return;
+        }
+        if attachment.kind.is_document() {
+            self.status = format!(
+                "Belge hazır: {} • {} KiB • yalnız metadata, içerik indekslenmedi.",
+                attachment.original_name,
+                attachment.byte_size.div_ceil(1024),
+            );
+            self.queued_attachments.push(attachment);
             return;
         }
         match load_preview(context, &attachment) {
@@ -308,14 +318,15 @@ impl JarvisDesktop {
                 self.previews
                     .insert(attachment.attachment_id.clone(), preview);
                 self.status = format!(
-                    "Ek hazır: {} • {}×{} • gönderimden önce kaldırılabilir.",
+                    "Görsel hazır: {} • {}×{} • gönderimden önce kaldırılabilir.",
                     attachment.original_name, attachment.width, attachment.height
                 );
                 self.queued_attachments.push(attachment);
             }
             Err(error) => {
-                self.status =
-                    format!("Ek önizlemesi açılamadı; güvenlik için kuyrukta tutulmadı: {error}");
+                self.status = format!(
+                    "Görsel önizlemesi açılamadı; güvenlik için kuyrukta tutulmadı: {error}"
+                );
             }
         }
     }
@@ -632,7 +643,7 @@ impl JarvisDesktop {
     fn show_chat_composer(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
         hud_section_title(ui, "KOMUT GİRİŞİ");
         ui.horizontal(|ui| {
-            if ui.button("GÖRSEL EKLE  Ctrl+O").clicked() {
+            if ui.button("DOSYA EKLE  Ctrl+O").clicked() {
                 self.add_attachment(context);
             }
             if !self.queued_attachments.is_empty() && ui.button("EKLERİ KALDIR").clicked() {
@@ -649,6 +660,8 @@ impl JarvisDesktop {
                     .show(ui, |ui| {
                         if let Some(texture) = self.previews.get(&attachment.attachment_id) {
                             ui.add(egui::Image::new(texture).max_size(egui::vec2(80.0, 60.0)));
+                        } else if attachment.kind.is_document() {
+                            ui.label(RichText::new("BELGE").size(12.0).color(COLOR_GOLD));
                         }
                         ui.label(&attachment.original_name);
                         if ui.small_button("Kaldır").clicked() {
@@ -665,7 +678,7 @@ impl JarvisDesktop {
         if !self.queued_attachments.is_empty() {
             ui.colored_label(
                 COLOR_GOLD,
-                "Vision modeli kurulana kadar ekler yalnız doğrulanmış metadata olarak taşınır.",
+                "Görseller vision kurulana kadar; belgeler ise ayrı RAG onayı verilene kadar yalnız doğrulanmış metadata olarak taşınır.",
             );
         }
         let response = ui.add(

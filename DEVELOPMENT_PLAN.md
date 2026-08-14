@@ -146,7 +146,7 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
 - [ ] Yaşam döngüsü otomasyonu: ilk açılış, servis yükleme, `/quit`, `Ctrl+C`, terminal kapanması, `exit`, yeniden açılış ve DB recovery.
 - [ ] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
 - [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
-- [ ] Sürümlü sohbet kalite seti: Türkçe selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
+- [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
   - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu; sonuçlar henüz `NOT RUN`.
 - [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
   - Koşum kaydı model dosya/hash'i, CPU/RAM durumu, task ID ve kısa insan değerlendirmesi için alan içerir; kişisel prompt/yanıtı varsayılan olarak kaydetmez.
@@ -178,7 +178,8 @@ Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek m
 - [ ] Güvenli dosya seçimi: `Ctrl+O`/ataç düğmesi, kullanıcı görünür dosya adı/önizleme ve gönderimden önce kaldırma.
 - [x] Dosya doğrulama: MIME magic-byte kontrolü, canonical path, allowlist, boyut/piksel limitleri, decode bomb/bozuk dosya reddi ve SHA-256.
   - Kanıt: PNG/JPEG magic/header + full decoder doğrulaması, 10 MiB/20 MP limiti, SHA-256 ve bozuk/stale dosya testleri.
-- [ ] Metin/doküman ekleri: ilk aşamada yalnız güvenli metadata + ayrı RAG ingestion kuyruğu; ekin ham içeriği tool talimatı sayılmaz.
+- [x] Metin/doküman ekleri: TXT, Markdown ve PDF ilk aşamada yalnız güvenli metadata ile seçilir; ham içerik ayrı RAG ingestion/onay akışı olmadan modele veya tool'a taşınmaz.
+  - Kanıt: canonical path, MIME/UTF-8/PDF magic, 5 MiB limiti, SHA-256, stale-reference reddi; descriptor path/ham belge metnini taşımaz ve injection metni runtime context testinde görünmez.
 - [ ] Vision model kararı: CPU uyumlu multimodal GGUF + eşleşen `mmproj` adayları, lisans, disk/RAM/latency karşılaştırması. **İndirme ancak kullanıcı onayından sonra.**
 
 > Kullanıcı kararı — 14 Ağustos 2026: normal geliştirme indirimi önce boyutu bildirilerek **en fazla 100–200 MB** olabilir. Vision GGUF (yaklaşık 2–4 GB) ve `mmproj` (yaklaşık 0.4–1 GB) şimdilik ertelendi; birkaç saat sonraki durum güncellemesinde kullanıcıya yeniden hatırlatılacak. Bu dosyalar için açık “indir” onayı olmadan hiçbir indirme başlatılmaz.
@@ -195,11 +196,14 @@ Bu turda kanıtlanan alt dilim:
 
 #### F2 güncel çalışma kaydı — henüz exit gate değildir
 
-- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 80 test, strict Clippy, release build ve izole MCP policy smoke çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
+- [x] Yerel release kontrolü: `bash scripts/release_check.sh` format, kilitli/offline bağımlılık çözümü, 90 test, strict Clippy, release build ve izole MCP policy smoke çalıştırır. `--with-service`, yalnız kullanıcının açık tuttuğu loopback model servisinin health kontrolünü ekler; servis başlatmaz ve İnternet'e çıkmaz.
 - [x] TUI davranış regresyonu: çok satırlı paste, Türkçe/UTF-8 kelime silme, `Ctrl+V`, Wayland primary selection için mouse orta tuşu, `Ctrl+Backspace`, `Ctrl+W`, `Ctrl+U`, terminal-control karakterleri, klavye/mouse scroll, `Home`/`End`, küçük terminalde scrollbar ve en yeni turun görünürlüğü testlere bağlandı.
 - [x] Native UI temel kodu: `jarvis-desktop` aynı `Runtime` örneği üzerinde eski JARVIS HUD dilini izleyen teal/siyah merkez orb, sol sistem kontrolü ve sağ bağımsız sohbet konsolu sunar. Salt-okunur kartlar, ayrı composer, typing state, Türkçe harf farkını gözeten mesaj arama/rol filtresi, `Ctrl+O` görsel seçimi, güvenli önizleme/kaldırma, task-bound onay/red paneli, model-RAM kontrolü, stale-lock recovery'li ve sahiplik güvenli tek-pencere koruması, versioned yerel UI tercihleri (reset/export dahil) korunur. TUI davranışı değişmez; `jarvis --desktop` sibling release binary'sini başlatır. Pencereyi kapatmak servisi durdurmaz.
 - [x] Native bildirim contractı: kullanıcının notification tercihi kapalıysa hiçbir bildirim üretilmez; açıksa completed yanıt, `WaitingForUser` onayı ve failed/interrupted işlem için ayrı başlıklar test edilir. Notification daemon yoksa mevcut `notify-send` çağrısı best-effort kalır ve task sonucunu değiştirmez.
 - [x] Vision sınırı UX'i: TUI ve native composer seçilmiş PNG/JPEG için açıkça “metadata-only” sınırını gösterir; vision service/model kurulana dek text modelin piksel gördüğü izlenimi verilmez.
+- [x] Doküman sınırı UX'i: TUI `/attach` ve native `Ctrl+O`, TXT/Markdown/PDF'yi seçebilir; belge içeriğinin modele veya tool'a gitmediğini, indekslemenin ayrı açık onaylı RAG akışı olduğunu belirtir.
+- [x] Çok dilli sohbet contractı: sistem prompt'u son kullanıcı mesajının dilini temel alır; Türkçe ve İngilizce doğal cevap istenir, kullanıcı istemedikçe çeviri/dil karışımı yapılmaz. Bu bir yanıt şablonu veya kullanıcıya özel kural değildir; gerçek çıktılar sürümlü QA setinde model kalitesi olarak ölçülür.
+- [x] Serbest metin tool yönlendirme sınırı: sohbet girdisi artık anahtar-kelime `if/else` ile capability'ye bağlanmaz. Tek model üretimi ya doğal yanıt ya da allowlist'teki tam capability kimliğini taşıyan dar bir intent envelope üretir; envelope registry, policy ve verifier tarafından bağımsız doğrulanır. Normal sohbet ek routing çağrısı veya yanıt şablonu kullanmaz.
 - [ ] Native UI Wayland/Hyprland gerçek smoke: açılış, resize/minimize/focus, `Ctrl+O` picker, mesaj gönderme, bildirim tercihi ve pencere kapanışının model servisini canlı bırakması kullanıcı masaüstüsünde doğrulanacak.
 - [ ] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilecek model + `mmproj` olmadan görsel pikselleri modele verilemez; mevcut davranış güvenli metadata-only fallback'tir.
 

@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    inspect_local_image, propose_memory, AttachmentRef, DataSensitivity, InputType,
+    inspect_local_attachment, propose_memory, AttachmentRef, DataSensitivity, InputType,
     LlamaServerProvider, MemoryNamespace, MemoryProposal, Request, Runtime, SqliteStore, TaskState,
 };
 use ratatui::{
@@ -32,6 +32,12 @@ enum MessageRole {
     System,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiExitAction {
+    KeepModelInRam,
+    StopModelAndExit,
+}
+
 #[derive(Debug, Clone)]
 struct Message {
     role: MessageRole,
@@ -44,8 +50,13 @@ struct WorkerReply {
     status: String,
     task_id: String,
     approval_pending: bool,
-    notify_user: bool,
+    notification: Option<TuiNotification>,
     sources: Vec<String>,
+}
+
+struct TuiNotification {
+    title: &'static str,
+    content: String,
 }
 
 struct App {
@@ -117,6 +128,7 @@ fn refresh_model_state(app: &mut App, provider: &LlamaServerProvider) {
     } else {
         app.push_system("Local model sunucusuna şu an ulaşılamıyor.");
         app.status = "Model sunucusu erişilemiyor; gönderilmemiş mesajın korunur.".into();
+        notify_desktop("JARVIS model hatası", &app.status);
     }
 }
 
@@ -249,13 +261,8 @@ fn event_loop(
             }
             app.status = reply.status;
             app.pending = false;
-            if reply.notify_user {
-                notify_response_ready(
-                    app.messages
-                        .get(reply.message_index)
-                        .map(|message| message.content.as_str())
-                        .unwrap_or_default(),
-                );
+            if let Some(notification) = reply.notification {
+                notify_desktop(notification.title, &notification.content);
             }
             if reply.approval_pending {
                 app.push_system(format!(
@@ -300,9 +307,7 @@ fn event_loop(
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c' | 'C'))
-        {
+        if should_close_tui_for_key(key) {
             app.running = false;
             continue;
         }
@@ -366,6 +371,18 @@ fn is_clear_draft_shortcut(key: KeyEvent) -> bool {
 
 fn should_clear_draft(key: KeyEvent) -> bool {
     is_clear_draft_shortcut(key) || key.code == KeyCode::Esc
+}
+
+fn should_close_tui_for_key(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+fn tui_exit_action(input: &str) -> Option<TuiExitAction> {
+    match input {
+        "/quit" => Some(TuiExitAction::KeepModelInRam),
+        "exit" | "/exit" => Some(TuiExitAction::StopModelAndExit),
+        _ => None,
+    }
 }
 
 fn apply_history_mouse_scroll(scroll: &mut u16, kind: MouseEventKind) -> bool {
@@ -472,22 +489,32 @@ fn submit(
         return;
     }
     if let Some(path) = input.strip_prefix("/attach ").map(str::trim) {
-        match inspect_local_image(path) {
+        match inspect_local_attachment(path) {
             Ok(attachment) => {
                 if app
                     .attachments
                     .iter()
                     .any(|queued| queued.sha256 == attachment.sha256)
                 {
-                    app.push_system("Bu görsel zaten ek kuyruğunda.");
+                    app.push_system("Bu ek zaten ek kuyruğunda.");
                 } else {
+                    let details = if attachment.kind.is_image() {
+                        format!("{}×{}", attachment.width, attachment.height)
+                    } else {
+                        format!("{} KiB", attachment.byte_size.div_ceil(1024))
+                    };
+                    let availability = if attachment.kind.is_image() {
+                        "Mevcut text-only model görsel piksellerini analiz etmez; ek metadata olarak güvenle taşınır. Vision modeli kurulduğunda aynı contract görsel girdiye bağlanacak."
+                    } else {
+                        "Belge içeriği bu ek kuyruğundan modele veya araca verilmez; yalnız metadata güvenle taşınır. İndeksleme için ayrı, açık onaylı RAG akışı gerekir."
+                    };
                     app.push_system(format!(
-                        "Ek kuyruğa alındı: {} • {} • {}×{} • SHA-256:{}…\nMevcut text-only model görsel piksellerini analiz etmez; ek metadata olarak güvenle taşınır. Vision modeli kurulduğunda aynı contract görsel girdiye bağlanacak.",
+                        "Ek kuyruğa alındı: {} • {} • {} • SHA-256:{}…\n{}",
                         attachment.original_name,
                         attachment.mime_type(),
-                        attachment.width,
-                        attachment.height,
+                        details,
                         &attachment.sha256[..12],
+                        availability,
                     ));
                     app.attachments.push(attachment);
                 }
@@ -602,19 +629,17 @@ fn submit(
         }
         return;
     }
-    match input.as_str() {
-        "exit" | "/exit" => {
+    if let Some(exit_action) = tui_exit_action(&input) {
+        if exit_action == TuiExitAction::StopModelAndExit {
             app.status = match stop_local_model_server() {
                 Ok(()) => "JARVIS kapandı; model RAM'den çıkarıldı.".into(),
                 Err(error) => error,
             };
-            app.running = false;
-            return;
         }
-        "/quit" => {
-            app.running = false;
-            return;
-        }
+        app.running = false;
+        return;
+    }
+    match input.as_str() {
         "/clear" => {
             app.messages.clear();
             app.push_system("Sohbet görünümü temizlendi. Local session context güvenlik için RAM'de kalır; yeni oturum için JARVIS'i yeniden başlatabilirsin.");
@@ -634,12 +659,16 @@ fn submit(
                     .attachments
                     .iter()
                     .map(|attachment| {
+                        let details = if attachment.kind.is_image() {
+                            format!("{}×{}", attachment.width, attachment.height)
+                        } else {
+                            format!("{} KiB", attachment.byte_size.div_ceil(1024))
+                        };
                         format!(
-                            "{} • {} • {}×{} • {}…",
+                            "{} • {} • {} • {}…",
                             attachment.original_name,
                             attachment.mime_type(),
-                            attachment.width,
-                            attachment.height,
+                            details,
                             &attachment.attachment_id[11..]
                         )
                     })
@@ -683,7 +712,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG-yolu>, /attachments, /attachments clear. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -776,8 +805,7 @@ fn submit(
             .collect::<Vec<_>>();
         let content = tool.error.clone().unwrap_or(tool.output);
         let approval_pending = task.state == TaskState::WaitingForUser;
-        let notify_user =
-            task.state == TaskState::Completed && !approval_pending && !content.trim().is_empty();
+        let notification = tui_notification(task.state, &content);
         let status = match task.state {
             TaskState::WaitingForUser => "İşlem onayını bekliyor.".into(),
             TaskState::Completed => format!("Yanıt hazır • doğrulama: {:?}", verification.status),
@@ -792,7 +820,7 @@ fn submit(
             status,
             task_id: task.task_id,
             approval_pending,
-            notify_user,
+            notification,
             sources,
         });
     });
@@ -812,22 +840,43 @@ fn notification_preview(content: &str) -> String {
     preview
 }
 
-/// Notifications are best-effort: a missing notification daemon must never affect a completed
-/// task or the terminal UI. `notify-send` integrates with Hyprland's standard notification path.
-fn notify_response_ready(content: &str) {
+fn tui_notification(task_state: TaskState, content: &str) -> Option<TuiNotification> {
+    if content.trim().is_empty() {
+        return None;
+    }
+    let title = match task_state {
+        TaskState::Completed => "JARVIS yanıtı hazır",
+        TaskState::WaitingForUser => "JARVIS onayı bekliyor",
+        TaskState::Failed | TaskState::Interrupted => "JARVIS işlem hatası",
+        TaskState::Queued | TaskState::Running | TaskState::Cancelled => return None,
+    };
+    Some(TuiNotification {
+        title,
+        content: content.into(),
+    })
+}
+
+fn notification_arguments(title: &str, content: &str) -> Option<Vec<String>> {
     let preview = notification_preview(content);
     if preview.is_empty() {
-        return;
+        return None;
     }
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=JARVIS",
-            "--icon=dialog-information",
-            "--expire-time=6000",
-            "JARVIS yanıtı hazır",
-            preview.as_str(),
-        ])
-        .status();
+    Some(vec![
+        "--app-name=JARVIS".into(),
+        "--icon=dialog-information".into(),
+        "--expire-time=6000".into(),
+        title.into(),
+        preview,
+    ])
+}
+
+/// Notifications are best-effort: a missing notification daemon must never affect a completed
+/// task or the terminal UI. `notify-send` integrates with Hyprland's standard notification path.
+fn notify_desktop(title: &str, content: &str) {
+    let Some(arguments) = notification_arguments(title, content) else {
+        return;
+    };
+    let _ = Command::new("notify-send").args(arguments).status();
 }
 
 fn single_pending_task_id(runtime: &Arc<Mutex<Runtime>>) -> Result<String, String> {
@@ -1109,11 +1158,14 @@ mod tests {
         append_pasted_text, apply_history_key_scroll, apply_history_mouse_scroll,
         delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-        is_primary_selection_paste, native_desktop_binary_path, notification_preview,
-        return_to_latest, should_clear_draft, App, Message, MessageRole,
+        is_primary_selection_paste, native_desktop_binary_path, notification_arguments,
+        notification_preview, return_to_latest, should_clear_draft, should_close_tui_for_key,
+        submit, tui_exit_action, tui_notification, App, Message, MessageRole, TuiExitAction,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+    use jarvis_core::{LlamaServerProvider, Runtime, TaskState};
     use ratatui::{backend::TestBackend, Terminal};
+    use std::sync::{mpsc, Arc, Mutex};
 
     #[test]
     fn long_draft_keeps_its_tail_visible() {
@@ -1157,6 +1209,35 @@ mod tests {
         assert!(preview.starts_with("ilk satır ikinci satır"));
         assert!(preview.ends_with('…'));
         assert_eq!(preview.chars().count(), 181);
+    }
+
+    #[test]
+    fn notifications_cover_reply_approval_and_error_without_daemon_authority() {
+        assert_eq!(
+            tui_notification(TaskState::Completed, "hazır")
+                .expect("reply notification")
+                .title,
+            "JARVIS yanıtı hazır"
+        );
+        assert_eq!(
+            tui_notification(TaskState::WaitingForUser, "onay gerekli")
+                .expect("approval notification")
+                .title,
+            "JARVIS onayı bekliyor"
+        );
+        assert_eq!(
+            tui_notification(TaskState::Failed, "model yok")
+                .expect("error notification")
+                .title,
+            "JARVIS işlem hatası"
+        );
+        assert!(tui_notification(TaskState::Cancelled, "iptal").is_none());
+        assert!(notification_arguments("JARVIS", "\n  ").is_none());
+        let arguments = notification_arguments("JARVIS", "ilk satır\nikinci satır")
+            .expect("notification arguments");
+        assert_eq!(arguments[0], "--app-name=JARVIS");
+        assert_eq!(arguments[3], "JARVIS");
+        assert_eq!(arguments[4], "ilk satır ikinci satır");
     }
 
     #[test]
@@ -1205,6 +1286,44 @@ mod tests {
             KeyCode::Backspace,
             KeyModifiers::NONE,
         )));
+    }
+
+    #[test]
+    fn exit_actions_keep_or_release_the_model_only_when_explicit() {
+        assert_eq!(
+            tui_exit_action("/quit"),
+            Some(TuiExitAction::KeepModelInRam)
+        );
+        assert_eq!(
+            tui_exit_action("exit"),
+            Some(TuiExitAction::StopModelAndExit)
+        );
+        assert_eq!(
+            tui_exit_action("/exit"),
+            Some(TuiExitAction::StopModelAndExit)
+        );
+        assert_eq!(tui_exit_action("selam"), None);
+        assert!(should_close_tui_for_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!should_close_tui_for_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        )));
+    }
+
+    #[test]
+    fn unavailable_model_keeps_the_user_draft_for_retry() {
+        let runtime = Arc::new(Mutex::new(Runtime::new()));
+        let provider = LlamaServerProvider::local_default();
+        let (sender, _receiver) = mpsc::channel();
+        let mut app = App::new("missing_executable");
+        app.input = "Bu taslak kaybolmamalı".into();
+        submit(&mut app, &runtime, &provider, &sender);
+        assert_eq!(app.input, "Bu taslak kaybolmamalı");
+        assert!(!app.pending);
+        assert!(app.status.contains("kutuda tutuluyor"));
     }
 
     #[test]
