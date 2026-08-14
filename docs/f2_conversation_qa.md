@@ -79,6 +79,7 @@ Bu bölüm 14 Ağustos 2026'daki gerçek TUI koşumunda, düzeltme yapılmadan g
 | C17 | PARTIAL | Desktop içinden `exit` sonrası `jarvis-llama.service` aktif kaldı; `Super+Q` sonrası aktif kalması beklenen davranış olarak doğrulandı. Desktop `exit` servis kapatma akışında hata var. |
 | C18 | PASS | Desktop mesaj araması ve “Sen / JARVIS” rol filtreleri çalıştı; mesaj geçmişi değiştirilmeden doğru şekilde daraltıldı. |
 | C19 | PASS | Yazı ölçeği yeniden açılışta korundu. `desktop.json` yalnızca tema, font ölçeği, bildirim tercihi ve şema sürümünü içeriyor; sohbet/ek yolu yazılmıyor. |
+| C20 | PASS | İkinci desktop açılışı mevcut pencereye yönlendirildi; pencere kapatıldıktan sonra stale lock yeni açılışı engellemedi. |
 
 Ek UI backlog bulguları: fareyle metin seçimi yok; `Ctrl+Sol/Sağ`, `Ctrl+Backspace`, `Home/End`
 composer içinde doğru çalışmıyor veya history navigation ile karışıyor. Mouse tekerleğiyle primary
@@ -116,7 +117,7 @@ Mevcut kullanıcı DB'si yedeklendi: `jarvis.db.audit-race-backup-20260814.db`.
 | C17 | `/quit`, `Ctrl+C`, `exit`, pencere kapatma | `/quit`, `Ctrl+C` ve pencere kapatma servis RAM'de kalır; yalnız `exit` veya açık RAM düğmesi servisi durdurur. | service state | PARTIAL — desktop `exit` servisi durdurmadı; `Super+Q` davranışı PASS |
 | C18 | Native mesaj araması ve rol filtresi | Salt-okunur kartlarda Türkçe arama/rol filtresi doğru daraltır; mesajı değiştirmez. | ekran | PASS |
 | C19 | Tema/font/notification ayarını değiştirip aç-kapa | Sadece `desktop.json` tercihleri kalır; sohbet veya ek path'i config'e yazılmaz. | config diff + ekran | PASS |
-| C20 | İkinci native pencere açma ve stale lock | İkinci pencere reddedilir; bayat lock sonraki açılışı engellemez. | terminal + ekran | NOT RUN |
+| C20 | İkinci native pencere açma ve stale lock | İkinci pencere reddedilir; bayat lock sonraki açılışı engellemez. | terminal + ekran | PASS |
 
 ## Sonuç kapısı
 
