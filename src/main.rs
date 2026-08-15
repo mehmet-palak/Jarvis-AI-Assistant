@@ -15,10 +15,11 @@ use crossterm::{
 use jarvis_core::{
     attachment_receipt_manifest, inspect_local_attachment, memory_export, memory_import,
     parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
-    profile_manifest, propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef,
-    DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
-    LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal, ProfileField,
-    Request, Runtime, SqliteStore, TaskState, VisionProvider, WorkspaceCitation,
+    profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
+    AttachmentReceipt, AttachmentRef, DataSensitivity, InputType, LlamaEmbeddingProvider,
+    LlamaServerProvider, LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
+    ProfileField, Request, Runtime, SqliteStore, TaskState, TrustLevel, VisionProvider,
+    WorkspaceCitation,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -488,6 +489,48 @@ fn split_trailing_sensitivity(rest: &str) -> (&str, DataSensitivity) {
     (rest, DataSensitivity::Internal)
 }
 
+/// `/remember [namespace-word] [görev <task-id>] anahtar = değer`: an optional leading namespace
+/// word (`parse_memory_namespace` — profil/proje/görev/oturum/geçici, English too) selects the
+/// namespace; `Task` additionally consumes the *next* word as its `scope_id`. Falls back to
+/// `(UserProfile, None, rest as-is)` whenever there is no leading namespace word, OR when
+/// stripping one would leave no real "anahtar = değer" behind (`looks_like_key_value` check) —
+/// this is what keeps `/remember proje = X` behaving exactly as it always did for a user whose
+/// literal key happens to be "proje", rather than misreading it as an (invalid, empty-key)
+/// namespace selection.
+fn parse_remember_namespace_prefix(rest: &str) -> (MemoryNamespace, Option<String>, String) {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let Some(&first_word) = words.first() else {
+        return (MemoryNamespace::UserProfile, None, String::new());
+    };
+    let Some(namespace) = parse_memory_namespace(first_word) else {
+        return (MemoryNamespace::UserProfile, None, rest.to_string());
+    };
+    let (scope_id, remainder_words) = if namespace == MemoryNamespace::Task {
+        match words.get(1) {
+            Some(&task_id) => (Some(task_id.to_string()), &words[2..]),
+            None => (None, &words[1..]),
+        }
+    } else {
+        (None, &words[1..])
+    };
+    let remainder = remainder_words.join(" ");
+    let looks_like_key_value = remainder
+        .split_once('=')
+        .is_some_and(|(key, _)| !key.trim().is_empty());
+    if looks_like_key_value {
+        (namespace, scope_id, remainder)
+    } else {
+        (MemoryNamespace::UserProfile, None, rest.to_string())
+    }
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn apply_history_mouse_scroll(scroll: &mut u16, kind: MouseEventKind) -> bool {
     match kind {
         MouseEventKind::ScrollUp => *scroll = scroll.saturating_add(3),
@@ -938,21 +981,39 @@ fn submit(
             adjust_pending_memory_model_context(app, word);
             return;
         }
-        let Some((key, value)) = specification
+        // F3 sonrası: Session/Task/Project namespace'lerine gerçek bir yazma yolu — önceden
+        // yalnız UserProfile yazılabiliyordu, diğer dördü şema olarak vardı ama hiçbir üretim
+        // yolu onlara yazmıyordu. `/remember proje anahtar = değer`,
+        // `/remember görev <task-id> anahtar = değer`, `/remember oturum anahtar = değer`.
+        // Namespace kelimesi yoksa (veya sonrası gerçek bir "anahtar = değer" gibi görünmüyorsa —
+        // örn. kullanıcının anahtarı gerçekten "proje" ise) eskisi gibi UserProfile'a düşer, kod
+        // değişmeden önceki davranış aynen korunur.
+        let (namespace, scope_id, remainder) = parse_remember_namespace_prefix(specification);
+        let Some((key, value)) = remainder
             .split_once('=')
-            .map(|(key, value)| (key.trim(), value.trim()))
+            .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
         else {
-            app.push_system("Kullanım: /remember anahtar = değer • ardından /remember approve veya /remember reject");
+            app.push_system("Kullanım: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer • ardından /remember approve veya /remember reject");
             return;
         };
-        match propose_memory(
-            MemoryNamespace::UserProfile,
+        // Session/EphemeralToolOutput geçerli bir expiry olmadan hiç kaydedilemez
+        // (`validate_memory_record` bunu zorunlu kılıyor) — kullanıcı `/remember ttl <saat>` ile
+        // kendi süresini vermezse akış bir hatayla tıkanmasın diye makul bir varsayılan süre.
+        let default_expires_at = match namespace {
+            MemoryNamespace::Session => Some(now_epoch() + 4 * 3_600),
+            MemoryNamespace::EphemeralToolOutput => Some(now_epoch() + 30 * 60),
+            _ => None,
+        };
+        match propose_memory_with_trust_and_scope(
+            namespace,
             key,
             value,
             DataSensitivity::Internal,
             "tui-user-approved-profile",
             true,
-            None,
+            default_expires_at,
+            TrustLevel::UserAsserted,
+            scope_id,
         ) {
             Ok(proposal) => {
                 app.push_system(pending_memory_preview(&proposal));
@@ -1432,7 +1493,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2035,14 +2096,14 @@ mod tests {
         delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
         is_primary_selection_paste, native_desktop_binary_path, notification_arguments,
-        notification_preview, return_to_latest, should_clear_draft, should_close_tui_for_key,
-        submit, try_notify_desktop, tui_exit_action, tui_notification, App, Message, MessageRole,
-        TuiExitAction, WorkerReply,
+        notification_preview, parse_remember_namespace_prefix, return_to_latest,
+        should_clear_draft, should_close_tui_for_key, submit, try_notify_desktop, tui_exit_action,
+        tui_notification, App, Message, MessageRole, TuiExitAction, WorkerReply,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use jarvis_core::{
-        parse_memory_intent, LlamaServerProvider, LlamaVisionServerProvider, ProfileField, Runtime,
-        SqliteStore, TaskState, WorkspaceCitation,
+        parse_memory_intent, LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace,
+        ProfileField, Runtime, SqliteStore, TaskState, WorkspaceCitation,
     };
     use ratatui::{backend::TestBackend, Terminal};
     use std::sync::{mpsc, Arc, Mutex};
@@ -2730,6 +2791,113 @@ mod tests {
         let preview = &app.messages.last().unwrap().content;
         assert!(preview.contains("sensitivity: INTERNAL"));
         assert!(preview.contains("süre: kalıcı"));
+    }
+
+    /// Kullanıcının kuralı: "concurrent task'lar birbirinin context'ini kirletmesin" — yalnız
+    /// izolasyon değil, önce gerçek bir yazma yolu da gerekiyordu. Bu, F3 sonrası kapatılan gerçek
+    /// bir boşluktu: önceden `/remember` her zaman UserProfile'a yazıyordu, Project/Task/Session'a
+    /// hiçbir üretim yolu yoktu.
+    #[test]
+    fn remember_writes_to_project_task_and_session_namespaces() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/remember proje mimari-karar = Rust kullanıyoruz".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        app.input = "/remember approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        app.input = "/remember görev task-abc123 karar = kutuphane-x".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        app.input = "/remember approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        // Session bir expiry olmadan hiç kaydedilemez; /remember ttl vermeden de akış tıkanmasın
+        // diye makul bir varsayılan süre kendiliğinden atanmalı.
+        app.input = "/remember oturum kisa-not = deger".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        app.input = "/remember approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Bellek kaydedildi"));
+
+        let records = runtime.lock().unwrap().list_memory().unwrap();
+        let project_record = records
+            .iter()
+            .find(|record| record.namespace == MemoryNamespace::Project)
+            .expect("project record must exist");
+        assert_eq!(project_record.key, "mimari-karar");
+        assert_eq!(project_record.value, "Rust kullanıyoruz");
+
+        let task_record = records
+            .iter()
+            .find(|record| record.namespace == MemoryNamespace::Task)
+            .expect("task record must exist");
+        assert_eq!(task_record.key, "karar");
+        assert_eq!(task_record.scope_id.as_deref(), Some("task-abc123"));
+
+        let session_record = records
+            .iter()
+            .find(|record| record.namespace == MemoryNamespace::Session)
+            .expect("session record must exist");
+        assert!(
+            session_record.expires_at.is_some(),
+            "Session must get an automatic default expiry when the user does not set one"
+        );
+    }
+
+    /// Saf ayrıştırma mantığı, TUI/Runtime olmadan: belirsizlik her zaman güvenli tarafa
+    /// (UserProfile, orijinal metin bozulmadan) düşmeli.
+    #[test]
+    fn parse_remember_namespace_prefix_disambiguates_a_real_literal_key() {
+        assert_eq!(
+            parse_remember_namespace_prefix("proje mimari-karar = Rust kullanıyoruz"),
+            (
+                MemoryNamespace::Project,
+                None,
+                "mimari-karar = Rust kullanıyoruz".to_string()
+            )
+        );
+        // "proje" burada gerçek bir anahtar adı — namespace seçimi gibi görünse de arkasında
+        // gerçek bir "anahtar = değer" olmadığı için (boş anahtar) eski davranışa düşmeli.
+        assert_eq!(
+            parse_remember_namespace_prefix("proje = jarvis"),
+            (
+                MemoryNamespace::UserProfile,
+                None,
+                "proje = jarvis".to_string()
+            )
+        );
+        assert_eq!(
+            parse_remember_namespace_prefix("favori_renk = turkuaz"),
+            (
+                MemoryNamespace::UserProfile,
+                None,
+                "favori_renk = turkuaz".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_remember_namespace_prefix_consumes_a_task_id_only_for_task_namespace() {
+        assert_eq!(
+            parse_remember_namespace_prefix("görev task-abc123 karar = kutuphane-x"),
+            (
+                MemoryNamespace::Task,
+                Some("task-abc123".to_string()),
+                "karar = kutuphane-x".to_string()
+            )
+        );
+        // Görev kelimesinden sonra hiçbir şey yoksa (ne task-id ne anahtar), boş anahtara düşer
+        // — bu da yine güvenli UserProfile geri dönüşünü tetikler.
+        assert_eq!(
+            parse_remember_namespace_prefix("görev"),
+            (MemoryNamespace::UserProfile, None, "görev".to_string())
+        );
     }
 
     #[test]
