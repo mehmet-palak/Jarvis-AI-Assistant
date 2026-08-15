@@ -18,7 +18,7 @@ use jarvis_core::{
     propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity,
     InputType, LlamaEmbeddingProvider, LlamaServerProvider, LlamaVisionServerProvider,
     MemoryNamespace, MemoryProposal, ProfileField, Request, Runtime, SqliteStore, TaskState,
-    VisionProvider,
+    VisionProvider, WorkspaceCitation,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -56,6 +56,9 @@ struct WorkerReply {
     approval_pending: bool,
     notification: Option<TuiNotification>,
     sources: Vec<String>,
+    /// F3 "Citation UX: ... kaynağı aç davranışı". Full citations behind this reply (not just
+    /// the display strings in `sources`) so `/source <n>` can show the complete chunk text.
+    citations: Vec<WorkspaceCitation>,
     attachment_receipts: Vec<AttachmentReceipt>,
 }
 
@@ -76,6 +79,10 @@ struct App {
     attachments: Vec<AttachmentRef>,
     sent_attachment_receipts: Vec<AttachmentReceipt>,
     pending_memory: Option<MemoryProposal>,
+    /// F3 "Citation UX: ... kaynağı aç davranışı". Citations behind the most recent JARVIS
+    /// reply; `/source <n>` opens one by its 1-based position here. Cleared whenever a reply
+    /// used none, mirroring `Runtime::last_workspace_citations` — never stale across turns.
+    last_citations: Vec<WorkspaceCitation>,
 }
 
 impl App {
@@ -100,6 +107,7 @@ impl App {
             attachments: vec![],
             sent_attachment_receipts: vec![],
             pending_memory: None,
+            last_citations: vec![],
         }
     }
 
@@ -337,6 +345,7 @@ fn event_loop(
                     message.content.push_str(&reply.sources.join("\n"));
                 }
             }
+            app.last_citations = reply.citations;
             app.status = reply.status;
             app.pending = false;
             app.record_attachment_receipts(reply.attachment_receipts);
@@ -1149,6 +1158,31 @@ fn submit(
         }
         return;
     }
+    if let Some(rest) = input.strip_prefix("/source ").map(str::trim) {
+        // F3 "Citation UX: ... kaynağı aç davranışı". Shows the full, untruncated chunk text and
+        // the complete file path for one citation from the *last* JARVIS reply — the short
+        // excerpt already printed under that reply is only a preview.
+        match rest.parse::<usize>() {
+            Ok(index) if index >= 1 && index <= app.last_citations.len() => {
+                let citation = &app.last_citations[index - 1];
+                app.push_system(format!(
+                    "[{index}] {}#chunk-{}\n\n{}",
+                    citation.canonical_path.display(),
+                    citation.chunk_ordinal,
+                    citation.content
+                ));
+            }
+            Ok(_) if app.last_citations.is_empty() => {
+                app.push_system("Son yanıtın kaynağı yok, açılacak bir şey bulunamadı.");
+            }
+            Ok(_) => app.push_system(format!(
+                "Geçersiz kaynak numarası. Son yanıtta 1-{} arası kaynak var.",
+                app.last_citations.len()
+            )),
+            Err(_) => app.push_system("Kullanım: /source <numara> (örn. /source 1)"),
+        }
+        return;
+    }
     if let Some(exit_action) = tui_exit_action(&input) {
         if exit_action == TuiExitAction::StopModelAndExit {
             app.status = match stop_local_model_server() {
@@ -1290,7 +1324,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>, /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...]. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>, /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...], /source <numara> (son yanıtın kaynağının tamamını aç). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -1400,38 +1434,48 @@ fn submit(
             content: input,
             attachments,
         };
-        let (task, tool, verification) = runtime
-            .lock()
-            .expect("JARVIS runtime lock poisoned")
-            .handle_with_provider_and_vision(
-                request,
-                &provider,
-                needs_vision.then_some(&vision_for_request),
-            );
-        let sources = tool
-            .evidence
+        let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+        let (task, tool, verification) = runtime_guard.handle_with_provider_and_vision(
+            request,
+            &provider,
+            needs_vision.then_some(&vision_for_request),
+        );
+        // F3 "Citation UX": read back the exact citations that grounded this reply (full chunk
+        // content, not just the compact evidence strings) while the lock is still held, so
+        // `/source <n>` can later show the complete text without re-querying the store.
+        let citations = runtime_guard.last_workspace_citations().to_vec();
+        drop(runtime_guard);
+        // F3 "Citation UX: ... hangi belge/parçadan geldiği, kısa alıntı, dosya konumu". Numbered
+        // so a citation line and the later `/source <n>` command point at the same thing.
+        let mut sources: Vec<String> = citations
             .iter()
-            .filter_map(|evidence| {
-                evidence
-                    .strip_prefix("workspace.citation:")
-                    .map(|source| format!("• {source}"))
-                    .or_else(|| {
-                        evidence
-                            .strip_prefix("vision.analysis:")
-                            .filter(|attachment_id| *attachment_id != "unavailable")
-                            .map(|attachment_id| format!("• Local vision analizi: {attachment_id}"))
-                    })
-                    .or_else(|| {
-                        // "Neden kullanıldı" görünürlüğü: hangi kayıtlı bilgi (profil/proje/vb.)
-                        // bu yanıt için modele verildiğini gösterir. Değeri değil, yalnız
-                        // namespace:anahtar'ı — kaynak satırı uzun/hassas bir değeri tekrar
-                        // etmesin diye.
-                        evidence
-                            .strip_prefix("memory.used:")
-                            .map(|reference| format!("• Kayıtlı bilgi kullanıldı: {reference}"))
-                    })
+            .enumerate()
+            .map(|(index, citation)| {
+                format!(
+                    "• [{}] {}#chunk-{} — \"{}\" (tamamı için: /source {})",
+                    index + 1,
+                    citation.canonical_path.display(),
+                    citation.chunk_ordinal,
+                    citation.short_excerpt(96),
+                    index + 1
+                )
             })
-            .collect::<Vec<_>>();
+            .collect();
+        sources.extend(tool.evidence.iter().filter_map(|evidence| {
+            evidence
+                .strip_prefix("vision.analysis:")
+                .filter(|attachment_id| *attachment_id != "unavailable")
+                .map(|attachment_id| format!("• Local vision analizi: {attachment_id}"))
+                .or_else(|| {
+                    // "Neden kullanıldı" görünürlüğü: hangi kayıtlı bilgi (profil/proje/vb.)
+                    // bu yanıt için modele verildiğini gösterir. Değeri değil, yalnız
+                    // namespace:anahtar'ı — kaynak satırı uzun/hassas bir değeri tekrar
+                    // etmesin diye.
+                    evidence
+                        .strip_prefix("memory.used:")
+                        .map(|reference| format!("• Kayıtlı bilgi kullanıldı: {reference}"))
+                })
+        }));
         let content = tool.error.clone().unwrap_or(tool.output);
         let approval_pending = task.state == TaskState::WaitingForUser;
         let notification = tui_notification(task.state, &content);
@@ -1451,6 +1495,7 @@ fn submit(
             approval_pending,
             notification,
             sources,
+            citations,
             attachment_receipts,
         });
     });
@@ -1812,6 +1857,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use jarvis_core::{
         LlamaServerProvider, LlamaVisionServerProvider, Runtime, SqliteStore, TaskState,
+        WorkspaceCitation,
     };
     use ratatui::{backend::TestBackend, Terminal};
     use std::sync::{mpsc, Arc, Mutex};
@@ -2442,6 +2488,63 @@ mod tests {
             .list_memory()
             .expect("memory list");
         assert!(remaining.is_empty());
+    }
+
+    fn fixture_citation(path: &str, ordinal: usize, content: &str) -> WorkspaceCitation {
+        WorkspaceCitation {
+            document_id: "document-test".into(),
+            chunk_id: format!("chunk-{path}-{ordinal}"),
+            canonical_path: path.into(),
+            content_sha256: "sha256-test".into(),
+            chunk_ordinal: ordinal,
+            content: content.into(),
+        }
+    }
+
+    /// F3 "Citation UX: ... kaynağı aç davranışı": `/source <n>` must print the *full*
+    /// (untruncated) chunk content and path for the n'th citation behind the last reply.
+    #[test]
+    fn source_command_opens_the_full_citation_content_by_position() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.last_citations = vec![
+            fixture_citation("a.md", 0, "birinci belgenin tam metni"),
+            fixture_citation("b.md", 2, "ikinci belgenin tam metni"),
+        ];
+
+        app.input = "/source 2".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let shown = &app.messages.last().unwrap().content;
+        assert!(shown.contains("b.md"));
+        assert!(shown.contains("chunk-2"));
+        assert!(shown.contains("ikinci belgenin tam metni"));
+        assert!(!shown.contains("birinci belgenin tam metni"));
+    }
+
+    /// F3 "Citation UX": out-of-range, non-numeric and "no citations at all" inputs must each get
+    /// a clear, distinct message — never a panic or a silent no-op.
+    #[test]
+    fn source_command_rejects_out_of_range_non_numeric_and_missing_citations() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/source 1".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("kaynağı yok"));
+
+        app.last_citations = vec![fixture_citation("a.md", 0, "tek belge")];
+        app.input = "/source 5".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Geçersiz kaynak numarası"));
+
+        app.input = "/source abc".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("Kullanım"));
     }
 
     #[test]

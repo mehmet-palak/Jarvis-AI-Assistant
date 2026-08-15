@@ -3316,6 +3316,76 @@ mod tests {
         fs::remove_dir_all(root).expect("workspace fixture should be removed");
     }
 
+    /// F3 "Citation UX: ... kısa alıntı". Short input is returned unchanged (only
+    /// whitespace-collapsed); long input is truncated to exactly `max_chars` Unicode scalar
+    /// values with a trailing ellipsis, and Turkish multi-byte characters near the cut point must
+    /// never panic or produce a broken/partial character.
+    #[test]
+    fn workspace_citation_short_excerpt_collapses_whitespace_and_truncates_by_chars() {
+        let short = WorkspaceCitation {
+            document_id: "doc".into(),
+            chunk_id: "chunk".into(),
+            canonical_path: PathBuf::from("notes.md"),
+            content_sha256: "sha".into(),
+            chunk_ordinal: 0,
+            content: "  birinci   satır\nikinci satır  ".into(),
+        };
+        assert_eq!(short.short_excerpt(200), "birinci satır ikinci satır");
+
+        let long = WorkspaceCitation {
+            content: "türkçe şıçüöğ ".repeat(20),
+            ..short
+        };
+        let excerpt = long.short_excerpt(10);
+        assert_eq!(excerpt.chars().count(), 11); // 10 kept chars + the ellipsis mark
+        assert!(excerpt.ends_with('…'));
+    }
+
+    /// F3 "Citation UX: ... kaynağı aç davranışı". `Runtime::last_workspace_citations` must
+    /// carry the exact, full-content citations behind the most recent reply — not the compact
+    /// `evidence` strings — and must not leak a stale citation into a later turn that used none.
+    #[test]
+    fn runtime_tracks_last_workspace_citations_for_the_open_source_action() {
+        let root = temporary_workspace("citation-ux");
+        fs::write(
+            root.join("manual.md"),
+            "# JARVIS guide\n\nThe project token is green-orbit.",
+        )
+        .expect("fixture document should be written");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        assert!(runtime.last_workspace_citations().is_empty());
+        runtime
+            .index_workspace_document(&root, Path::new("manual.md"), true)
+            .expect("approved document indexes");
+
+        let provider = ContextCapturingProvider::default();
+        runtime.handle_with_provider(request("citation-ux-1", "project token nedir"), &provider);
+        let citations = runtime.last_workspace_citations();
+        assert_eq!(citations.len(), 1);
+        assert_eq!(
+            citations[0]
+                .canonical_path
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("manual.md")
+        );
+        assert!(citations[0].content.contains("green-orbit"));
+
+        // A later turn that retrieves nothing must clear the previous turn's citations, not
+        // leave a stale one behind for a "kaynağı aç" command to point at.
+        runtime.handle_with_provider(
+            request(
+                "citation-ux-2",
+                "tamamen alakasız bariztamamenalakasizsorgu",
+            ),
+            &provider,
+        );
+        assert!(runtime.last_workspace_citations().is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// F3 "Ingestion pipeline: ... dosya değişiklik algısı ve incremental re-index": re-indexing
     /// an unchanged file must not redo the chunk delete/re-insert work, and must say so; a real
     /// content change must actually replace the old chunks, not just add to them.

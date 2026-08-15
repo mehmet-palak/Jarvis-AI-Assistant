@@ -607,36 +607,40 @@ impl JarvisDesktop {
                 content,
                 attachments,
             };
-            let (task, tool, verification) = runtime
-                .lock()
-                .expect("JARVIS runtime lock poisoned")
-                .handle_with_provider_and_vision(
-                    request,
-                    &provider,
-                    needs_vision.then_some(&vision_for_request),
-                );
-            let sources = tool
-                .evidence
+            let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+            let (task, tool, verification) = runtime_guard.handle_with_provider_and_vision(
+                request,
+                &provider,
+                needs_vision.then_some(&vision_for_request),
+            );
+            // F3 "Citation UX: ... hangi belge/parçadan geldiği, kısa alıntı, dosya konumu". The
+            // desktop app has no slash-command surface (that lives in the TUI, "kaynağı aç"
+            // there via `/source <n>`), so the full chunk text is intentionally not offered
+            // here — only the same short excerpt the TUI shows inline.
+            let citations = runtime_guard.last_workspace_citations().to_vec();
+            drop(runtime_guard);
+            let mut sources: Vec<String> = citations
                 .iter()
-                .filter_map(|evidence| {
-                    evidence
-                        .strip_prefix("workspace.citation:")
-                        .map(|source| format!("• {source}"))
-                        .or_else(|| {
-                            evidence
-                                .strip_prefix("vision.analysis:")
-                                .filter(|attachment_id| *attachment_id != "unavailable")
-                                .map(|attachment_id| {
-                                    format!("• Local vision analizi: {attachment_id}")
-                                })
-                        })
-                        .or_else(|| {
-                            evidence
-                                .strip_prefix("memory.used:")
-                                .map(|reference| format!("• Kayıtlı bilgi kullanıldı: {reference}"))
-                        })
+                .map(|citation| {
+                    format!(
+                        "• {}#chunk-{} — \"{}\"",
+                        citation.canonical_path.display(),
+                        citation.chunk_ordinal,
+                        citation.short_excerpt(96)
+                    )
                 })
                 .collect();
+            sources.extend(tool.evidence.iter().filter_map(|evidence| {
+                evidence
+                    .strip_prefix("vision.analysis:")
+                    .filter(|attachment_id| *attachment_id != "unavailable")
+                    .map(|attachment_id| format!("• Local vision analizi: {attachment_id}"))
+                    .or_else(|| {
+                        evidence
+                            .strip_prefix("memory.used:")
+                            .map(|reference| format!("• Kayıtlı bilgi kullanıldı: {reference}"))
+                    })
+            }));
             let content = tool.error.clone().unwrap_or(tool.output);
             let notification = desktop_notification(task.state, &content, notifications_enabled);
             let status = match task.state {

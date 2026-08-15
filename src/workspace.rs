@@ -89,6 +89,25 @@ impl WorkspaceCitation {
             content: self.content.clone(),
         }
     }
+
+    /// F3 "Citation UX: ... kısa alıntı". A compact, single-line preview of this chunk's content
+    /// for inline display next to a reply — never the full chunk (that is what the "kaynağı aç"
+    /// action, reading `content` directly, is for). Whitespace/newlines collapse to single spaces
+    /// so a chunk spanning several lines still previews as one readable line; `max_chars` counts
+    /// Unicode scalar values, not bytes, so multi-byte (Turkish) text never gets cut mid-character.
+    pub fn short_excerpt(&self, max_chars: usize) -> String {
+        let collapsed = self
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let char_count = collapsed.chars().count();
+        if char_count <= max_chars {
+            return collapsed;
+        }
+        let truncated: String = collapsed.chars().take(max_chars).collect();
+        format!("{}…", truncated.trim_end())
+    }
 }
 
 pub(crate) fn validate_workspace_document_path(

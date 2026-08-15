@@ -30,6 +30,12 @@ pub struct Runtime {
     /// every workspace indexing/search path already degrades to FTS-only when this is unset,
     /// so attaching or removing it is never a breaking change for an existing `Runtime`.
     embedding_provider: Option<Box<dyn EmbeddingProvider>>,
+    /// F3 "Citation UX": the exact citations used to ground the most recent conversational
+    /// reply, full chunk content included — not just the compact `evidence` strings, which only
+    /// carry a path and chunk ordinal. This is what a caller (TUI `/source <n>`) reads to show
+    /// "kaynağı aç": the complete chunk text, not only its short excerpt. Overwritten every turn
+    /// (empty when that turn used none); never persisted, this is in-memory display state only.
+    last_workspace_citations: Vec<WorkspaceCitation>,
 }
 
 impl Default for Runtime {
@@ -46,6 +52,7 @@ impl Default for Runtime {
             structured_logs: Vec::new(),
             chat_history: Vec::new(),
             embedding_provider: None,
+            last_workspace_citations: Vec::new(),
         }
     }
 }
@@ -336,6 +343,13 @@ impl Runtime {
         self.embedding_provider
             .as_ref()
             .map(|provider| provider.embedding_model_id())
+    }
+
+    /// F3 "Citation UX: ... kaynağı aç davranışı". The citations that grounded the most recent
+    /// conversational reply, in ranked order — a caller reads this to let the user open/expand a
+    /// specific one (by 1-based position) without needing to re-run retrieval or touch the store.
+    pub fn last_workspace_citations(&self) -> &[WorkspaceCitation] {
+        &self.last_workspace_citations
     }
 
     /// Indexes every file `preview_workspace_index` reports as `included` under `approved_root`.
@@ -641,7 +655,7 @@ impl Runtime {
                 format!("memory.retrieved:{}", memory.memory_id),
             ));
         }
-        for citation in citations {
+        for citation in &citations {
             result.evidence.push(format!(
                 "workspace.citation:{}#chunk-{}",
                 citation.canonical_path.display(),
@@ -652,6 +666,10 @@ impl Runtime {
                 format!("workspace.retrieved:{}", citation.chunk_id),
             ));
         }
+        // F3 "Citation UX": kept separately from `evidence` (which is a generic, string-only
+        // trail shared by every capability) so a caller can show the full "kaynağı aç" content
+        // for this exact reply without re-querying the store or losing the chunk text.
+        self.last_workspace_citations = citations;
         for attachment in attachments {
             self.record_audit(AuditEvent::pending(
                 task.task_id.clone(),
