@@ -26,6 +26,10 @@ pub struct Runtime {
     audit_hash: String,
     structured_logs: Vec<StructuredLogEvent>,
     pub(crate) chat_history: Vec<ConversationMessage>,
+    /// Optional hybrid-retrieval embedding adapter (F3 madde 13, ADR-0004). `None` by default —
+    /// every workspace indexing/search path already degrades to FTS-only when this is unset,
+    /// so attaching or removing it is never a breaking change for an existing `Runtime`.
+    embedding_provider: Option<Box<dyn EmbeddingProvider>>,
 }
 
 impl Default for Runtime {
@@ -41,6 +45,7 @@ impl Default for Runtime {
             audit_hash: "GENESIS".into(),
             structured_logs: Vec::new(),
             chat_history: Vec::new(),
+            embedding_provider: None,
         }
     }
 }
@@ -285,12 +290,31 @@ impl Runtime {
             .store
             .as_ref()
             .ok_or_else(|| "workspace indexing requires an attached local store".to_string())?;
-        let report = store.index_workspace_document(approved_root, relative_path)?;
+        let report = store.index_workspace_document_with_embedding(
+            approved_root,
+            relative_path,
+            self.embedding_provider.as_deref(),
+        )?;
         self.record_audit(AuditEvent::pending(
             format!("workspace-{}", report.document_id),
             "workspace.index.user_approved",
         ));
         Ok(report)
+    }
+
+    /// Attaches (or, with `None`, detaches) the hybrid-retrieval embedding provider. Every
+    /// indexing/search path already tolerates `None` — this exists so a caller (TUI/native
+    /// startup) can opt in only when the local embedding service is actually reachable.
+    pub fn set_embedding_provider(&mut self, provider: Option<Box<dyn EmbeddingProvider>>) {
+        self.embedding_provider = provider;
+    }
+
+    /// Whether workspace retrieval is currently hybrid (FTS + embedding) or FTS-only. Surfaced to
+    /// the user (`/status`) so hybrid mode is never a silent, invisible behavior change.
+    pub fn embedding_status(&self) -> Option<&str> {
+        self.embedding_provider
+            .as_ref()
+            .map(|provider| provider.embedding_model_id())
     }
 
     /// Indexes every file `preview_workspace_index` reports as `included` under `approved_root`.
@@ -318,9 +342,23 @@ impl Runtime {
     }
 
     fn approved_workspace_context(&self, query: &str) -> Vec<WorkspaceCitation> {
-        self.store
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        // Every real conversation retrieval goes through the hybrid path; it degrades to plain
+        // FTS by itself whenever no embedding provider is attached or the embedding call fails —
+        // this is never a hard dependency, so failure here just falls back silently.
+        let query_embedding = self.embedding_provider.as_ref().and_then(|provider| {
+            provider
+                .embed(query)
+                .ok()
+                .map(|vector| (provider.embedding_model_id().to_owned(), vector))
+        });
+        let query_embedding_ref = query_embedding
             .as_ref()
-            .and_then(|store| store.search_workspace(query, 4).ok())
+            .map(|(model_id, vector)| (model_id.as_str(), vector.as_slice()));
+        store
+            .hybrid_search_workspace(query, query_embedding_ref, 4)
             .unwrap_or_default()
     }
 

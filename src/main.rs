@@ -16,8 +16,9 @@ use jarvis_core::{
     attachment_receipt_manifest, inspect_local_attachment, memory_export, memory_import,
     parse_data_sensitivity, parse_memory_namespace, preview_workspace_index, profile_manifest,
     propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity,
-    InputType, LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal,
-    ProfileField, Request, Runtime, SqliteStore, TaskState, VisionProvider,
+    InputType, LlamaEmbeddingProvider, LlamaServerProvider, LlamaVisionServerProvider,
+    MemoryNamespace, MemoryProposal, ProfileField, Request, Runtime, SqliteStore, TaskState,
+    VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -162,7 +163,9 @@ fn main() -> io::Result<()> {
             .expect("JARVIS database path must be UTF-8"),
     )
     .expect("JARVIS SQLite store açılamadı");
-    let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
+    let mut runtime = Runtime::with_store(store);
+    attach_embedding_provider_if_reachable(&mut runtime);
+    let runtime = Arc::new(Mutex::new(runtime));
     let provider = LlamaServerProvider::local_default();
     let vision = LlamaVisionServerProvider::local_default();
     let startup_note = ensure_local_model_server(&provider);
@@ -220,6 +223,18 @@ fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
 /// Starts the separate CPU-only image server on demand. It stays loopback-only and is never
 /// needed for a text-only turn. A caller that receives `Err` still routes through Runtime so
 /// the user gets the standard path-safe vision failure instead of a fabricated answer.
+/// Best-effort: attaches the local embedding adapter for hybrid RAG retrieval only if it is
+/// already reachable. Unlike the text/vision services, this is never started on demand — hybrid
+/// retrieval is an enhancement on top of already-working FTS, not something worth spending RAM
+/// on for a session that never uses it. If unreachable, `Runtime` simply stays FTS-only, exactly
+/// as it always has.
+fn attach_embedding_provider_if_reachable(runtime: &mut Runtime) {
+    let provider = LlamaEmbeddingProvider::local_default();
+    if provider.is_reachable() {
+        runtime.set_embedding_provider(Some(Box::new(provider)));
+    }
+}
+
 fn ensure_local_vision_server(provider: &LlamaVisionServerProvider) -> Result<(), String> {
     let mut health_provider = provider.clone();
     health_provider.timeout_seconds = 1;
@@ -1299,8 +1314,14 @@ fn submit(
             return;
         }
         "/status" => {
+            let rag_mode = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .embedding_status()
+                .map(|model_id| format!("hybrid (FTS + {model_id})"))
+                .unwrap_or_else(|| "FTS-only".into());
             app.push_system(format!(
-                "Model server: {} • CPU-only • VRAM layer: 0 • {}",
+                "Model server: {} • CPU-only • VRAM layer: 0 • RAG: {rag_mode} • {}",
                 model_label(&app.model_state),
                 app.status
             ));

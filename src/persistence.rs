@@ -14,12 +14,13 @@ use rusqlite::{params, Connection, Result as SqlResult, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunk_workspace_text, extract_pdf_text, fts_query, now_epoch,
-    reject_oversized_workspace_document, reject_secret_like_workspace_document_name, sha256_hex,
-    validate_memory_record, validate_teacher_example, validate_workspace_document_content,
-    validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
-    MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample, WorkspaceCitation,
-    WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
+    chunk_workspace_text, cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query,
+    now_epoch, reject_oversized_workspace_document, reject_secret_like_workspace_document_name,
+    serialize_embedding, sha256_hex, validate_memory_record, validate_teacher_example,
+    validate_workspace_document_content, validate_workspace_document_path, Approval, AuditEvent,
+    CapabilityRegistry, DataSensitivity, EmbeddingProvider, MemoryNamespace, MemoryProposal,
+    MemoryRecord, Task, TeacherExample, WorkspaceCitation, WorkspaceIngestionReport,
+    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -44,7 +45,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -159,6 +160,13 @@ impl SqliteStore {
                 document_id UNINDEXED,
                 chunk_ordinal UNINDEXED,
                 content
+            );
+            CREATE TABLE IF NOT EXISTS workspace_chunk_embeddings (
+                chunk_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                embedding_model_id TEXT NOT NULL,
+                embedding BLOB NOT NULL
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -200,6 +208,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (6, 'workspace document index schema version tracking')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (7, 'workspace chunk embeddings for hybrid RAG')",
             [],
         )?;
         Ok(())
@@ -509,11 +521,29 @@ impl SqliteStore {
 
     /// Indexes one explicitly approved, contained UTF-8 document. Secret-like and binary files
     /// are rejected before any content enters SQLite. Re-indexing the same path replaces its old
-    /// chunks, so retrieval can never cite stale content for that path.
+    /// chunks, so retrieval can never cite stale content for that path. FTS-only — no embedding
+    /// provider, so `search_workspace` results for this content stay keyword-only.
     pub fn index_workspace_document(
         &self,
         approved_root: &Path,
         relative_path: &Path,
+    ) -> Result<WorkspaceIngestionReport, String> {
+        self.index_workspace_document_with_embedding(approved_root, relative_path, None)
+    }
+
+    /// Same as `index_workspace_document`, but if `embedding_provider` is given, also computes
+    /// and stores a per-chunk embedding for hybrid retrieval. Best-effort: if the embedding
+    /// service is unreachable or errors on a chunk, that chunk's embedding is simply skipped —
+    /// FTS indexing of the same chunk still succeeds, this can never fail the whole ingestion.
+    /// A chunk whose exact content (by SHA-256) was already embedded anywhere else in the
+    /// workspace reuses that stored vector instead of calling the embedding model again — this is
+    /// what keeps "only the changed chunks get re-embedded" true across re-indexing and across
+    /// files that happen to share identical boilerplate.
+    pub fn index_workspace_document_with_embedding(
+        &self,
+        approved_root: &Path,
+        relative_path: &Path,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<WorkspaceIngestionReport, String> {
         let canonical_path = validate_workspace_document_path(approved_root, relative_path)?;
         let metadata = fs::metadata(&canonical_path)
@@ -566,6 +596,18 @@ impl SqliteStore {
                 && *existing_index_schema_version
                     >= i64::from(CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION)
             {
+                // Text is unchanged, but an embedding provider may have been attached *after*
+                // this document was last indexed (exactly today's situation: files were indexed
+                // FTS-only, embeddings added later). Backfill missing vectors for this model
+                // without touching the FTS chunk text at all.
+                if let Some(provider) = embedding_provider {
+                    if !self.document_fully_embedded_for_model(
+                        &document_id,
+                        provider.embedding_model_id(),
+                    ) {
+                        self.backfill_missing_embeddings(provider, &document_id);
+                    }
+                }
                 return Ok(WorkspaceIngestionReport {
                     schema_version: 1,
                     document_id,
@@ -603,6 +645,15 @@ impl SqliteStore {
                 [&document_id],
             )
             .map_err(|error| format!("workspace index cleanup failed: {error}"))?;
+        // Derived cache, not a data source: old embeddings for this document's previous chunk
+        // set are dropped alongside the chunks themselves, so a shrunk document never leaves
+        // orphaned vectors behind.
+        self.connection
+            .execute(
+                "DELETE FROM workspace_chunk_embeddings WHERE document_id=?1",
+                [&document_id],
+            )
+            .map_err(|error| format!("workspace embedding cleanup failed: {error}"))?;
         for (ordinal, chunk) in chunks.iter().enumerate() {
             let chunk_id = format!("chunk-{document_id}-{ordinal}");
             self.connection
@@ -612,6 +663,9 @@ impl SqliteStore {
                     params![chunk_id, document_id, ordinal as i64, chunk],
                 )
                 .map_err(|error| format!("workspace chunk persistence failed: {error}"))?;
+            if let Some(provider) = embedding_provider {
+                self.embed_and_store_chunk(provider, &chunk_id, &document_id, chunk);
+            }
         }
         Ok(WorkspaceIngestionReport {
             schema_version: 1,
@@ -663,6 +717,174 @@ impl SqliteStore {
                 .map_err(|error| format!("workspace search row failed: {error}"))?
         };
         Ok(rows)
+    }
+
+    /// True if every chunk currently belonging to `document_id` already has a stored embedding
+    /// from `embedding_model_id`. Lets re-indexing skip embedding work only when it is genuinely
+    /// already done for *this* model — not just "some embedding, from some model, exists".
+    fn document_fully_embedded_for_model(
+        &self,
+        document_id: &str,
+        embedding_model_id: &str,
+    ) -> bool {
+        let chunk_count: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_chunks WHERE document_id=?1",
+                [document_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if chunk_count == 0 {
+            return true; // nothing to embed
+        }
+        let embedded_count: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_chunk_embeddings WHERE document_id=?1 AND embedding_model_id=?2",
+                params![document_id, embedding_model_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        embedded_count >= chunk_count
+    }
+
+    /// Embeds every existing chunk of `document_id` that does not yet have a stored embedding
+    /// from `provider`'s model — used both for freshly-chunked documents and to retroactively
+    /// backfill documents that were indexed before an embedding provider was ever attached (F3
+    /// madde 13: adding embeddings today must not require the user to notice and force a
+    /// re-index of everything they already indexed this session).
+    fn backfill_missing_embeddings(&self, provider: &dyn EmbeddingProvider, document_id: &str) {
+        let model_id = provider.embedding_model_id();
+        let rows: Vec<(String, String)> = {
+            let Ok(mut statement) = self.connection.prepare(
+                "SELECT chunk_id, content FROM workspace_chunks WHERE document_id=?1
+                 AND chunk_id NOT IN (
+                     SELECT chunk_id FROM workspace_chunk_embeddings WHERE embedding_model_id=?2
+                 )",
+            ) else {
+                return;
+            };
+            let Ok(mapped) = statement.query_map(params![document_id, model_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) else {
+                return;
+            };
+            mapped.filter_map(Result::ok).collect()
+        };
+        for (chunk_id, content) in rows {
+            self.embed_and_store_chunk(provider, &chunk_id, document_id, &content);
+        }
+    }
+
+    /// Embeds one chunk and stores the vector, reusing an existing embedding for the exact same
+    /// content hash **and the same model** anywhere in the workspace instead of calling the model
+    /// again. A different embedding model is a different, incomparable vector space, so the reuse
+    /// lookup is scoped to `provider.embedding_model_id()` — swapping models can never silently
+    /// resurrect a vector that isn't actually comparable to what the new model produces. Never
+    /// returns an error to the caller — a failed/unreachable embedding service only means this one
+    /// chunk stays FTS-only, it must never fail the document's own (already-successful) FTS
+    /// indexing.
+    fn embed_and_store_chunk(
+        &self,
+        provider: &dyn EmbeddingProvider,
+        chunk_id: &str,
+        document_id: &str,
+        content: &str,
+    ) {
+        let model_id = provider.embedding_model_id();
+        let content_sha256 = sha256_hex(content);
+        let reused: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT embedding FROM workspace_chunk_embeddings
+                 WHERE content_sha256=?1 AND embedding_model_id=?2 LIMIT 1",
+                params![content_sha256, model_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let embedding_bytes = match reused {
+            Some(bytes) => bytes,
+            None => match provider.embed(content) {
+                Ok(vector) => serialize_embedding(&vector),
+                Err(_) => return, // best-effort: FTS indexing of this chunk already succeeded
+            },
+        };
+        let _ = self.connection.execute(
+            "INSERT OR REPLACE INTO workspace_chunk_embeddings(chunk_id, document_id, content_sha256, embedding_model_id, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![chunk_id, document_id, content_sha256, model_id, embedding_bytes],
+        );
+    }
+
+    fn chunk_embedding(&self, chunk_id: &str, embedding_model_id: &str) -> Option<Vec<f32>> {
+        self.connection
+            .query_row(
+                "SELECT embedding FROM workspace_chunk_embeddings WHERE chunk_id=?1 AND embedding_model_id=?2",
+                params![chunk_id, embedding_model_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .ok()
+            .map(|bytes| deserialize_embedding(&bytes))
+    }
+
+    /// FTS + embedding hybrid retrieval via Reciprocal Rank Fusion: both signals contribute to
+    /// the final order, neither is "primary" with the other as a fallback. `query_embedding` is
+    /// `None` whenever the caller has no reachable embedding provider — in that case this
+    /// degrades to exactly `search_workspace`'s plain FTS order, unchanged. A chunk without a
+    /// stored embedding *from the same model* (indexed before an embedding provider was ever
+    /// attached, or left over from a since-swapped model) still participates via its FTS rank
+    /// alone; it is never penalized to zero. `query_embedding` carries its own model id so a
+    /// stored vector from a different model can never be compared against it by mistake.
+    pub fn hybrid_search_workspace(
+        &self,
+        query: &str,
+        query_embedding: Option<(&str, &[f32])>,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceCitation>, String> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        // A broader FTS candidate pool gives the embedding signal something real to re-rank;
+        // re-ranking a single top-1 FTS hit would be a no-op.
+        let candidates = self.search_workspace(query, (limit * 4).clamp(limit, 16))?;
+        let Some((embedding_model_id, query_embedding)) = query_embedding else {
+            return Ok(candidates.into_iter().take(limit).collect());
+        };
+        if candidates.is_empty() {
+            return Ok(candidates);
+        }
+        const RRF_K: f64 = 60.0;
+        let mut scored: Vec<(f64, WorkspaceCitation)> = candidates
+            .into_iter()
+            .enumerate()
+            .map(|(fts_rank, citation)| (1.0 / (RRF_K + (fts_rank + 1) as f64), citation))
+            .collect();
+        let similarities: Vec<f32> = scored
+            .iter()
+            .map(|(_, citation)| {
+                self.chunk_embedding(&citation.chunk_id, embedding_model_id)
+                    .map(|stored| cosine_similarity(query_embedding, &stored))
+                    .unwrap_or(f32::NEG_INFINITY)
+            })
+            .collect();
+        let mut similarity_order: Vec<usize> = (0..scored.len()).collect();
+        similarity_order.sort_by(|&a, &b| {
+            similarities[b]
+                .partial_cmp(&similarities[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (embedding_rank, &index) in similarity_order.iter().enumerate() {
+            if similarities[index].is_finite() {
+                scored[index].0 += 1.0 / (RRF_K + (embedding_rank + 1) as f64);
+            }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, citation)| citation)
+            .collect())
     }
 
     pub fn workspace_document_count(&self) -> SqlResult<i64> {

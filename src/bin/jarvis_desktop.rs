@@ -15,8 +15,8 @@ use jarvis_core::{
     attachment_receipt_manifest, default_desktop_preferences_path, inspect_local_attachment,
     load_desktop_preferences, propose_profile_field, save_desktop_preferences,
     turkish_case_fold as turkish_search_fold, AttachmentReceipt, AttachmentRef, DesktopPreferences,
-    InputType, LlamaServerProvider, LlamaVisionServerProvider, ProfileField, Request, Runtime,
-    SqliteStore, TaskState, ThemePreference, VisionProvider,
+    InputType, LlamaEmbeddingProvider, LlamaServerProvider, LlamaVisionServerProvider,
+    ProfileField, Request, Runtime, SqliteStore, TaskState, ThemePreference, VisionProvider,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1648,7 +1648,12 @@ fn main() -> eframe::Result<()> {
             .expect("JARVIS database path must be UTF-8"),
     )
     .expect("JARVIS SQLite store açılamadı");
-    let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
+    let mut runtime = Runtime::with_store(store);
+    let embedding_provider = LlamaEmbeddingProvider::local_default();
+    if embedding_provider.is_reachable() {
+        runtime.set_embedding_provider(Some(Box::new(embedding_provider)));
+    }
+    let runtime = Arc::new(Mutex::new(runtime));
     let provider = LlamaServerProvider::local_default();
     let vision = LlamaVisionServerProvider::local_default();
     let initial_status = ensure_local_model_server(&provider);

@@ -3,6 +3,7 @@
 pub mod attachments;
 mod capabilities;
 pub mod desktop_config;
+pub mod embedding;
 mod model;
 mod persistence;
 mod policy;
@@ -21,6 +22,10 @@ pub use capabilities::{capability_manifest, CapabilityRegistry};
 pub use desktop_config::{
     default_desktop_preferences_path, load_desktop_preferences, save_desktop_preferences,
     DesktopPreferences, ThemePreference,
+};
+pub use embedding::{
+    cosine_similarity, deserialize_embedding, serialize_embedding, EmbeddingProvider,
+    LlamaEmbeddingProvider,
 };
 pub use model::{
     normalize_llama_cli_output, route_with_provider, DeterministicModelProvider, IntentResolution,
@@ -1924,7 +1929,7 @@ mod tests {
         let example = verified_teacher_example("example-1");
         store.append_teacher_example(&example, &registry).unwrap();
         assert_eq!(store.teacher_example_count().unwrap(), 1);
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
     }
 
     #[test]
@@ -2742,6 +2747,251 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Test-only embedding provider: no network call, deterministic output, counts calls so
+    /// tests can prove the content-hash/model-id reuse cache actually avoids recomputation.
+    #[derive(Debug)]
+    struct FixedEmbeddingProvider {
+        model_id: String,
+        marker: &'static str,
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FixedEmbeddingProvider {
+        fn new(model_id: &str, marker: &'static str) -> Self {
+            Self {
+                model_id: model_id.into(),
+                marker,
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl EmbeddingProvider for FixedEmbeddingProvider {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // A trivial deterministic "semantic" split for testing RRF: text containing the
+            // marker embeds to one direction, everything else to the orthogonal direction.
+            Ok(if text.contains(self.marker) {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            })
+        }
+
+        fn embedding_model_id(&self) -> &str {
+            &self.model_id
+        }
+    }
+
+    /// F3 madde 13 (ADR-0004): identical chunk content anywhere in the workspace reuses the
+    /// stored embedding instead of calling the model again.
+    #[test]
+    fn identical_chunk_content_reuses_the_stored_embedding_instead_of_recomputing() {
+        let root = temporary_workspace("embed-reuse");
+        fs::write(root.join("a.md"), "tekrar eden aynı paragraf").expect("file a");
+        fs::write(root.join("b.md"), "tekrar eden aynı paragraf").expect("file b");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("a.md"), Some(&provider))
+            .expect("a indexes");
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("b.md"), Some(&provider))
+            .expect("b indexes");
+
+        assert_eq!(
+            provider.calls(),
+            1,
+            "identical content across two files should only be embedded once"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A different embedding model must never reuse another model's vector for the same content
+    /// — the two vector spaces are not comparable even if the text is byte-identical.
+    #[test]
+    fn a_different_embedding_model_never_reuses_another_models_vector() {
+        let root = temporary_workspace("embed-model-isolation");
+        fs::write(root.join("notes.md"), "aynı içerik").expect("fixture file");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let provider_a = FixedEmbeddingProvider::new("model-a", "MARKER");
+        let provider_b = FixedEmbeddingProvider::new("model-b", "MARKER");
+
+        store
+            .index_workspace_document_with_embedding(
+                &root,
+                Path::new("notes.md"),
+                Some(&provider_a),
+            )
+            .expect("indexes with model a");
+        assert_eq!(provider_a.calls(), 1);
+
+        // Same content, different model: must compute its own embedding, not reuse model a's.
+        store
+            .index_workspace_document_with_embedding(
+                &root,
+                Path::new("notes.md"),
+                Some(&provider_b),
+            )
+            .expect("re-indexes with model b");
+        assert_eq!(
+            provider_b.calls(),
+            1,
+            "a different model must never silently reuse another model's stored vector"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 madde 13: attaching an embedding provider *after* documents were already indexed
+    /// FTS-only (today's exact situation) must retroactively embed them without the caller
+    /// needing to notice or force anything — and must not re-embed on a second, idle pass.
+    #[test]
+    fn attaching_an_embedding_provider_after_fts_only_indexing_backfills_existing_documents() {
+        let root = temporary_workspace("embed-backfill");
+        fs::write(root.join("notes.md"), "geriye dönük embed testi").expect("fixture file");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+
+        let first = store
+            .index_workspace_document(&root, Path::new("notes.md"))
+            .expect("fts-only index");
+        assert!(first.content_changed);
+
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+        let backfilled = store
+            .index_workspace_document_with_embedding(&root, Path::new("notes.md"), Some(&provider))
+            .expect("backfill index");
+        assert!(
+            !backfilled.content_changed,
+            "the text itself did not change, only the embedding was missing"
+        );
+        assert_eq!(
+            provider.calls(),
+            1,
+            "the previously FTS-only chunk must now get embedded"
+        );
+
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("notes.md"), Some(&provider))
+            .expect("idle reindex");
+        assert_eq!(
+            provider.calls(),
+            1,
+            "already-embedded content must not be re-embedded on a second pass"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 madde 13: RRF actually changes the outcome — a chunk with high embedding similarity to
+    /// the query is preferred over an equally FTS-relevant chunk without it. This is hybrid
+    /// retrieval actually doing something, not just plumbing that never affects results.
+    #[test]
+    fn hybrid_search_prefers_the_embedding_relevant_chunk_when_fts_relevance_is_equal() {
+        let root = temporary_workspace("hybrid-rrf");
+        fs::write(
+            root.join("close.md"),
+            "elma hakkında bir not MARKER burada duruyor",
+        )
+        .expect("semantically close fixture");
+        fs::write(root.join("far.md"), "elma hakkında ayrı bir not").expect("far fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("close.md"), Some(&provider))
+            .expect("close.md indexes");
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("far.md"), Some(&provider))
+            .expect("far.md indexes");
+
+        let query = "elma MARKER";
+        let query_embedding = provider.embed(query).expect("query embeds");
+        let results = store
+            .hybrid_search_workspace(
+                query,
+                Some((provider.embedding_model_id(), &query_embedding)),
+                4,
+            )
+            .expect("hybrid search succeeds");
+        assert!(!results.is_empty());
+        assert_eq!(
+            results[0]
+                .canonical_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("close.md"),
+            "the embedding-similar chunk should be ranked first by RRF"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 madde 13: `Runtime::embedding_status` must visibly reflect whether retrieval is
+    /// hybrid or FTS-only — this is what `/status` shows the user, so it must never lie.
+    #[test]
+    fn runtime_embedding_status_reflects_the_attached_provider() {
+        let mut runtime = Runtime::new();
+        assert_eq!(runtime.embedding_status(), None);
+
+        runtime.set_embedding_provider(Some(Box::new(FixedEmbeddingProvider::new(
+            "test-model",
+            "MARKER",
+        ))));
+        assert_eq!(runtime.embedding_status(), Some("test-model"));
+
+        runtime.set_embedding_provider(None);
+        assert_eq!(runtime.embedding_status(), None);
+    }
+
+    /// F3 madde 13, uçtan uca: bir gerçek sohbet turunda `approved_workspace_context` hybrid
+    /// yola gider — embedding sağlayıcısı Runtime'a bağlıysa arama sonucu ondan etkilenir, aynı
+    /// az önceki `hybrid_search_prefers_...` testindeki senaryonun Runtime seviyesinde kanıtı.
+    #[test]
+    fn conversation_retrieval_uses_the_attached_embedding_provider_end_to_end() {
+        let root = temporary_workspace("hybrid-runtime");
+        fs::write(
+            root.join("close.md"),
+            "elma hakkında bir not MARKER burada duruyor",
+        )
+        .expect("semantically close fixture");
+        fs::write(root.join("far.md"), "elma hakkında ayrı bir not").expect("far fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime.set_embedding_provider(Some(Box::new(FixedEmbeddingProvider::new(
+            "test-model",
+            "MARKER",
+        ))));
+
+        runtime
+            .index_workspace_document(&root, Path::new("close.md"), true)
+            .expect("close.md indexes with embedding");
+        runtime
+            .index_workspace_document(&root, Path::new("far.md"), true)
+            .expect("far.md indexes with embedding");
+
+        let provider = ContextCapturingProvider::default();
+        let (_, result, _) = runtime.handle_with_provider(
+            request("hybrid-runtime-1", "elma MARKER hakkında ne biliyorsun?"),
+            &provider,
+        );
+        let cited_close_md = result.evidence.iter().any(|evidence| {
+            evidence.starts_with("workspace.citation:") && evidence.contains("close.md")
+        });
+        assert!(
+            cited_close_md,
+            "the embedding-relevant document should be the one actually cited in the reply"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn workspace_rag_requires_approval_indexes_citations_and_isolates_content() {
         let root = temporary_workspace("rag");
@@ -3100,7 +3350,7 @@ mod tests {
         let store = runtime.store.as_ref().expect("store attached");
         assert_eq!(store.task_count().unwrap(), 1);
         assert_eq!(store.audit_count().unwrap(), 5);
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), 7);
         assert!(store.audit_chain_is_valid().unwrap());
     }
 

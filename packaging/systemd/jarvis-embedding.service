@@ -1,0 +1,16 @@
+[Unit]
+Description=JARVIS local CPU embedding model (RAG hybrid retrieval)
+After=default.target
+ConditionPathExists=%h/jarvis/models/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jarvis/jarvis
+ExecStart=%h/jarvis/third_party/llama.cpp/build-cpu/bin/llama-server -m %h/jarvis/models/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf --embedding --pooling last -ngl 0 -t 4 -c 2048 -np 1 --host 127.0.0.1 --port 8090 --cors-origins localhost --no-cors-credentials --no-webui
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+Nice=5
+
+[Install]
+WantedBy=default.target
