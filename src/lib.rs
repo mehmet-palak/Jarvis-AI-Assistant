@@ -1,6 +1,7 @@
 //! JARVIS implementation baseline: a small, typed, policy-gated vertical slice.
 
 pub mod attachments;
+mod capabilities;
 pub mod desktop_config;
 mod model;
 pub mod vision;
@@ -11,6 +12,7 @@ pub use attachments::{
     inspect_local_image, revalidate_local_attachment, validate_attachment, AttachmentKind,
     AttachmentReceipt, AttachmentRef,
 };
+pub use capabilities::{capability_manifest, CapabilityRegistry};
 pub use desktop_config::{
     default_desktop_preferences_path, load_desktop_preferences, save_desktop_preferences,
     DesktopPreferences, ThemePreference,
@@ -596,118 +598,6 @@ pub struct CapabilityManifest {
 // Four completed exchanges preserve short follow-ups while preventing an old topic from
 // dominating a new request or adding avoidable CPU prompt-processing latency.
 const MAX_COMPLETED_CHAT_HISTORY_TURNS: usize = 8;
-
-#[derive(Debug, Clone, Default)]
-pub struct CapabilityRegistry {
-    manifests: HashMap<String, CapabilityManifest>,
-}
-
-impl CapabilityRegistry {
-    pub fn baseline() -> Self {
-        let mut registry = Self::default();
-        for id in [
-            "system.health",
-            "system.time",
-            "conversation.reply",
-            "file.read_workspace",
-            "project.info",
-            "code.project_outline",
-            "docs.workspace_summary",
-            "note.create",
-        ] {
-            if let Some(manifest) = capability_manifest(id) {
-                registry.manifests.insert(id.into(), manifest);
-            }
-        }
-        registry
-    }
-
-    pub fn get(&self, capability: &str) -> Option<&CapabilityManifest> {
-        self.manifests.get(capability)
-    }
-
-    pub fn contains(&self, capability: &str) -> bool {
-        self.manifests.contains_key(capability)
-    }
-}
-
-pub fn capability_manifest(capability: &str) -> Option<CapabilityManifest> {
-    match capability {
-        "system.health" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Low,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "health".into(),
-        }),
-        "note.create" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Medium,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "LOCAL_RESTRICTED".into(),
-            verifier_profile: "file_exists".into(),
-        }),
-        "system.time" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Low,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "timestamp_present".into(),
-        }),
-        "conversation.reply" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Low,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "conversation_reply".into(),
-        }),
-        "file.read_workspace" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Medium,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "file_read".into(),
-        }),
-        "project.info" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Medium,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "project_root".into(),
-        }),
-        "code.project_outline" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Medium,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "project_root".into(),
-        }),
-        "docs.workspace_summary" => Some(CapabilityManifest {
-            capability_id: capability.into(),
-            version: "1.0.0".into(),
-            risk: Risk::Medium,
-            effect_scope: "DIGITAL_LOCAL".into(),
-            requires_network: false,
-            sandbox_profile: "NO_EXEC_READ_ONLY".into(),
-            verifier_profile: "file_read".into(),
-        }),
-        _ => None,
-    }
-}
 
 fn now_epoch() -> u64 {
     SystemTime::now()
@@ -4233,7 +4123,6 @@ mod tests {
         let mut runtime = Runtime::new();
         runtime
             .registry
-            .manifests
             .get_mut("system.health")
             .expect("baseline manifest")
             .sandbox_profile = "LOCAL_RESTRICTED".into();
@@ -4245,7 +4134,6 @@ mod tests {
         let mut note_runtime = Runtime::new();
         note_runtime
             .registry
-            .manifests
             .get_mut("note.create")
             .expect("baseline manifest")
             .sandbox_profile = "NO_EXEC_READ_ONLY".into();

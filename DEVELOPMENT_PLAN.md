@@ -24,7 +24,8 @@ Durum: DEVAM EDİYOR — başlangıç 15 Ağustos 2026
 
 - [x] `model.rs` çıkarıldı: `ModelProvider` trait'i, `DeterministicModelProvider`/`LlamaCliProvider`/`LlamaServerProvider`, `ModelResponse`/`ModelRuntimeState`/`RouteSource`/`IntentResolution`, `JARVIS_SYSTEM_PROMPT`, `model_capability_intent`, `route_with_provider`, `normalize_llama_cli_output`. Public API `lib.rs` kökünden `pub use model::{...}` ile birebir korundu; içsel (`pub(crate)`) sabitler/fonksiyonlar sadece crate içinden erişilebilir.
   - Kanıt: `cargo fmt` temiz; `cargo test` (workspace) 85 lib + 16 main + 5 desktop test PASS, 0 fail/warning; `cargo build --release` başarılı; `scripts/release_check.sh` → `JARVIS local release gate: PASS`. Baseline (bölme öncesi) da aynı 85+5 testle yeşildi, davranış regresyonu yok.
-- [ ] `CapabilityRegistry` + `capability_manifest()` ayrı modüle taşınacak
+- [x] `capabilities.rs` çıkarıldı: `CapabilityRegistry` + `capability_manifest()`. Test-only mutasyon ihtiyacı (`sandbox_profile` fixture'ı) için `pub(crate) #[cfg(test)] get_mut()` eklendi; alan (`manifests`) private kaldı.
+  - Kanıt: `cargo fmt --check` temiz; `cargo test` (workspace) 85+16+5 test PASS, 0 fail/warning; `scripts/release_check.sh` → PASS.
 - [ ] `SqliteStore` tablo bazlı (tasks/approvals/audit/teacher_examples/snapshots) ayrılacak — paylaşılan `Connection` sahipliğine dikkat
 - [ ] `Runtime` ayrı modüle taşınacak
 - [ ] `policy_for` ve `classify`/`validate_*` fonksiyonları `policy.rs`'e taşınacak — tek Policy Gate yolunun bozulmadığından emin olunacak, kullanıcı manuel onay/red senaryolarını test edecek
