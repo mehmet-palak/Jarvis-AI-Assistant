@@ -154,12 +154,17 @@ impl Runtime {
         self.store
             .as_ref()
             .and_then(|store| {
+                // All five namespaces are eligible; `retrieve_memory` already excludes expired
+                // rows (`expires_at IS NULL OR expires_at > now`), so an expired Session or
+                // EphemeralToolOutput record never reaches the model as if it were still current.
                 store
                     .retrieve_memory(
                         &[
                             MemoryNamespace::UserProfile,
                             MemoryNamespace::Project,
                             MemoryNamespace::Task,
+                            MemoryNamespace::Session,
+                            MemoryNamespace::EphemeralToolOutput,
                         ],
                         8,
                     )

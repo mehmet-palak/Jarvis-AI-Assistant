@@ -291,9 +291,19 @@ pub enum DataSensitivity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryNamespace {
+    /// Durable, user-approved profile facts (name, address form, language, role preference).
     UserProfile,
+    /// Durable facts scoped to a project the user is working on.
     Project,
+    /// Durable facts scoped to a specific task.
     Task,
+    /// Short-lived notes scoped to the current conversation session. Physically distinct from
+    /// the three durable namespaces above: `validate_memory_record` refuses to store a `Session`
+    /// record without an expiry, so it cannot silently become permanent.
+    Session,
+    /// Short-lived cache of a tool's own output (for example, a computed result worth reusing
+    /// for a few follow-up turns). Same expiry requirement as `Session`, for the same reason.
+    EphemeralToolOutput,
 }
 
 impl MemoryNamespace {
@@ -302,7 +312,16 @@ impl MemoryNamespace {
             Self::UserProfile => "USER_PROFILE",
             Self::Project => "PROJECT",
             Self::Task => "TASK",
+            Self::Session => "SESSION",
+            Self::EphemeralToolOutput => "EPHEMERAL_TOOL_OUTPUT",
         }
+    }
+
+    /// True for the two namespaces that must never persist indefinitely. `propose_memory` and
+    /// `validate_memory_record` both enforce this — it is a physical constraint on the record
+    /// itself (an expiry is mandatory), not just a naming convention.
+    pub fn requires_expiry(self) -> bool {
+        matches!(self, Self::Session | Self::EphemeralToolOutput)
     }
 
     fn from_str(value: &str) -> Result<Self, String> {
@@ -310,6 +329,8 @@ impl MemoryNamespace {
             "USER_PROFILE" => Ok(Self::UserProfile),
             "PROJECT" => Ok(Self::Project),
             "TASK" => Ok(Self::Task),
+            "SESSION" => Ok(Self::Session),
+            "EPHEMERAL_TOOL_OUTPUT" => Ok(Self::EphemeralToolOutput),
             _ => Err(format!("unknown memory namespace: {value}")),
         }
     }
@@ -401,10 +422,17 @@ pub fn validate_memory_record(record: &MemoryRecord) -> Result<(), String> {
     if record.key.chars().count() > 120 || record.value.chars().count() > 4_000 {
         return Err("memory key or value exceeds its safety limit".into());
     }
-    if let Some(expires_at) = record.expires_at {
-        if expires_at <= record.created_at {
+    match record.expires_at {
+        Some(expires_at) if expires_at <= record.created_at => {
             return Err("memory expiry must be after its creation time".into());
         }
+        None if record.namespace.requires_expiry() => {
+            return Err(format!(
+                "{} memory requires an expiry; it must never persist indefinitely",
+                record.namespace.as_str()
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -2267,6 +2295,102 @@ mod tests {
             .audit
             .iter()
             .any(|event| event.task_id == task.task_id && event.event == "tool.executed"));
+    }
+
+    /// F3 "Memory namespace'leri ... fiziksel/şematik olarak ayrılır": `Session` and
+    /// `EphemeralToolOutput` are physically distinct from the three durable namespaces because a
+    /// record in either one cannot exist without an expiry — `validate_memory_record` refuses it.
+    /// This is enforced at the `propose_memory` boundary, before anything ever reaches storage.
+    #[test]
+    fn session_and_ephemeral_namespaces_require_an_expiry_but_durable_ones_do_not() {
+        for ephemeral_namespace in [
+            MemoryNamespace::Session,
+            MemoryNamespace::EphemeralToolOutput,
+        ] {
+            let without_expiry = propose_memory(
+                ephemeral_namespace,
+                "scratch",
+                "value",
+                DataSensitivity::Internal,
+                "test",
+                false,
+                None,
+            );
+            assert!(
+                without_expiry.unwrap_err().contains("requires an expiry"),
+                "{ephemeral_namespace:?} should refuse to persist without an expiry"
+            );
+            let with_expiry = propose_memory(
+                ephemeral_namespace,
+                "scratch",
+                "value",
+                DataSensitivity::Internal,
+                "test",
+                false,
+                Some(now_epoch() + 60),
+            );
+            assert!(with_expiry.is_ok(), "an explicit expiry must be accepted");
+        }
+        for durable_namespace in [
+            MemoryNamespace::UserProfile,
+            MemoryNamespace::Project,
+            MemoryNamespace::Task,
+        ] {
+            let without_expiry = propose_memory(
+                durable_namespace,
+                "fact",
+                "value",
+                DataSensitivity::Internal,
+                "test",
+                false,
+                None,
+            );
+            assert!(
+                without_expiry.is_ok(),
+                "{durable_namespace:?} must remain durable by default, unlike Session/EphemeralToolOutput"
+            );
+        }
+    }
+
+    #[test]
+    fn approved_memory_context_includes_session_and_ephemeral_output_namespaces() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let live_session = propose_memory(
+            MemoryNamespace::Session,
+            "current-topic",
+            "Rust modularizasyonu",
+            DataSensitivity::Internal,
+            "test",
+            true,
+            Some(now_epoch() + 3_600),
+        )
+        .expect("valid session proposal");
+        runtime
+            .commit_memory_proposal(&live_session, true)
+            .expect("live session record persists");
+        let live_ephemeral = propose_memory(
+            MemoryNamespace::EphemeralToolOutput,
+            "last-index-report",
+            "5 chunk indexlendi",
+            DataSensitivity::Internal,
+            "test",
+            true,
+            Some(now_epoch() + 3_600),
+        )
+        .expect("valid ephemeral proposal");
+        runtime
+            .commit_memory_proposal(&live_ephemeral, true)
+            .expect("live ephemeral record persists");
+        let provider = ContextCapturingProvider::default();
+        runtime.handle_with_provider(request("memory-namespaces-1", "selam"), &provider);
+        let messages = provider.messages.lock().expect("test lock").clone();
+        assert!(messages
+            .iter()
+            .any(|message| message.content.contains("Rust modularizasyonu")));
+        assert!(messages
+            .iter()
+            .any(|message| message.content.contains("5 chunk indexlendi")));
     }
 
     #[test]

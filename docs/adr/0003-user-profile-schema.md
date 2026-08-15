@@ -57,3 +57,19 @@ sahip değil — bellek/profil yalnız TUI'den yazılabiliyor. Bu, F3'ün "Profi
 Profil, genel bellek sisteminin üzerine ince, doğrulayıcı bir katmandır — ayrı bir depolama yolu
 değil. Bu, tek bir onay/audit/silme zincirini korur ve mimarinin "ikinci bir Policy/Persistence
 yolu açma" ilkesiyle tutarlıdır.
+
+## Ek — Namespace fiziksel ayrımı (15 Ağustos 2026, F3 madde 4)
+
+`MemoryNamespace`'e iki yeni üye eklendi: `Session` (oturuma özel kısa ömürlü not) ve
+`EphemeralToolOutput` (bir aracın kısa süreli önbelleğe alınmış çıktısı). Üç kalıcı namespace'ten
+(`UserProfile`/`Project`/`Task`) **fiziksel** olarak ayrılmaları şu şekilde sağlanıyor:
+`validate_memory_record`, bu iki namespace için `expires_at` alanı boşsa kaydı doğrudan reddediyor
+— yani süresiz kalıcı bir Session/EphemeralToolOutput kaydı **oluşturulamıyor**, bu bir isimlendirme
+kuralı değil, yapısal bir kısıt. `retrieve_memory` zaten süresi geçmiş kayıtları otomatik filtrelediği
+için (`expires_at IS NULL OR expires_at > now`) bu iki namespace modele hiçbir zaman bayat veri
+sızdırmıyor.
+
+**Bilinen açık nokta:** Şu an hiçbir üretim kod yolu (`/remember`, `/profile set`) bu iki yeni
+namespace'e yazmıyor — ikisi de yalnız `UserProfile`'a sabitlenmiş durumda. Bu bilinçli: namespace'ler
+şema olarak hazır, ama onları dolduracak somut özellik (örn. görev-bazlı otomatik not, RAG sonucu
+önbelleği) henüz F3'ün ilerideki maddelerinde/F4'te gelecek.
