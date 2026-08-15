@@ -2993,6 +2993,96 @@ mod tests {
             .any(|message| message.content.contains("kutuphane-y")));
     }
 
+    /// Kullanıcının kuralı: "secret'ları doğrudan hafızaya yazmıyoruz; sadece Secret Manager
+    /// referansı tutuluyor." Gerçek değer yalnız `secrets` tablosunda olmalı — `memories`'teki
+    /// yer tutucu satır gerçek değeri hiç içermemeli, ve `/memory` listesi de içermemeli.
+    #[test]
+    fn remembering_a_secret_never_stores_the_real_value_in_ordinary_memory() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .remember_secret("api_key", "cok-gizli-deger-sk-abc123")
+            .expect("secret stores");
+
+        let records = runtime.list_memory().expect("list");
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].value.contains("cok-gizli-deger-sk-abc123"));
+        assert_eq!(records[0].sensitivity, DataSensitivity::Sensitive);
+        assert!(
+            !records[0].include_in_model_context,
+            "the placeholder must never be eligible for model context"
+        );
+
+        assert_eq!(
+            runtime.reveal_secret("api_key").expect("reveal succeeds"),
+            Some("cok-gizli-deger-sk-abc123".to_string())
+        );
+    }
+
+    /// Uçtan uca: gerçek bir sohbet turu, sırrı asla — ne yer tutucu üzerinden ne başka bir
+    /// yoldan — modele göndermemeli.
+    #[test]
+    fn a_remembered_secret_never_reaches_a_real_conversation_turn() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .remember_secret("api_key", "cok-gizli-deger-sk-abc123")
+            .expect("secret stores");
+
+        let provider = ContextCapturingProvider::default();
+        runtime.handle_with_provider(request("secret-context-1", "api_key nedir"), &provider);
+        let messages = provider.messages.lock().expect("test lock");
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("cok-gizli-deger-sk-abc123")));
+    }
+
+    /// `/secret forget` hem gerçek değeri hem `memories`'teki yer tutucuyu silmeli — biri kalırsa
+    /// sahipsiz bir yer tutucu görünmeye devam ederdi.
+    #[test]
+    fn forgetting_a_secret_removes_both_the_real_value_and_its_placeholder() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .remember_secret("api_key", "deger")
+            .expect("secret stores");
+        assert!(runtime.forget_secret("api_key").expect("forget succeeds"));
+
+        assert_eq!(
+            runtime.reveal_secret("api_key").expect("reveal succeeds"),
+            None
+        );
+        assert!(runtime.list_memory().expect("list").is_empty());
+        assert!(!runtime
+            .forget_secret("api_key")
+            .expect("second forget is a clean no-op"));
+    }
+
+    /// Aynı anahtarı tekrar kaydetmek güncellemeli, ikinci bir kayıt oluşturmamalı — bugün genel
+    /// bellek için düzeltilen aynı desen.
+    #[test]
+    fn remembering_the_same_secret_key_again_updates_it() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .remember_secret("api_key", "ilk-deger")
+            .expect("first store");
+        runtime
+            .remember_secret("api_key", "ikinci-deger")
+            .expect("second store updates");
+
+        assert_eq!(runtime.list_secret_keys().unwrap(), vec!["api_key"]);
+        assert_eq!(
+            runtime.reveal_secret("api_key").unwrap(),
+            Some("ikinci-deger".to_string())
+        );
+        assert_eq!(
+            runtime.list_memory().expect("list").len(),
+            1,
+            "the placeholder must also update in place, not duplicate"
+        );
+    }
+
     /// A malformed entry must not abort the whole import; the caller decides what to do with the
     /// skipped list (e.g. show it to the user), and the entries that were fine still import.
     #[test]

@@ -150,3 +150,56 @@ diskteki kaydı siler — geçmiş kalıcı olduğu için "temizle" gerçek bir 
 değil. Bu, bellek kayıtlarının (`MemoryRecord`) tabi olduğu sensitivity/export/delete
 makinesinden **ayrı** bir mekanizma — sohbet geçmişi kendi tablosunda, kendi basit kapsam/silme
 kuralıyla (`Runtime::clear_chat_history`) yönetiliyor, profil/bellek şemasının bir parçası değil.
+
+## Ek — Katmanlı bellek mimarisi: kullanıcının 5-katmanlı tasarımıyla karşılaştırma ve gerçek boşlukların kapatılması (16 Ağustos 2026)
+
+Kullanıcı, F3 sırasında bu bellek sisteminin kendisiyle önceden birlikte tasarladığı katmanlı bir
+mimariye (active/temporary context, session, task, project, long-term user memory + 6 kural:
+her şeyi kaydetmeme, secret manager referansı, provenance/trust/scope/sensitivity metadata, task
+izolasyonu, SQLite-first, opsiyonel semantic retrieval) dayandığını hatırlattı. Kodla karşılaştırma
+üç gerçek boşluk buldu, üçü de aynı gün kapatıldı:
+
+1. **`TrustLevel` yoktu.** `source` (provenance) ve `sensitivity` zaten vardı, "trust level" eksikti
+   — çünkü bugüne kadar tek bir güven seviyesi vardı (açık kullanıcı komutu). `MemoryRecord`'a
+   `trust_level: TrustLevel` (`UserAsserted`/`Imported`) eklendi. `propose_memory`'nin imzası
+   **değişmedi** — yeni `propose_memory_with_trust_and_scope` bunu taşıyor, `propose_memory` ona
+   `(UserAsserted, None)` ile yönleniyor, 24 çağrı noktasının hiçbiri etkilenmedi.
+2. **Task-scoped izolasyon yoktu.** `MemoryRecord.scope_id: Option<String>` eklendi (yalnız `Task`
+   namespace için anlamlı, `validate_memory_record` artık zorunlu kılıyor — `Session`/
+   `EphemeralToolOutput`'un `expires_at` zorunluluğuyla aynı yapısal desen). `memory_id` artık
+   `scope_id`'yi de içeriyor, iki task'ın aynı anahtarı asla birbirini ezmiyor.
+   `SqliteStore::retrieve_memory` artık `task_scope: Option<&str>` alıyor — sıradan sohbet turu
+   (`task_scope=None`) `Task` namespace'ini **tamamen hariç tutuyor** (önceden tüm task'ların tüm
+   kayıtları her sohbet turuna karışıyordu); yeni `Runtime::task_scoped_memory_context(task_id)`
+   yalnız o task'ın kayıtlarını döner.
+3. **Session/Task/Project'e gerçek bir yazma yolu yoktu.** `/remember` her zaman `UserProfile`'a
+   yazıyordu; diğer dördü şema olarak vardı ama hiçbir üretim yolu onlara yazmıyordu (yalnız
+   `/memory import`, dolaylı bir yol). `/remember [profil|proje|görev <task-id>|oturum|geçici]
+   anahtar = değer` eklendi — geriye dönük uyumluluk için, namespace kelimesini soyduktan sonra
+   gerçek bir "anahtar = değer" kalmıyorsa (örn. kullanıcının anahtarı gerçekten "proje" ise) eski
+   davranışa (UserProfile, orijinal metin) düşülüyor.
+
+Ayrıca **Secret Manager** eklendi (kuralın "secret'ları doğrudan hafızaya yazmıyoruz, sadece
+referans tutuyoruz" kısmı — daha önce hiç yoktu, ADR-0003'ün "Şifreleme kararı" bölümündeki genel
+şifreleme-eklenmeme kararından **ayrı ve ek** bir mekanizma):
+- Yeni `secrets` tablosu (`memories`'ten tamamen ayrı, schema sürüm 10) — gerçek değer yalnız
+  burada. `Runtime::remember_secret` bunu yazar ve `memories`'e yalnız bir **yer tutucu** satır
+  ekler (`sensitivity=Sensitive`, `include_in_model_context=false` — sıradan sohbet bağlamı bunu
+  hiç görmez). Gerçek değer yalnız `Runtime::reveal_secret`'ın açık, kullanıcı-tetiklemeli
+  çağrısıyla (`/secret show <anahtar>`) ortaya çıkar.
+- Doğal dil: ayrı, öncelikli bir tetikleyici kümesi (`hafızana gizli kaydet: ...` vb.,
+  `src/memory_intent.rs`) — sıradan `REMEMBER_TRIGGERS`'tan bilinçli olarak ayrı, bir kimlik
+  bilgisinin yanlışlıkla sıradan yola gitmemesi için.
+- TUI: `/secret anahtar = değer`, `/secret show <anahtar>`, `/secret forget <anahtar>`, `/secrets`
+  (yalnız anahtarları listeler).
+- Audit: yalnız anahtar adı, gerçek değer asla (F3 "filtre loglanır ama sır saklanmaz" ilkesiyle
+  aynı desen).
+
+Kanıt: 5 yeni `lib.rs` testi (`trust_level_distinguishes_direct_writes_from_imports`,
+`task_scoped_memory_isolates_concurrent_tasks_from_each_other_and_from_ordinary_context`,
+`remembering_a_secret_never_stores_the_real_value_in_ordinary_memory`,
+`a_remembered_secret_never_reaches_a_real_conversation_turn` — gerçek bir sohbet turu üzerinden
+uçtan uca, `forgetting_a_secret_removes_both_the_real_value_and_its_placeholder`) + doğal dil ve
+TUI/desktop seviyesinde uçtan uca testler. Tam paket (`cargo fmt`/`test`/`clippy -D
+warnings`/`release_check.sh`) her aşamada PASS. Ayrıntılar için `DEVELOPMENT_PLAN.md`'nin "F3
+sonrası düzeltmeler" bölümüne bakın.

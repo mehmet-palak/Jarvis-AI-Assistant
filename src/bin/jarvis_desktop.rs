@@ -1499,8 +1499,24 @@ fn handle_natural_language_memory_command(
                 Err(error) => format!("Silemedim: {error}"),
             },
         ),
+        Some(MemoryIntent::RememberSecret { key, value }) => Some(
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .remember_secret(&key, &value)
+            {
+                Ok(()) => format!(
+                    "Sırrı kaydettim: {key} • gerçek değer yalnız Secret Manager'da, sıradan belleğe/modele hiç gitmiyor."
+                ),
+                Err(error) => format!("Kaydedemedim: {error}"),
+            },
+        ),
         Some(MemoryIntent::UnparseableRemember) => Some(
             "Ne kaydetmemi istediğini anlayamadım. Örnek: 'hafızana yaz: adım Ali' ya da 'hafızana yaz: anahtar = değer'."
+                .into(),
+        ),
+        Some(MemoryIntent::UnparseableRememberSecret) => Some(
+            "Neyi gizli kaydetmemi istediğini anlayamadım. Örnek: 'hafızana gizli kaydet: api_key = değer'."
                 .into(),
         ),
         Some(MemoryIntent::UnparseableForget) => Some(
@@ -1853,6 +1869,31 @@ mod tests {
             handle_natural_language_memory_command(&runtime, "bugün hava nasıl"),
             None,
             "ordinary conversation with no trigger phrase must fall through untouched"
+        );
+    }
+
+    /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz" kuralı native masaüstünde de
+    /// geçerli — doğal dil tetikleyicisi Secret Manager'a gitmeli, gerçek değer `list_memory()`'de
+    /// hiç görünmemeli.
+    #[test]
+    fn desktop_natural_language_secret_trigger_uses_the_secret_manager() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
+
+        let reply = handle_natural_language_memory_command(
+            &runtime,
+            "hafızana gizli kaydet: api_key = sk-abc123",
+        )
+        .expect("a secret trigger must be handled, not fall through");
+        assert!(reply.contains("Sırrı kaydettim"));
+
+        let records = runtime.lock().unwrap().list_memory().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.value.contains("sk-abc123")));
+        assert_eq!(
+            runtime.lock().unwrap().reveal_secret("api_key").unwrap(),
+            Some("sk-abc123".to_string())
         );
     }
 

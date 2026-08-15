@@ -806,9 +806,28 @@ fn submit(
             }
             return;
         }
+        Some(MemoryIntent::RememberSecret { key, value }) => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .remember_secret(&key, &value)
+            {
+                Ok(()) => app.push_system(format!(
+                    "Sırrı kaydettim: {key} • gerçek değer yalnız Secret Manager'da, sıradan belleğe/modele hiç gitmiyor. Görüntülemek için: /secret show {key}"
+                )),
+                Err(error) => app.push_system(format!("Kaydedemedim: {error}")),
+            }
+            return;
+        }
         Some(MemoryIntent::UnparseableRemember) => {
             app.push_system(
                 "Ne kaydetmemi istediğini anlayamadım. Örnek: 'hafızana yaz: adım Ali' ya da 'hafızana yaz: anahtar = değer'.",
+            );
+            return;
+        }
+        Some(MemoryIntent::UnparseableRememberSecret) => {
+            app.push_system(
+                "Neyi gizli kaydetmemi istediğini anlayamadım. Örnek: 'hafızana gizli kaydet: api_key = değer'.",
             );
             return;
         }
@@ -1020,6 +1039,71 @@ fn submit(
                 app.pending_memory = Some(proposal);
             }
             Err(error) => app.push_system(format!("Bellek teklifi geçersiz: {error}")),
+        }
+        return;
+    }
+    // Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz; sadece Secret Manager referansı
+    // tutuluyor" kuralı. `/remember`'dan tamamen ayrı bir komut — gerçek değer asla `memories`
+    // tablosuna gitmiyor, yalnız ayrı `secrets` tablosuna. İkinci bir onay adımı yok (`/secret`
+    // yazmanın kendisi zaten açık komut) — tıpkı doğal dil bellek komutları gibi.
+    if let Some(rest) = input.strip_prefix("/secret ").map(str::trim) {
+        if let Some(key) = rest.strip_prefix("show ").map(str::trim) {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .reveal_secret(key)
+            {
+                Ok(Some(value)) => app.push_system(format!("{key} = {value}")),
+                Ok(None) => app.push_system(format!("'{key}' adıyla kayıtlı bir sır yok.")),
+                Err(error) => app.push_system(format!("Görüntülenemedi: {error}")),
+            }
+            return;
+        }
+        if let Some(key) = rest.strip_prefix("forget ").map(str::trim) {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .forget_secret(key)
+            {
+                Ok(true) => app.push_system(format!("'{key}' sırrı silindi.")),
+                Ok(false) => app.push_system(format!("'{key}' adıyla kayıtlı bir sır yok.")),
+                Err(error) => app.push_system(format!("Silinemedi: {error}")),
+            }
+            return;
+        }
+        let Some((key, value)) = rest
+            .split_once('=')
+            .map(|(key, value)| (key.trim(), value.trim()))
+        else {
+            app.push_system(
+                "Kullanım: /secret anahtar = değer • /secret show <anahtar> • /secret forget <anahtar> • /secrets (listele)",
+            );
+            return;
+        };
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .remember_secret(key, value)
+        {
+            Ok(()) => app.push_system(format!(
+                "Sırrı kaydettim: {key} • gerçek değer yalnız Secret Manager'da, sıradan belleğe/modele hiç gitmiyor."
+            )),
+            Err(error) => app.push_system(format!("Kaydedemedim: {error}")),
+        }
+        return;
+    }
+    if input == "/secrets" {
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_secret_keys()
+        {
+            Ok(keys) if keys.is_empty() => app.push_system("Kayıtlı sır yok.".to_string()),
+            Ok(keys) => app.push_system(format!(
+                "Kayıtlı sır anahtarları (değerler gösterilmez): {}",
+                keys.join(", ")
+            )),
+            Err(error) => app.push_system(format!("Listelenemedi: {error}")),
         }
         return;
     }
@@ -1493,7 +1577,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2897,6 +2981,76 @@ mod tests {
         assert_eq!(
             parse_remember_namespace_prefix("görev"),
             (MemoryNamespace::UserProfile, None, "görev".to_string())
+        );
+    }
+
+    /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz; sadece Secret Manager referansı
+    /// tutuluyor" kuralı — TUI komutlarının uçtan uca kanıtı: gerçek değer `/memory` listesinde
+    /// hiç görünmemeli, yalnız `/secret show` ile açıkça istenince görünmeli.
+    #[test]
+    fn secret_command_write_show_forget_and_list_round_trip() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/secret api_key = sk-abc123".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Sırrı kaydettim"));
+
+        app.input = "/memory".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(!app.messages.last().unwrap().content.contains("sk-abc123"));
+
+        app.input = "/secrets".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("api_key"));
+        assert!(!app.messages.last().unwrap().content.contains("sk-abc123"));
+
+        app.input = "/secret show api_key".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("sk-abc123"));
+
+        app.input = "/secret forget api_key".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("silindi"));
+
+        app.input = "/secret show api_key".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("kayıtlı bir sır yok"));
+    }
+
+    /// Doğal dil tetikleyicisi de aynı Secret Manager yoluna gitmeli — tek adımda, gerçek değer
+    /// yine sıradan belleğe hiç yazılmadan.
+    #[test]
+    fn natural_language_secret_trigger_uses_the_secret_manager_not_ordinary_memory() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "hafızana gizli kaydet: api_key = sk-xyz789".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Sırrı kaydettim"));
+
+        let records = runtime.lock().unwrap().list_memory().unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.value.contains("sk-xyz789")));
+        assert_eq!(
+            runtime.lock().unwrap().reveal_secret("api_key").unwrap(),
+            Some("sk-xyz789".to_string())
         );
     }
 

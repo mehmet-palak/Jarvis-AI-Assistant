@@ -27,6 +27,12 @@ pub enum MemoryIntent {
     /// user's one explicit command — there is deliberately no second confirmation step here,
     /// unlike `/remember ... approve`; saying "hafızana yaz: ..." is already unambiguous intent.
     Remember(MemoryProposal),
+    /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz, Secret Manager referansı
+    /// tutuyoruz" kuralı — ayrı bir tetikleyici kümesiyle tanınır (örn. "hafızana gizli kaydet:
+    /// ..."), her zaman açık `anahtar = değer` gerektirir (bir isim gibi doğal cümle kalıbı
+    /// yok — kimlik bilgilerinin böyle bir kalıbı olmaz). Bu, `Runtime::remember_secret`'ı
+    /// çağırmalı, sıradan `commit_memory_proposal`'ı değil.
+    RememberSecret { key: String, value: String },
     /// A known profile field ("adım", "hitabım", "dilim", ...) to delete.
     ForgetProfileField(ProfileField),
     /// A free-form memory key (not a known profile field) to delete, across every namespace.
@@ -34,6 +40,8 @@ pub enum MemoryIntent {
     /// A trigger phrase was recognized but the payload after it could not be understood as
     /// either a known fact pattern or an explicit `anahtar = değer` pair.
     UnparseableRemember,
+    /// A secret-remember trigger was recognized but no `anahtar = değer` payload followed it.
+    UnparseableRememberSecret,
     /// A forget-trigger was recognized but no target (field name or key) followed it.
     UnparseableForget,
 }
@@ -46,6 +54,19 @@ const REMEMBER_TRIGGERS: &[&str] = &[
     "hatırla ki",
     "hatırla",
     "unutma ki",
+];
+
+/// Ayrı ve öncelikli bir tetikleyici kümesi — kimlik bilgisi gibi bir değeri sıradan
+/// `REMEMBER_TRIGGERS`'tan geçirmek, onu yanlışlıkla modele giden sıradan bellek bağlamına
+/// (`approved_memory_context`) sokabilirdi. Her zaman `Runtime::remember_secret`'a yönlenir —
+/// gerçek değer yalnız ayrı `secrets` tablosuna gider, `memories`'e asla.
+const REMEMBER_SECRET_TRIGGERS: &[&str] = &[
+    "hafızana gizli kaydet",
+    "hafızana gizli olarak kaydet",
+    "gizli bilgi kaydet",
+    "gizli bilgi olarak kaydet",
+    "sırrını sakla",
+    "sır olarak kaydet",
 ];
 
 // Turkish is subject-object-verb: the target sits *between* the prefix and the verb ("hafızandan
@@ -201,6 +222,15 @@ fn split_key_value(payload: &str) -> Option<(&str, &str)> {
 /// present at all — the caller must then treat `input` as ordinary conversation, unmodified.
 pub fn parse_memory_intent(input: &str) -> Option<MemoryIntent> {
     let trimmed = input.trim();
+    if let Some(payload) = find_trigger(trimmed, REMEMBER_SECRET_TRIGGERS) {
+        return Some(match split_key_value(payload) {
+            Some((key, value)) => MemoryIntent::RememberSecret {
+                key: key.to_string(),
+                value: value.to_string(),
+            },
+            None => MemoryIntent::UnparseableRememberSecret,
+        });
+    }
     if let Some(payload) = find_trigger(trimmed, REMEMBER_TRIGGERS) {
         if payload.is_empty() {
             return Some(MemoryIntent::UnparseableRemember);
@@ -279,6 +309,44 @@ mod tests {
     fn no_trigger_phrase_is_ordinary_conversation() {
         assert_eq!(parse_memory_intent("bugün hava nasıl"), None);
         assert_eq!(parse_memory_intent("adım Ali, bu tarif iyi mi?"), None);
+    }
+
+    /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz, Secret Manager referansı
+    /// tutuyoruz" kuralı — ayrı bir tetikleyici kümesi, ayrı bir `MemoryIntent` varyantı.
+    #[test]
+    fn secret_trigger_resolves_to_remember_secret_with_key_and_value() {
+        assert_eq!(
+            parse_memory_intent("hafızana gizli kaydet: api_key = sk-abc123"),
+            Some(MemoryIntent::RememberSecret {
+                key: "api_key".to_string(),
+                value: "sk-abc123".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_memory_intent("sırrını sakla: db_password = deger"),
+            Some(MemoryIntent::RememberSecret {
+                key: "db_password".to_string(),
+                value: "deger".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn secret_trigger_with_no_key_value_payload_is_reported_not_silently_dropped() {
+        assert_eq!(
+            parse_memory_intent("hafızana gizli kaydet: bugün hava güzel"),
+            Some(MemoryIntent::UnparseableRememberSecret)
+        );
+    }
+
+    /// Sıradan "hafızana yaz" tetikleyicisi bir sırrı yakalamamalı — iki tetikleyici kümesi
+    /// birbirinden tamamen ayrı, karışmamalı.
+    #[test]
+    fn ordinary_remember_trigger_never_matches_the_secret_phrasing() {
+        assert!(matches!(
+            parse_memory_intent("hafızana gizli kaydet: api_key = deger"),
+            Some(MemoryIntent::RememberSecret { .. })
+        ));
     }
 
     #[test]

@@ -335,6 +335,86 @@ impl Runtime {
         Ok(deleted)
     }
 
+    /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz, Secret Manager referansı
+    /// tutuyoruz" kuralı. Gerçek değer yalnız ayrı `secrets` tablosunda (`SqliteStore::store_secret`);
+    /// `memories`'e yalnız bir yer tutucu satır ekleniyor — `Sensitive`, `include_in_model_context=false`
+    /// — böylece `/memory` bu anahtarın var olduğunu gösterir ama modele giden sıradan sohbet
+    /// bağlamı (`approved_memory_context`, `include_in_model_context=1` filtresi) buna hiç
+    /// dokunmaz; gerçek değer yalnız `reveal_secret`'ın açık, kullanıcı-tetiklemeli çağrısıyla
+    /// ortaya çıkar. Audit yalnız anahtar adını taşır, gerçek değeri asla (F3 "filtre loglanır ama
+    /// sır saklanmaz" ilkesiyle aynı desen).
+    pub fn remember_secret(&mut self, key: &str, value: &str) -> Result<(), String> {
+        {
+            let store = self
+                .store
+                .as_ref()
+                .ok_or_else(|| "secrets require an attached local store".to_string())?;
+            store.store_secret(key, value, "user-command")?;
+            let placeholder = propose_memory_with_trust_and_scope(
+                MemoryNamespace::UserProfile,
+                key,
+                "[gizli değer — /secret show ile görüntülenir]",
+                DataSensitivity::Sensitive,
+                "secret-manager",
+                false,
+                None,
+                TrustLevel::UserAsserted,
+                None,
+            )?;
+            store.commit_memory_proposal(&placeholder, true)?;
+        }
+        self.record_audit(AuditEvent::pending(
+            format!("secret:{key}"),
+            "secret.remembered",
+        ));
+        Ok(())
+    }
+
+    /// Gerçek sır değerini döner — yalnız kullanıcının kendi açık talebiyle (`/secret show
+    /// <anahtar>`) çağrılmalı. Hiçbir sohbet/model bağlamı derleme yolu bunu hiç çağırmaz.
+    pub fn reveal_secret(&mut self, key: &str) -> Result<Option<String>, String> {
+        let value = {
+            let store = self
+                .store
+                .as_ref()
+                .ok_or_else(|| "secrets require an attached local store".to_string())?;
+            store.resolve_secret(key)?
+        };
+        self.record_audit(AuditEvent::pending(
+            format!("secret:{key}"),
+            "secret.revealed",
+        ));
+        Ok(value)
+    }
+
+    /// Hem gerçek sır değerini (`secrets` tablosu) hem `memories`'teki yer tutucu satırı siler —
+    /// ikisi de kalırsa `/memory` listesinde sahipsiz bir yer tutucu görünmeye devam ederdi.
+    pub fn forget_secret(&mut self, key: &str) -> Result<bool, String> {
+        let deleted = {
+            let store = self
+                .store
+                .as_ref()
+                .ok_or_else(|| "secrets require an attached local store".to_string())?;
+            store.delete_secret(key)?
+        };
+        if deleted {
+            let _ = self.delete_memory_by_key(key);
+            self.record_audit(AuditEvent::pending(
+                format!("secret:{key}"),
+                "secret.forgotten",
+            ));
+        }
+        Ok(deleted)
+    }
+
+    /// Yalnız anahtar adları — hiçbir zaman değer içermez.
+    pub fn list_secret_keys(&self) -> Result<Vec<String>, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "secrets require an attached local store".to_string())?
+            .list_secret_keys()
+    }
+
     /// Deletes a known profile field's current record, if any (`Ok(false)` when the field was
     /// never set). Shared by `/profile delete <field>` and natural-language "hafızandan X
     /// bilgisini sil" (`MemoryIntent::ForgetProfileField`) — exactly one place resolves a

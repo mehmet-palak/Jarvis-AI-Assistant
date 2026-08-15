@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{params, Connection, Result as SqlResult, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -1383,6 +1383,71 @@ impl SqliteStore {
             .execute("DELETE FROM memories WHERE memory_id=?1", [memory_id])
             .map(|changed| changed > 0)
             .map_err(|error| format!("memory deletion failed: {error}"))
+    }
+
+    /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz, Secret Manager referansı
+    /// tutuyoruz" kuralının depolama katmanı — `memories` tablosundan **tamamen ayrı** bir tablo.
+    /// Gerçek değer yalnız burada; `Runtime::remember_secret` bunu çağırdıktan sonra `memories`'e
+    /// yalnız bir yer tutucu (placeholder) satır ekler, gerçek değeri asla değil. `secret_id`
+    /// anahtardan türetildiği için aynı anahtarı tekrar kaydetmek (bugün bellek için düzeltilen
+    /// bug'la aynı desen) günceller, ikinci bir satır oluşturmaz.
+    pub fn store_secret(&self, key: &str, value: &str, source: &str) -> Result<String, String> {
+        if key.trim().is_empty() || value.trim().is_empty() {
+            return Err("secret requires a non-empty key and value".into());
+        }
+        let secret_id = format!("secret-{}", &sha256_hex(&format!("secret-v1|{key}"))[..16]);
+        let now = now_epoch() as i64;
+        self.connection
+            .execute(
+                "INSERT INTO secrets(secret_id, secret_key, secret_value, source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(secret_id) DO UPDATE SET
+                    secret_value=excluded.secret_value,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at",
+                params![secret_id, key, value, source, now],
+            )
+            .map_err(|error| format!("secret persistence failed: {error}"))?;
+        Ok(secret_id)
+    }
+
+    /// Gerçek sır değerini döner — yalnız kullanıcının kendi açık talebiyle (`/secret show
+    /// <anahtar>`) çağrılmalı; hiçbir sohbet/model bağlamı derleme yolu bunu hiç çağırmaz (model
+    /// bağlamı yalnız `memories`'teki yer tutucuyu görür, gerçek değeri asla).
+    pub fn resolve_secret(&self, key: &str) -> Result<Option<String>, String> {
+        self.connection
+            .query_row(
+                "SELECT secret_value FROM secrets WHERE secret_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("secret lookup failed: {error}"))
+    }
+
+    pub fn delete_secret(&self, key: &str) -> Result<bool, String> {
+        self.connection
+            .execute("DELETE FROM secrets WHERE secret_key=?1", [key])
+            .map(|changed| changed > 0)
+            .map_err(|error| format!("secret deletion failed: {error}"))
+    }
+
+    /// Yalnız anahtar adları — hiçbir zaman değer içermez. `/secrets` listelemesinin temeli.
+    pub fn list_secret_keys(&self) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT secret_key FROM secrets ORDER BY secret_key ASC")
+            .map_err(|error| format!("secret list setup failed: {error}"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("secret list query failed: {error}"))?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| format!("secret list row failed: {error}"))
+    }
+
+    pub fn secret_count(&self) -> SqlResult<i64> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM secrets", [], |row| row.get(0))
     }
 
     pub fn delete_memory_namespace(&self, namespace: MemoryNamespace) -> Result<usize, String> {
