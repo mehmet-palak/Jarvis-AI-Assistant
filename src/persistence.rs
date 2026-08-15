@@ -14,8 +14,9 @@ use rusqlite::{params, Connection, Result as SqlResult, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunk_workspace_text, fts_query, now_epoch, sha256_hex, validate_memory_record,
-    validate_teacher_example, validate_workspace_document_content,
+    chunk_workspace_text, extract_pdf_text, fts_query, now_epoch,
+    reject_oversized_workspace_document, reject_secret_like_workspace_document_name, sha256_hex,
+    validate_memory_record, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample, WorkspaceCitation,
     WorkspaceIngestionReport,
@@ -513,9 +514,21 @@ impl SqliteStore {
         }
         let bytes = fs::read(&canonical_path)
             .map_err(|error| format!("workspace document read failed: {error}"))?;
-        validate_workspace_document_content(&canonical_path, &bytes)?;
-        let content = String::from_utf8(bytes)
-            .map_err(|error| format!("workspace document must be UTF-8 text: {error}"))?;
+        let is_pdf = canonical_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+        let content = if is_pdf {
+            // A PDF is inherently binary, so it takes the shared secret-name/size checks but
+            // skips the plain-text path's binary/UTF-8 rejection — extraction handles that.
+            reject_secret_like_workspace_document_name(&canonical_path)?;
+            reject_oversized_workspace_document(&bytes)?;
+            extract_pdf_text(&bytes)?
+        } else {
+            validate_workspace_document_content(&canonical_path, &bytes)?;
+            String::from_utf8(bytes)
+                .map_err(|error| format!("workspace document must be UTF-8 text: {error}"))?
+        };
         let chunks = chunk_workspace_text(&content);
         if chunks.is_empty() {
             return Err("workspace document has no indexable text".into());

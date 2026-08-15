@@ -10,6 +10,7 @@ mod profile;
 mod runtime;
 pub mod vision;
 pub mod workbench;
+mod workspace;
 
 pub use attachments::{
     attachment_receipt_manifest, inspect_local_attachment, inspect_local_document,
@@ -41,11 +42,22 @@ pub use workbench::{
     discard_patch_snapshot, restore_patch_snapshot, ApprovedPatch, CodingPlan, PatchApplication,
     PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork,
 };
+pub(crate) use workspace::{
+    chunk_workspace_text, extract_pdf_text, fts_query, reject_oversized_workspace_document,
+    reject_secret_like_workspace_document_name, validate_workspace_document_content,
+    validate_workspace_document_path,
+};
+pub use workspace::{
+    preview_workspace_index, WorkspaceCitation, WorkspaceFolderIndexReport, WorkspaceIndexPreview,
+    WorkspaceIngestionReport, MAX_WORKSPACE_CHUNK_CHARS, MAX_WORKSPACE_DOCUMENT_BYTES,
+};
 
 use std::ffi::CString;
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -562,269 +574,6 @@ pub fn memory_import(
         }
     }
     Ok((proposals, skipped))
-}
-
-pub const MAX_WORKSPACE_DOCUMENT_BYTES: u64 = 512 * 1024;
-pub const MAX_WORKSPACE_CHUNK_CHARS: usize = 1_200;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceIngestionReport {
-    pub schema_version: u16,
-    pub document_id: String,
-    pub canonical_path: PathBuf,
-    pub content_sha256: String,
-    pub chunk_count: usize,
-    pub indexed_at: u64,
-}
-
-/// Result of indexing every file `preview_workspace_index` reported as `included`. A per-file
-/// failure (e.g. it turned out to be binary once actually opened, even though the metadata-only
-/// preview didn't know that) does not abort the rest of the folder.
-#[derive(Debug, Clone, Default)]
-pub struct WorkspaceFolderIndexReport {
-    pub indexed: Vec<WorkspaceIngestionReport>,
-    pub failed: Vec<(PathBuf, String)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceCitation {
-    pub document_id: String,
-    pub chunk_id: String,
-    pub canonical_path: PathBuf,
-    pub content_sha256: String,
-    pub chunk_ordinal: usize,
-    pub content: String,
-}
-
-impl WorkspaceCitation {
-    pub fn as_untrusted_content(&self) -> ContentRef {
-        ContentRef {
-            source: format!(
-                "workspace:{}#chunk-{}",
-                self.canonical_path.display(),
-                self.chunk_ordinal
-            ),
-            provenance: ContentProvenance::UntrustedProjectFile,
-            content: self.content.clone(),
-        }
-    }
-}
-
-pub(crate) fn validate_workspace_document_path(
-    root: &Path,
-    requested: &Path,
-) -> Result<PathBuf, String> {
-    let root =
-        fs::canonicalize(root).map_err(|error| format!("workspace root unavailable: {error}"))?;
-    if !root.is_dir() {
-        return Err("workspace root must be a directory".into());
-    }
-    if requested.is_absolute()
-        || requested
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err("workspace document path must be contained and relative".into());
-    }
-    let canonical = fs::canonicalize(root.join(requested))
-        .map_err(|error| format!("workspace document cannot be resolved: {error}"))?;
-    if !canonical.starts_with(&root) {
-        return Err("workspace document escapes its approved root".into());
-    }
-    Ok(canonical)
-}
-
-pub(crate) fn validate_workspace_document_content(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if file_name == ".env"
-        || file_name.ends_with(".pem")
-        || file_name.ends_with(".key")
-        || file_name.starts_with("id_rsa")
-    {
-        return Err("workspace secret-like files are excluded from indexing".into());
-    }
-    if bytes.len() as u64 > MAX_WORKSPACE_DOCUMENT_BYTES {
-        return Err(format!(
-            "workspace document exceeds {} KiB indexing limit",
-            MAX_WORKSPACE_DOCUMENT_BYTES / 1024
-        ));
-    }
-    if bytes.contains(&0) {
-        return Err("binary workspace documents are excluded from indexing".into());
-    }
-    std::str::from_utf8(bytes)
-        .map_err(|error| format!("workspace document must be UTF-8 text: {error}"))?;
-    Ok(())
-}
-
-/// A cheap, metadata-only scan of a folder a user is considering for indexing — the "izin UX'i"
-/// preview shown before folder-level indexing runs. It never opens a file's content (that full
-/// secret/binary/UTF-8/size check still runs per-file in `index_workspace_document` at actual
-/// indexing time); this only reports scope so the user can decide before anything is read.
-#[derive(Debug, Clone, Default)]
-pub struct WorkspaceIndexPreview {
-    pub root: PathBuf,
-    /// Relative paths that would currently be eligible for indexing.
-    pub included: Vec<PathBuf>,
-    /// Excluded because the file name looks like a secret (`.env`, `*.pem`, `*.key`, `id_rsa*`).
-    pub excluded_secret_like: Vec<PathBuf>,
-    /// Excluded because the file is larger than `MAX_WORKSPACE_DOCUMENT_BYTES`.
-    pub excluded_oversized: Vec<PathBuf>,
-    /// Excluded because it matched a caller-supplied exclude pattern.
-    pub excluded_by_pattern: Vec<PathBuf>,
-    /// Sum of `included` file sizes — a size estimate, not an exact post-chunking count.
-    pub estimated_total_bytes: u64,
-}
-
-/// Directories never worth indexing regardless of user-supplied exclude patterns: version
-/// control internals and dependency/build caches. The user can still index files inside them by
-/// pointing `/index` directly at one; this only affects the folder-level preview/scan default.
-const WORKSPACE_INDEX_SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv"];
-
-/// True if `relative` matches a caller-supplied exclude pattern. Deliberately simple — a bare
-/// `*.ext` matches by extension, anything else matches by substring containment — rather than a
-/// full glob engine, so this has no new dependency and stays predictable to explain to a user.
-fn path_matches_exclude_pattern(relative: &Path, pattern: &str) -> bool {
-    if let Some(extension) = pattern.strip_prefix("*.") {
-        return relative
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case(extension));
-    }
-    relative.to_string_lossy().contains(pattern)
-}
-
-/// Scans `root` (which must already be a real, contained directory — same containment rule as
-/// `validate_workspace_document_path`) and reports what folder-level indexing would include.
-pub fn preview_workspace_index(
-    root: &Path,
-    exclude_patterns: &[String],
-) -> Result<WorkspaceIndexPreview, String> {
-    let canonical_root =
-        fs::canonicalize(root).map_err(|error| format!("workspace root unavailable: {error}"))?;
-    if !canonical_root.is_dir() {
-        return Err("workspace root must be a directory".into());
-    }
-    let mut preview = WorkspaceIndexPreview {
-        root: canonical_root.clone(),
-        ..Default::default()
-    };
-    let mut pending_dirs = vec![canonical_root.clone()];
-    while let Some(directory) = pending_dirs.pop() {
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| format!("workspace directory unreadable: {error}"))?;
-        for entry in entries {
-            let entry =
-                entry.map_err(|error| format!("workspace directory entry error: {error}"))?;
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(&canonical_root)
-                .unwrap_or(&path)
-                .to_path_buf();
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("workspace entry type unknown: {error}"))?;
-            if file_type.is_dir() {
-                let is_skipped_dir = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| WORKSPACE_INDEX_SKIP_DIRS.contains(&name));
-                if !is_skipped_dir {
-                    pending_dirs.push(path);
-                }
-                continue;
-            }
-            if !file_type.is_file() {
-                continue; // symlinks and other special entries are not indexed
-            }
-            if exclude_patterns
-                .iter()
-                .any(|pattern| path_matches_exclude_pattern(&relative, pattern))
-            {
-                preview.excluded_by_pattern.push(relative);
-                continue;
-            }
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if file_name == ".env"
-                || file_name.ends_with(".pem")
-                || file_name.ends_with(".key")
-                || file_name.starts_with("id_rsa")
-            {
-                preview.excluded_secret_like.push(relative);
-                continue;
-            }
-            let byte_size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-            if byte_size > MAX_WORKSPACE_DOCUMENT_BYTES {
-                preview.excluded_oversized.push(relative);
-                continue;
-            }
-            preview.estimated_total_bytes += byte_size;
-            preview.included.push(relative);
-        }
-    }
-    preview.included.sort();
-    preview.excluded_secret_like.sort();
-    preview.excluded_oversized.sort();
-    preview.excluded_by_pattern.sort();
-    Ok(preview)
-}
-
-pub(crate) fn chunk_workspace_text(content: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for line in content.lines() {
-        let needed = line.chars().count() + usize::from(!current.is_empty());
-        if !current.is_empty() && current.chars().count() + needed > MAX_WORKSPACE_CHUNK_CHARS {
-            chunks.push(current);
-            current = String::new();
-        }
-        if line.chars().count() > MAX_WORKSPACE_CHUNK_CHARS {
-            for segment in line
-                .chars()
-                .collect::<Vec<_>>()
-                .chunks(MAX_WORKSPACE_CHUNK_CHARS)
-            {
-                if !current.is_empty() {
-                    chunks.push(current);
-                    current = String::new();
-                }
-                chunks.push(segment.iter().collect());
-            }
-        } else {
-            if !current.is_empty() {
-                current.push('\n');
-            }
-            current.push_str(line);
-        }
-    }
-    if !current.trim().is_empty() {
-        chunks.push(current);
-    }
-    chunks
-}
-
-pub(crate) fn fts_query(query: &str) -> Result<String, String> {
-    let terms = query
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| term.chars().count() >= 2)
-        .take(12)
-        .map(|term| format!("\"{term}\""))
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        return Err("workspace search query needs at least one two-character term".into());
-    }
-    // Natural-language queries contain stop words and inflections (for example Turkish
-    // question suffixes). Requiring every term causes valid sources to disappear; each term is
-    // still quoted and parameter-bound, so broadening retrieval does not broaden authority.
-    Ok(terms.join(" OR "))
 }
 
 impl DataSensitivity {
@@ -1722,6 +1471,44 @@ mod tests {
         ));
         fs::create_dir_all(&root).expect("workspace fixture should be created");
         root
+    }
+
+    /// Builds a minimal, real, parseable single-page PDF containing `text` as a Helvetica text
+    /// run — hand-rolled (object table + xref + trailer) rather than pulled from a fixture file,
+    /// so the PDF extraction tests never depend on a binary blob checked into the repo.
+    fn minimal_pdf_with_text(text: &str) -> Vec<u8> {
+        let objects: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/Resources<</Font<</F1 4 0 R>>>>/MediaBox[0 0 300 200]/Contents 5 0 R>>".to_vec(),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec(),
+            {
+                let stream = format!("BT /F1 18 Tf 10 100 Td ({text}) Tj ET");
+                let mut object = format!("<</Length {}>>\nstream\n", stream.len()).into_bytes();
+                object.extend_from_slice(stream.as_bytes());
+                object.extend_from_slice(b"\nendstream");
+                object
+            },
+        ];
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj", index + 1).as_bytes());
+            out.extend_from_slice(object);
+            out.extend_from_slice(b"endobj\n");
+        }
+        let xref_offset = out.len();
+        let entry_count = objects.len() + 1;
+        out.extend_from_slice(format!("xref\n0 {entry_count}\n").as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer<</Size {entry_count}/Root 1 0 R>>\n").as_bytes());
+        out.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+        out
     }
 
     #[test]
@@ -2904,6 +2691,52 @@ mod tests {
             .expect("folder indexing succeeds");
         assert_eq!(report.indexed.len(), 2);
         assert!(report.failed.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Document parser katmanı: Markdown/TXT/PDF başlangıcı" — the PDF half. Markdown/TXT
+    /// already worked (they are plain UTF-8 text, no special parser needed); PDF is the actual
+    /// new capability this item adds.
+    #[test]
+    fn extract_pdf_text_reads_real_pdf_content_and_never_panics_on_garbage() {
+        let pdf_bytes = minimal_pdf_with_text("Merhaba JARVIS");
+        let text = extract_pdf_text(&pdf_bytes).expect("real PDF extracts");
+        assert!(text.contains("Merhaba JARVIS"));
+
+        // A well-known PDF-parser crash surface: malformed/adversarial bytes must produce a
+        // clean Err, never take down the process. `catch_unwind` is what makes this true even if
+        // the underlying parser panics internally.
+        assert!(extract_pdf_text(b"not a pdf at all").is_err());
+        assert!(extract_pdf_text(b"%PDF-1.4\ntruncated garbage after the header").is_err());
+        assert!(extract_pdf_text(&[]).is_err());
+    }
+
+    #[test]
+    fn a_pdf_indexes_end_to_end_and_becomes_a_searchable_citation() {
+        let root = temporary_workspace("pdf-index");
+        fs::write(
+            root.join("guide.pdf"),
+            minimal_pdf_with_text("The project token is green-orbit"),
+        )
+        .expect("pdf fixture should be written");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        let report = runtime
+            .index_workspace_document(&root, Path::new("guide.pdf"), true)
+            .expect("pdf indexes successfully");
+        assert!(report.chunk_count > 0);
+
+        let provider = ContextCapturingProvider::default();
+        let (_, result, _) = runtime.handle_with_provider(
+            request("pdf-search-1", "green-orbit token nedir?"),
+            &provider,
+        );
+        assert!(result
+            .evidence
+            .iter()
+            .any(|evidence| evidence.starts_with("workspace.citation:")));
 
         let _ = fs::remove_dir_all(&root);
     }
