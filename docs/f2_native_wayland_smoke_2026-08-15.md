@@ -78,3 +78,24 @@ düğmesine tıklayıp mesajın gerçekten gittiğini doğrulaması gerekiyor.**
 Bu koşum resize/minimize/mesaj gönderme/bildirim action'ını **kapatmıyor** — bunlar gerçek kullanıcı
 elinde birkaç dakikalık elle kabul olarak kalıyor. Buna karşılık iki somut, tekrar araştırılması
 gereken bulgu (sessiz kapanış, Tab-sırası) backlog'a eklendi.
+
+## Ek düzeltme — 15 Ağustos 2026, kullanıcı gerçek kullanımda bulundu
+
+Kullanıcı gerçek masaüstü oturumunda mesaj yazıp gönderirken pencerenin birkaç saniyeliğine
+donduğunu ("Uygulama yanıt vermiyor") bildirdi. Kök neden bulundu: `refresh_model_state`, model
+sunucusuna health check'i (gerçek bir ağ çağrısı, `timeout_seconds=1`) doğrudan **UI thread'inde**,
+senkron çalıştırıyordu. Pencere zaten her ~45ms'de bir kendini yeniliyor (orb animasyonu için), yani
+her 3 saniyede bir bu senkron çağrı UI'ı bloke ediyordu — özellikle model sunucusu kullanıcının asıl
+mesajını işlemekle meşgulken, health check'in cevap vermesi gecikip UI donuyordu.
+
+Bu, bu belgedeki daha önceki "sessiz kapanış" bulgusu için attığım "senkron `rfd` çağrısı event
+loop'u kilitliyor" tahmininden **farklı ve daha kesin** bir kök neden; o tahmin muhtemelen yanlıştı
+(`add_attachment` zaten `rfd::AsyncFileDialog` + ayrı thread kullanıyor, doğrudan bloklamıyor).
+
+**Düzeltme**: health check artık `submit()`/`add_attachment()` ile aynı desende — ayrı bir thread'de
+çalışıyor, sonucu bir `mpsc` kanalıyla döndürüyor; `refresh_model_state` her frame'de yalnız
+`try_recv()` ile (asla bloklamadan) sonucu kontrol ediyor. Kanıt: `cargo test`/`clippy`/
+`release_check.sh` PASS; zamanlamaya bağlı olduğu için ayrı bir flaky regression testi eklenmedi,
+düzeltme yapısal olarak (arka plan thread + non-blocking `try_recv`) bloklamayı imkansız kılıyor.
+
+"Sessiz kapanış" bulgusu hâlâ ayrı, açıklanmamış olarak kalıyor — bu düzeltme onu kapsamıyor.

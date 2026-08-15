@@ -47,6 +47,15 @@ struct DesktopNotification {
     content: String,
 }
 
+/// Result of a background model health check. `runtime_state()` does a real blocking network
+/// call (up to `timeout_seconds`); running it directly on the UI thread would freeze the whole
+/// window for that long whenever the local model server is briefly slow to answer (e.g. busy
+/// generating a response to the user's own message). This is sent back through a channel instead.
+struct ModelHealthUpdate {
+    status: String,
+    notification: Option<DesktopNotification>,
+}
+
 /// A small Linux-first lock for the native shell. The model server remains independently
 /// persistent; this lock only prevents two desktop windows from racing over one UI session.
 struct DesktopInstanceLock {
@@ -148,6 +157,9 @@ struct JarvisDesktop {
     /// alanı düzenlerken (henüz "Kaydet"e basmadan) pencere yeniden çizildiğinde taslağı
     /// kaybolmasın. Pencere açılışında mevcut profil değerleriyle doldurulur.
     profile_drafts: HashMap<ProfileField, String>,
+    /// `Some` while a background model health check is in flight. Prevents overlapping checks
+    /// and lets `refresh_model_state` drain the result without ever blocking the UI thread.
+    model_health_receiver: Option<mpsc::Receiver<ModelHealthUpdate>>,
 }
 
 const STOP_MODEL_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
@@ -240,6 +252,7 @@ impl JarvisDesktop {
             stop_model_armed_at: None,
             composer_focus_claimed: false,
             profile_drafts,
+            model_health_receiver: None,
         }
     }
 
@@ -360,6 +373,21 @@ impl JarvisDesktop {
     }
 
     fn refresh_model_state(&mut self) {
+        // Always drain a completed background check first, regardless of the throttle below —
+        // otherwise a result could sit unread for up to another 3 seconds.
+        if let Some(receiver) = &self.model_health_receiver {
+            if let Ok(update) = receiver.try_recv() {
+                self.model_status = update.status;
+                if let Some(notification) = update.notification {
+                    notify_desktop(notification.title, &notification.content);
+                }
+                self.model_health_receiver = None;
+            }
+        }
+        if self.model_health_receiver.is_some() {
+            // A check is already running; don't pile up a second one.
+            return;
+        }
         if self.last_model_check.elapsed().as_secs() < 3 {
             return;
         }
@@ -367,17 +395,23 @@ impl JarvisDesktop {
         let mut health_provider = self.provider.clone();
         health_provider.timeout_seconds = 1;
         let previous_status = self.model_status.clone();
-        self.model_status = match health_provider.runtime_state() {
-            jarvis_core::ModelRuntimeState::Ready => "MODEL HAZIR".into(),
-            _ => "MODEL BAŞLATILIYOR".into(),
-        };
-        if let Some(notification) = model_unavailable_notification(
-            &previous_status,
-            &self.model_status,
-            self.preferences.notifications_enabled,
-        ) {
-            notify_desktop(notification.title, &notification.content);
-        }
+        let notifications_enabled = self.preferences.notifications_enabled;
+        let (sender, receiver) = mpsc::channel();
+        self.model_health_receiver = Some(receiver);
+        // The real network call — up to 1 second — happens here, off the UI thread, so a slow
+        // or momentarily busy local model server no longer freezes the window.
+        std::thread::spawn(move || {
+            let status = match health_provider.runtime_state() {
+                jarvis_core::ModelRuntimeState::Ready => "MODEL HAZIR".to_string(),
+                _ => "MODEL BAŞLATILIYOR".to_string(),
+            };
+            let notification =
+                model_unavailable_notification(&previous_status, &status, notifications_enabled);
+            let _ = sender.send(ModelHealthUpdate {
+                status,
+                notification,
+            });
+        });
     }
 
     fn add_attachment(&mut self, _context: &egui::Context) {
