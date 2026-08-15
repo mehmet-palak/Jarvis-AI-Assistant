@@ -90,7 +90,10 @@ maddeler:
    hesaplar, `SqliteStore::rebuild_embeddings_for_model` batch embedding'i kullanır),
    `Runtime::verify_rag_index` (sahipsiz embedding + eksik embedding sayımı, `is_healthy()`). TUI:
    `/rag status`, `/rag rebuild`, `/rag verify`.
-6. **Configurable RRF sabitleri** — şu an sabit (`RRF_K=60`, aday havuzu `limit*4`); gerçek bir
-   değerlendirme seti (F3 madde 18) olmadan ayarlamak tahmin olurdu.
+6. ~~**Configurable RRF sabitleri**~~ — 16 Ağustos 2026'da uygulandı: `RRF_K` (`JARVIS_RRF_K`),
+   aday havuzu çarpanı (`JARVIS_RETRIEVAL_CANDIDATE_MULTIPLIER`) ve result sayısı
+   (`JARVIS_RETRIEVAL_RESULT_LIMIT`) artık ortam değişkeniyle geçersiz kılınabiliyor, geçersiz/boş
+   değerde ADR'nin seçtiği varsayılana dönüyor. F3 madde 18'deki `rag_eval_*` eval seti artık var,
+   ayarlama tahmin olmaktan çıktı.
 7. **Opsiyonel reranker aşaması** — yalnız bir kıyaslama "RRF yetmiyor" derse eklenecek, şimdiden
    ikinci bir model çalıştırmanın gerekçesi yok.

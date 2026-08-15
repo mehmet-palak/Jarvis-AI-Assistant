@@ -50,10 +50,11 @@ pub use workbench::{
     PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork,
 };
 pub(crate) use workspace::{
-    chunk_workspace_text, extract_pdf_text, fts_query, is_secret_like_rejection,
-    reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
-    reject_secret_like_workspace_document_name, validate_workspace_document_content,
-    validate_workspace_document_path,
+    chunk_workspace_text, configured_retrieval_candidate_multiplier, configured_rrf_k,
+    configured_workspace_retrieval_result_limit, extract_pdf_text, fts_query,
+    is_secret_like_rejection, reject_oversized_workspace_document,
+    reject_secret_like_workspace_document_content, reject_secret_like_workspace_document_name,
+    validate_workspace_document_content, validate_workspace_document_path,
 };
 pub use workspace::{
     preview_workspace_index, RagStatus, RagVerifyReport, WorkspaceCitation,

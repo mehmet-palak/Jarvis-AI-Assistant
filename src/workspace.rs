@@ -35,6 +35,113 @@ pub const WORKSPACE_CONTEXT_CHAR_BUDGET: usize = 4_000;
 /// on the FTS match alone, so FTS-only mode is completely unaffected by this constant).
 pub const MIN_RELEVANT_SIMILARITY: f32 = 0.10;
 
+/// F3 post-close "configurable RRF sabitleri" (GPT önerisi 6/7): the three retrieval-tuning
+/// constants ADR-0004 originally hardcoded, each overridable via an environment variable and
+/// falling back to the value the ADR chose — the same "read at call time, no config struct to
+/// thread through every constructor" pattern `LlamaEmbeddingProvider::local_default` already uses
+/// for its own env vars. Tune against the eval set (F3 madde 18, `rag_eval_*` tests) rather than
+/// guessing — that eval set is exactly what did not exist yet when these were first deferred.
+pub const DEFAULT_RRF_K: f64 = 60.0;
+pub const DEFAULT_RETRIEVAL_CANDIDATE_MULTIPLIER: usize = 4;
+
+// Parsing lives in its own pure functions (env var reading is just `Option<&str>` in) so it can
+// be unit-tested directly without mutating real process environment variables — `std::env::var`
+// is global, mutable, process-wide state, and tests run in parallel threads by default; a test
+// that set/removed a real env var could race another test reading it at the same time.
+fn parse_rrf_k(raw: Option<&str>) -> f64 {
+    raw.and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value > 0.0)
+        .unwrap_or(DEFAULT_RRF_K)
+}
+
+fn parse_retrieval_candidate_multiplier(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(DEFAULT_RETRIEVAL_CANDIDATE_MULTIPLIER)
+}
+
+fn parse_retrieval_result_limit(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(WORKSPACE_RETRIEVAL_RESULT_LIMIT)
+}
+
+pub(crate) fn configured_rrf_k() -> f64 {
+    parse_rrf_k(std::env::var("JARVIS_RRF_K").ok().as_deref())
+}
+
+pub(crate) fn configured_retrieval_candidate_multiplier() -> usize {
+    parse_retrieval_candidate_multiplier(
+        std::env::var("JARVIS_RETRIEVAL_CANDIDATE_MULTIPLIER")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// `WORKSPACE_RETRIEVAL_RESULT_LIMIT`, overridable the same way — callers (`Runtime::approved_workspace_context`)
+/// use this instead of the bare constant so the "result sayısı" knob GPT named is actually tunable.
+pub(crate) fn configured_workspace_retrieval_result_limit() -> usize {
+    parse_retrieval_result_limit(
+        std::env::var("JARVIS_RETRIEVAL_RESULT_LIMIT")
+            .ok()
+            .as_deref(),
+    )
+}
+
+#[cfg(test)]
+mod retrieval_config_tests {
+    use super::*;
+
+    #[test]
+    fn rrf_k_accepts_a_valid_positive_override_and_falls_back_otherwise() {
+        assert_eq!(parse_rrf_k(Some("120")), 120.0);
+        assert_eq!(parse_rrf_k(Some("not-a-number")), DEFAULT_RRF_K);
+        assert_eq!(
+            parse_rrf_k(Some("-5")),
+            DEFAULT_RRF_K,
+            "must reject non-positive values"
+        );
+        assert_eq!(parse_rrf_k(Some("0")), DEFAULT_RRF_K);
+        assert_eq!(parse_rrf_k(None), DEFAULT_RRF_K);
+    }
+
+    #[test]
+    fn retrieval_candidate_multiplier_accepts_a_valid_override_and_falls_back_otherwise() {
+        assert_eq!(parse_retrieval_candidate_multiplier(Some("8")), 8);
+        assert_eq!(
+            parse_retrieval_candidate_multiplier(Some("0")),
+            DEFAULT_RETRIEVAL_CANDIDATE_MULTIPLIER,
+            "must reject zero"
+        );
+        assert_eq!(
+            parse_retrieval_candidate_multiplier(Some("abc")),
+            DEFAULT_RETRIEVAL_CANDIDATE_MULTIPLIER
+        );
+        assert_eq!(
+            parse_retrieval_candidate_multiplier(None),
+            DEFAULT_RETRIEVAL_CANDIDATE_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn retrieval_result_limit_accepts_a_valid_override_and_falls_back_otherwise() {
+        assert_eq!(parse_retrieval_result_limit(Some("10")), 10);
+        assert_eq!(
+            parse_retrieval_result_limit(Some("0")),
+            WORKSPACE_RETRIEVAL_RESULT_LIMIT,
+            "must reject zero"
+        );
+        assert_eq!(
+            parse_retrieval_result_limit(Some("xyz")),
+            WORKSPACE_RETRIEVAL_RESULT_LIMIT
+        );
+        assert_eq!(
+            parse_retrieval_result_limit(None),
+            WORKSPACE_RETRIEVAL_RESULT_LIMIT
+        );
+    }
+}
+
 /// F3 "Metadata/FTS index: ... indeks sürümü". The chunking/extraction algorithm's own version,
 /// persisted per document (`workspace_documents.index_schema_version`) — distinct from the
 /// SQLite column-migration version (`persistence::CURRENT_SCHEMA_VERSION`). If a future JARVIS

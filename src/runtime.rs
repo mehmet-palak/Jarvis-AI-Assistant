@@ -566,7 +566,11 @@ impl Runtime {
             .as_ref()
             .map(|(model_id, vector)| (model_id.as_str(), vector.as_slice()));
         let citations = store
-            .hybrid_search_workspace(query, query_embedding_ref, WORKSPACE_RETRIEVAL_RESULT_LIMIT)
+            .hybrid_search_workspace(
+                query,
+                query_embedding_ref,
+                configured_workspace_retrieval_result_limit(),
+            )
             .unwrap_or_default();
         // F3 "Retrieval policy: token/context budget". `citations` already comes back best-first
         // and duplicate-suppressed; this is the last, caller-side backstop that keeps the total

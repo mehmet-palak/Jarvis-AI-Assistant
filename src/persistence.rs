@@ -15,8 +15,9 @@ use rusqlite::{params, Connection, Result as SqlResult, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunk_workspace_text, cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query,
-    now_epoch, reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
+    chunk_workspace_text, configured_retrieval_candidate_multiplier, configured_rrf_k,
+    cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query, now_epoch,
+    reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
     reject_secret_like_workspace_document_name, serialize_embedding, sha256_hex,
     validate_memory_record, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
@@ -909,13 +910,16 @@ impl SqliteStore {
             return Ok(vec![]);
         }
         // A broader FTS candidate pool gives the embedding signal something real to re-rank;
-        // re-ranking a single top-1 FTS hit would be a no-op.
-        let candidates = self.search_workspace(query, (limit * 4).clamp(limit, 16))?;
+        // re-ranking a single top-1 FTS hit would be a no-op. Both the multiplier and RRF_K are
+        // configurable (F3 post-close "configurable RRF sabitleri", GPT önerisi 6/7) — see
+        // `configured_rrf_k`/`configured_retrieval_candidate_multiplier` in workspace.rs.
+        let candidate_pool = (limit * configured_retrieval_candidate_multiplier()).clamp(limit, 16);
+        let candidates = self.search_workspace(query, candidate_pool)?;
         let ranked = match query_embedding {
             None => candidates,
             Some(_) if candidates.is_empty() => candidates,
             Some((embedding_model_id, query_embedding)) => {
-                const RRF_K: f64 = 60.0;
+                let rrf_k = configured_rrf_k();
                 let mut scored: Vec<(f64, Option<f32>, WorkspaceCitation)> = candidates
                     .into_iter()
                     .enumerate()
@@ -923,7 +927,7 @@ impl SqliteStore {
                         let similarity = self
                             .chunk_embedding(&citation.chunk_id, embedding_model_id)
                             .map(|stored| cosine_similarity(query_embedding, &stored));
-                        (1.0 / (RRF_K + (fts_rank + 1) as f64), similarity, citation)
+                        (1.0 / (rrf_k + (fts_rank + 1) as f64), similarity, citation)
                     })
                     .collect();
                 let mut similarity_order: Vec<usize> = (0..scored.len()).collect();
@@ -936,7 +940,7 @@ impl SqliteStore {
                 });
                 for (embedding_rank, &index) in similarity_order.iter().enumerate() {
                     if scored[index].1.is_some_and(f32::is_finite) {
-                        scored[index].0 += 1.0 / (RRF_K + (embedding_rank + 1) as f64);
+                        scored[index].0 += 1.0 / (rrf_k + (embedding_rank + 1) as f64);
                     }
                 }
                 // Relevance threshold: a stored-but-weak vector disqualifies the chunk even
