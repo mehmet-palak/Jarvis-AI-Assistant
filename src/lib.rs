@@ -3006,6 +3006,55 @@ mod tests {
         assert!(extract_pdf_text(&[]).is_err());
     }
 
+    /// F3 post-close "semantic-aware chunking" (GPT önerisi 2/7): a Markdown section (heading +
+    /// its body) that fits within the size cap becomes exactly one chunk, keeping the heading
+    /// together with what it introduces — never split at an arbitrary character boundary that
+    /// could land mid-sentence or separate a heading from its content.
+    #[test]
+    fn chunk_workspace_text_for_markdown_keeps_a_heading_with_its_section() {
+        let content = "# Birinci Başlık\nbirinci bölümün içeriği burada\n\n## İkinci Başlık\nikinci bölümün içeriği burada";
+        let chunks = chunk_workspace_text(content, Path::new("notes.md"));
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].starts_with("# Birinci Başlık"));
+        assert!(chunks[0].contains("birinci bölümün içeriği"));
+        assert!(!chunks[0].contains("İkinci Başlık"));
+        assert!(chunks[1].starts_with("## İkinci Başlık"));
+        assert!(chunks[1].contains("ikinci bölümün içeriği"));
+    }
+
+    /// A section that is still larger than the cap on its own must still respect
+    /// `MAX_WORKSPACE_CHUNK_CHARS` — heading-awareness never lets a chunk grow unbounded, it only
+    /// changes *where* the normal size-based splitting starts from.
+    #[test]
+    fn chunk_workspace_text_for_markdown_still_splits_an_oversized_section() {
+        let huge_body = "dolgu metni burada tekrar ediyor ".repeat(100); // well over the cap
+        let content = format!("# Kısa Başlık\nkısa içerik\n\n# Büyük Başlık\n{huge_body}");
+        let chunks = chunk_workspace_text(&content, Path::new("notes.md"));
+        assert!(
+            chunks.len() >= 3,
+            "the small section stays whole; the oversized one must still split further"
+        );
+        assert_eq!(chunks[0], "# Kısa Başlık\nkısa içerik");
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= MAX_WORKSPACE_CHUNK_CHARS);
+        }
+    }
+
+    /// Non-Markdown files (plain text, code, PDF-extracted text) must keep using the original
+    /// blind splitter, completely unchanged — a `#` at the start of a line in, say, a shell
+    /// script or a Rust comment is not a Markdown heading and must never trigger section-aware
+    /// splitting.
+    #[test]
+    fn chunk_workspace_text_for_non_markdown_uses_blind_splitting_unchanged() {
+        let content = "# not a heading here\nsome code\n# neither is this one\nmore code";
+        let chunks = chunk_workspace_text(content, Path::new("notes.txt"));
+        assert_eq!(
+            chunks,
+            vec![content.to_string()],
+            "short plain-text content stays a single blind chunk, headings notwithstanding"
+        );
+    }
+
     #[test]
     fn a_pdf_indexes_end_to_end_and_becomes_a_searchable_citation() {
         let root = temporary_workspace("pdf-index");

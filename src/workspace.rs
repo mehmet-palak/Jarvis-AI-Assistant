@@ -390,7 +390,64 @@ pub fn preview_workspace_index(
     Ok(preview)
 }
 
-pub(crate) fn chunk_workspace_text(content: &str) -> Vec<String> {
+/// F3 post-close "semantic-aware chunking" (GPT önerisi 2/7): Markdown text is split along its
+/// own heading boundaries first, so a chunk is a whole coherent section (heading + its body)
+/// rather than an arbitrary cut that can land mid-sentence or separate a heading from what it
+/// introduces. Every other document kind (plain text, code, PDF-extracted text) still uses the
+/// original blind ~`MAX_WORKSPACE_CHUNK_CHARS` splitter — genuinely structure-aware chunking for
+/// those (code by function/class, PDF by paragraph) is real, separate engineering left for a
+/// later pass (see ADR-0004's deferred-improvements list); this only closes the Markdown case,
+/// the most common one for documents actually indexed here so far.
+pub(crate) fn chunk_workspace_text(content: &str, path: &Path) -> Vec<String> {
+    let is_markdown = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        });
+    if is_markdown {
+        chunk_markdown_by_heading(content)
+    } else {
+        chunk_blind(content)
+    }
+}
+
+/// Splits on Markdown heading lines (`#`, `##`, ...): each section (a heading plus everything
+/// until the next heading) becomes one chunk when it fits, keeping a heading together with the
+/// content it introduces instead of them landing in separate chunks. A section that is still
+/// larger than `MAX_WORKSPACE_CHUNK_CHARS` on its own falls back to `chunk_blind` for just that
+/// section, so the hard size cap this project relies on elsewhere is never violated.
+fn chunk_markdown_by_heading(content: &str) -> Vec<String> {
+    let mut sections: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with('#') && !current.trim().is_empty() {
+            // A blank line separating this section from the next has already been folded in as
+            // a trailing newline by this point — trim it so each section is clean, not just
+            // non-empty.
+            sections.push(std::mem::take(&mut current).trim_end().to_string());
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        sections.push(current.trim_end().to_string());
+    }
+    sections
+        .into_iter()
+        .flat_map(|section| {
+            if section.chars().count() <= MAX_WORKSPACE_CHUNK_CHARS {
+                vec![section]
+            } else {
+                chunk_blind(&section)
+            }
+        })
+        .collect()
+}
+
+fn chunk_blind(content: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for line in content.lines() {

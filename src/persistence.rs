@@ -582,7 +582,7 @@ impl SqliteStore {
             String::from_utf8(bytes)
                 .map_err(|error| format!("workspace document must be UTF-8 text: {error}"))?
         };
-        let chunks = chunk_workspace_text(&content);
+        let chunks = chunk_workspace_text(&content, &canonical_path);
         if chunks.is_empty() {
             return Err("workspace document has no indexable text".into());
         }

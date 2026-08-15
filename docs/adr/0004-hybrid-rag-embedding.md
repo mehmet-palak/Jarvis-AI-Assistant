@@ -72,8 +72,12 @@ maddeler:
 1. **Retrieval öncesi permission/sensitivity filtresi** — şu an her indekslenen belge zaten aynı
    tek onay seviyesinden geçiyor, ayrı bir hassasiyet katmanı yok; workspace belgelerine
    `MemoryRecord` gibi bir sensitivity alanı eklenirse yeniden değerlendirilmeli.
-2. **Semantic-aware chunking** — Markdown başlık/bölüm, kod fonksiyon/sınıf, PDF paragraf bazlı
-   bölme + örtüşme; şu an kör ~1200 karakter bölme kullanılıyor.
+2. ~~**Semantic-aware chunking**~~ — Markdown kısmı 16 Ağustos 2026'da uygulandı:
+   `chunk_workspace_text` artık `.md`/`.markdown` için başlık sınırlarına göre bölüyor (bir bölüm,
+   sığdığı sürece başlığıyla birlikte tek chunk — `chunk_markdown_by_heading`), sığmayan bölümler
+   yine eski kör bölücüye (`chunk_blind`) düşüyor. **Hâlâ ertelenen**: kod fonksiyon/sınıf bazlı
+   bölme (dil başına parser gerektirir, gerçek ayrı bir iş) ve PDF paragraf bazlı bölme — ikisi de
+   şu an hâlâ kör bölme kullanıyor.
 3. ~~**Batch embedding**~~ — 16 Ağustos 2026'da uygulandı: `EmbeddingProvider::embed_batch`
    (varsayılan: `embed`'i döngüyle çağırır; `LlamaEmbeddingProvider` gerçek toplu HTTP isteğiyle
    override eder), `SqliteStore::embed_and_store_chunks_batch` — bir belgenin tüm chunk'ları tek
