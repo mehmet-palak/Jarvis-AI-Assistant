@@ -6,6 +6,7 @@ pub mod desktop_config;
 mod model;
 mod persistence;
 mod policy;
+mod profile;
 mod runtime;
 pub mod vision;
 pub mod workbench;
@@ -30,6 +31,7 @@ pub use policy::{
     authorize_pentest_target, classify, policy_for, validate_pentest_scope, validate_request,
     validate_teacher_example,
 };
+pub use profile::{validate_profile_value, ProfileField, ProfileSnapshot};
 pub use runtime::Runtime;
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use workbench::{

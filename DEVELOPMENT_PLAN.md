@@ -257,7 +257,8 @@ Durum: BEKLENİYOR — F2 exit gate kapanana kadar yeni F3 işi yapılmaz; mevcu
 
 Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir biçimde hatırlaması; belgelerden kaynaklı cevap vermesi.
 
-- [ ] Profile schema/ADR: ad, hitap biçimi, dil, rol/tercih, sensitivity, source ve updated-at alanları; sohbetten otomatik persistent write varsayılan olarak kapalı.
+- [x] Profile schema/ADR: ad, hitap biçimi, dil, rol/tercih, sensitivity, source ve updated-at alanları; sohbetten otomatik persistent write varsayılan olarak kapalı.
+  - Kanıt: [ADR-0003](docs/adr/0003-user-profile-schema.md) — profil, ikinci bir depolama yolu değil, mevcut genel bellek sisteminin (`MemoryNamespace::UserProfile`) üzerine sabit dört anahat (`display_name`/`preferred_address`/`language`/`role_preference`) olarak kuruldu (`src/profile.rs`: `ProfileField`, `validate_profile_value`, `ProfileSnapshot`). `sensitivity`/`source`/`updated_at` zaten `MemoryRecord`'da vardı, yeniden üretilmedi. Kod grep'iyle doğrulandı: `propose_memory`/`commit_memory_proposal`'a giden tek yol TUI'deki açık `/remember` komutu; model/sohbet zinciri (`handle_with_provider*`) bunlara hiç erişmiyor. 3 yeni unit test PASS (`cargo test --offline`: 88 lib testi), `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `scripts/release_check.sh` hepsi PASS. Bilinen açık nokta ADR'de not edildi: native masaüstünde henüz `/remember` eşdeğeri yok (madde 2'de ele alınacak).
 - [ ] Profile CRUD UX: kullanıcı açıkça ekler/düzenler/siler; her alan için “modele dahil etme” anahtarı ve export/reset seçeneği.
 - [ ] Profile injection boundary: profile alanları da system prompt değil typed data olarak taşınır; model profile üzerinden tool yetkisi kazanamaz.
 - [ ] Memory namespace'leri: session, user-profile, project, task ve ephemeral tool-output fiziksel/şematik olarak ayrılır.
