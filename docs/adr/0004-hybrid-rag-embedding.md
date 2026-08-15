@@ -74,7 +74,10 @@ maddeler:
    `MemoryRecord` gibi bir sensitivity alanı eklenirse yeniden değerlendirilmeli.
 2. **Semantic-aware chunking** — Markdown başlık/bölüm, kod fonksiyon/sınıf, PDF paragraf bazlı
    bölme + örtüşme; şu an kör ~1200 karakter bölme kullanılıyor.
-3. **Batch embedding** — chunk başına bir HTTP çağrısı yerine toplu embedding.
+3. ~~**Batch embedding**~~ — 16 Ağustos 2026'da uygulandı: `EmbeddingProvider::embed_batch`
+   (varsayılan: `embed`'i döngüyle çağırır; `LlamaEmbeddingProvider` gerçek toplu HTTP isteğiyle
+   override eder), `SqliteStore::embed_and_store_chunks_batch` — bir belgenin tüm chunk'ları tek
+   bir model çağrısında embed ediliyor (içerik-hash tekilleştirmesi batch içinde de geçerli).
 4. **Gözlemlenebilirlik metrikleri** (FTS/semantic hit sayısı, gecikme, cache hit oranı) — şu an
    yalnız audit log sinyali var; kişisel araç için orantısız görüldü.
 5. **Açık `rag status`/`rag rebuild`/`rag verify` komutları** — cache zaten kavramsal olarak

@@ -668,6 +668,7 @@ impl SqliteStore {
                 [&document_id],
             )
             .map_err(|error| format!("workspace embedding cleanup failed: {error}"))?;
+        let mut inserted_chunks: Vec<(String, String)> = Vec::with_capacity(chunks.len());
         for (ordinal, chunk) in chunks.iter().enumerate() {
             let chunk_id = format!("chunk-{document_id}-{ordinal}");
             self.connection
@@ -677,9 +678,12 @@ impl SqliteStore {
                     params![chunk_id, document_id, ordinal as i64, chunk],
                 )
                 .map_err(|error| format!("workspace chunk persistence failed: {error}"))?;
-            if let Some(provider) = embedding_provider {
-                self.embed_and_store_chunk(provider, &chunk_id, &document_id, chunk);
-            }
+            inserted_chunks.push((chunk_id, chunk.clone()));
+        }
+        // All chunks are inserted before any embedding call — embedding happens once, in one
+        // batch, after the loop, rather than interleaved one-call-per-chunk inside it.
+        if let Some(provider) = embedding_provider {
+            self.embed_and_store_chunks_batch(provider, &document_id, &inserted_chunks);
         }
         Ok(WorkspaceIngestionReport {
             schema_version: 1,
@@ -786,49 +790,84 @@ impl SqliteStore {
             };
             mapped.filter_map(Result::ok).collect()
         };
-        for (chunk_id, content) in rows {
-            self.embed_and_store_chunk(provider, &chunk_id, document_id, &content);
-        }
+        self.embed_and_store_chunks_batch(provider, document_id, &rows);
     }
 
-    /// Embeds one chunk and stores the vector, reusing an existing embedding for the exact same
-    /// content hash **and the same model** anywhere in the workspace instead of calling the model
-    /// again. A different embedding model is a different, incomparable vector space, so the reuse
-    /// lookup is scoped to `provider.embedding_model_id()` — swapping models can never silently
-    /// resurrect a vector that isn't actually comparable to what the new model produces. Never
-    /// returns an error to the caller — a failed/unreachable embedding service only means this one
-    /// chunk stays FTS-only, it must never fail the document's own (already-successful) FTS
+    /// Embeds a set of chunks and stores their vectors, in as few model calls as possible.
+    /// Content-hash reuse (**and the same model** — a different embedding model is a different,
+    /// incomparable vector space) is checked per chunk first, exactly like before batching
+    /// existed; identical content is only ever embedded once even *within* this same batch
+    /// (`content_by_hash` dedup below), not just across separate calls. Whatever remains after
+    /// reuse is sent to the model in a single `embed_batch` call rather than one round-trip per
+    /// chunk — F3 post-close "batch embedding", a real speed win on `/index-folder` with many
+    /// files. Never returns an error — a failed/unreachable embedding service only means these
+    /// chunks stay FTS-only, it must never fail the document's own (already-successful) FTS
     /// indexing.
-    fn embed_and_store_chunk(
+    fn embed_and_store_chunks_batch(
         &self,
         provider: &dyn EmbeddingProvider,
-        chunk_id: &str,
         document_id: &str,
-        content: &str,
+        chunks: &[(String, String)],
     ) {
         let model_id = provider.embedding_model_id();
-        let content_sha256 = sha256_hex(content);
-        let reused: Option<Vec<u8>> = self
-            .connection
-            .query_row(
-                "SELECT embedding FROM workspace_chunk_embeddings
-                 WHERE content_sha256=?1 AND embedding_model_id=?2 LIMIT 1",
-                params![content_sha256, model_id],
-                |row| row.get(0),
-            )
-            .ok();
-        let embedding_bytes = match reused {
-            Some(bytes) => bytes,
-            None => match provider.embed(content) {
-                Ok(vector) => serialize_embedding(&vector),
-                Err(_) => return, // best-effort: FTS indexing of this chunk already succeeded
-            },
+        let mut content_by_hash: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut pending: Vec<(&str, String)> = Vec::new(); // (chunk_id, content_sha256)
+        for (chunk_id, content) in chunks {
+            let content_sha256 = sha256_hex(content);
+            let reused: Option<Vec<u8>> = self
+                .connection
+                .query_row(
+                    "SELECT embedding FROM workspace_chunk_embeddings
+                     WHERE content_sha256=?1 AND embedding_model_id=?2 LIMIT 1",
+                    params![content_sha256, model_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            match reused {
+                Some(embedding_bytes) => {
+                    let _ = self.connection.execute(
+                        "INSERT OR REPLACE INTO workspace_chunk_embeddings(chunk_id, document_id, content_sha256, embedding_model_id, embedding)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![chunk_id, document_id, content_sha256, model_id, embedding_bytes],
+                    );
+                }
+                None => {
+                    content_by_hash
+                        .entry(content_sha256.clone())
+                        .or_insert_with(|| content.clone());
+                    pending.push((chunk_id, content_sha256));
+                }
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let unique_hashes: Vec<&String> = content_by_hash.keys().collect();
+        let texts: Vec<&str> = unique_hashes
+            .iter()
+            .map(|hash| content_by_hash[hash.as_str()].as_str())
+            .collect();
+        let Ok(vectors) = provider.embed_batch(&texts) else {
+            return; // best-effort: FTS indexing of these chunks already succeeded
         };
-        let _ = self.connection.execute(
-            "INSERT OR REPLACE INTO workspace_chunk_embeddings(chunk_id, document_id, content_sha256, embedding_model_id, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![chunk_id, document_id, content_sha256, model_id, embedding_bytes],
-        );
+        if vectors.len() != unique_hashes.len() {
+            return; // malformed/mismatched response — degrade to FTS-only for this batch
+        }
+        let vector_by_hash: std::collections::HashMap<&str, Vec<u8>> = unique_hashes
+            .into_iter()
+            .zip(vectors)
+            .map(|(hash, vector)| (hash.as_str(), serialize_embedding(&vector)))
+            .collect();
+        for (chunk_id, content_sha256) in &pending {
+            if let Some(embedding_bytes) = vector_by_hash.get(content_sha256.as_str()) {
+                let _ = self.connection.execute(
+                    "INSERT OR REPLACE INTO workspace_chunk_embeddings(chunk_id, document_id, content_sha256, embedding_model_id, embedding)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![chunk_id, document_id, content_sha256, model_id, embedding_bytes],
+                );
+            }
+        }
     }
 
     fn chunk_embedding(&self, chunk_id: &str, embedding_model_id: &str) -> Option<Vec<f32>> {

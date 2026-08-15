@@ -3042,6 +3042,10 @@ mod tests {
         model_id: String,
         marker: &'static str,
         call_count: std::sync::atomic::AtomicUsize,
+        /// Distinct from `call_count`: how many times `embed_batch` itself was invoked (round
+        /// trips), not how many texts were embedded across all of them. Real batching should
+        /// keep this at 1 for a whole document's worth of distinct chunks, unlike `call_count`.
+        batch_call_count: std::sync::atomic::AtomicUsize,
     }
 
     impl FixedEmbeddingProvider {
@@ -3050,11 +3054,27 @@ mod tests {
                 model_id: model_id.into(),
                 marker,
                 call_count: std::sync::atomic::AtomicUsize::new(0),
+                batch_call_count: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
         fn calls(&self) -> usize {
             self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn batch_calls(&self) -> usize {
+            self.batch_call_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn embed_one(&self, text: &str) -> Vec<f32> {
+            // A trivial deterministic "semantic" split for testing RRF: text containing the
+            // marker embeds to one direction, everything else to the orthogonal direction.
+            if text.contains(self.marker) {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            }
         }
     }
 
@@ -3062,13 +3082,15 @@ mod tests {
         fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
             self.call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // A trivial deterministic "semantic" split for testing RRF: text containing the
-            // marker embeds to one direction, everything else to the orthogonal direction.
-            Ok(if text.contains(self.marker) {
-                vec![1.0, 0.0]
-            } else {
-                vec![0.0, 1.0]
-            })
+            Ok(self.embed_one(text))
+        }
+
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+            self.batch_call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.call_count
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(texts.iter().map(|text| self.embed_one(text)).collect())
         }
 
         fn embedding_model_id(&self) -> &str {
@@ -3098,6 +3120,76 @@ mod tests {
             1,
             "identical content across two files should only be embedded once"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 post-close "batch embedding": a document with several distinct chunks must be embedded
+    /// in one round trip, not one call per chunk — the real efficiency win for `/index-folder` on
+    /// many files.
+    #[test]
+    fn indexing_a_multi_chunk_document_embeds_in_one_batch_call_not_one_per_chunk() {
+        let root = temporary_workspace("embed-batch");
+        let block = |marker: &str| format!("{marker} {}", "dolgu ".repeat(100));
+        let content = format!(
+            "{}\n\n{}\n\n{}",
+            block("birinci-blok"),
+            block("ikinci-blok"),
+            block("ucuncu-blok")
+        );
+        fs::write(root.join("multi.md"), &content).expect("multi-chunk fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+
+        let report = store
+            .index_workspace_document_with_embedding(&root, Path::new("multi.md"), Some(&provider))
+            .expect("multi-chunk document indexes");
+        assert!(
+            report.chunk_count >= 2,
+            "fixture must actually produce multiple chunks for this test to mean anything"
+        );
+        assert_eq!(
+            provider.batch_calls(),
+            1,
+            "a whole document's distinct chunks must be embedded in one batch call"
+        );
+        assert_eq!(provider.calls(), report.chunk_count);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Backfilling several previously FTS-only documents (embedding provider attached after the
+    /// fact) must also batch across all of them in one call, not one per document/chunk.
+    #[test]
+    fn backfill_across_multiple_documents_also_uses_one_batch_call_per_document() {
+        let root = temporary_workspace("embed-batch-backfill");
+        fs::write(root.join("a.md"), "ilk-belge-benzersiz-metin").expect("fixture a");
+        fs::write(root.join("b.md"), "ikinci-belge-benzersiz-metin").expect("fixture b");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+
+        // Index FTS-only first (no provider), matching "documents indexed before an embedding
+        // provider was ever attached".
+        store
+            .index_workspace_document(&root, Path::new("a.md"))
+            .expect("a indexes FTS-only");
+        store
+            .index_workspace_document(&root, Path::new("b.md"))
+            .expect("b indexes FTS-only");
+
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("a.md"), Some(&provider))
+            .expect("a backfills");
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("b.md"), Some(&provider))
+            .expect("b backfills");
+
+        assert_eq!(
+            provider.batch_calls(),
+            2,
+            "one batch call per document's backfill, not one per chunk"
+        );
+        assert_eq!(provider.calls(), 2);
+
         let _ = fs::remove_dir_all(&root);
     }
 

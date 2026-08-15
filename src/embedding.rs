@@ -17,6 +17,16 @@ use serde_json::Value;
 pub trait EmbeddingProvider: std::fmt::Debug + Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>, String>;
 
+    /// Embeds many texts in as few round-trips as possible, in request order. Default
+    /// implementation just calls `embed` once per text — correct for any implementor, just not
+    /// necessarily fast; a provider whose backend actually supports batching (like
+    /// `LlamaEmbeddingProvider`) overrides this for a real speed win on `/index-folder` with many
+    /// files, and nothing else in the crate needs to know the difference (`persistence.rs` always
+    /// calls this, never loops over `embed` itself).
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        texts.iter().map(|text| self.embed(text)).collect()
+    }
+
     /// Identifies the model + output shape a stored embedding was produced with (for example
     /// `"Qwen3-Embedding-0.6B-Q8_0:1024"`). The storage layer keys its reuse cache on this in
     /// addition to content hash: swapping to a different model must never let an old vector from
@@ -117,20 +127,62 @@ impl EmbeddingProvider for LlamaEmbeddingProvider {
             .pointer("/data/0/embedding")
             .and_then(Value::as_array)
             .ok_or_else(|| "embedding response missing data[0].embedding".to_string())?;
-        values
-            .iter()
-            .map(|value| {
-                value
-                    .as_f64()
-                    .map(|number| number as f32)
-                    .ok_or_else(|| "embedding value was not a number".to_string())
-            })
-            .collect()
+        parse_embedding_values(values)
+    }
+
+    /// The OpenAI-compatible `/v1/embeddings` endpoint llama.cpp serves already accepts an array
+    /// `input` and returns one entry per text — this is a real batched request, not `embed`
+    /// called in a loop. Each response entry carries its own `index`; entries are placed back by
+    /// that index rather than by array position, since the server is not documented to guarantee
+    /// response order matches request order.
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let response = self.request(serde_json::json!({ "input": texts }))?;
+        let data = response
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "embedding batch response missing data[]".to_string())?;
+        if data.len() != texts.len() {
+            return Err(format!(
+                "embedding batch response had {} entries, expected {}",
+                data.len(),
+                texts.len()
+            ));
+        }
+        let mut indexed = Vec::with_capacity(data.len());
+        for entry in data {
+            let index = entry
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "embedding batch entry missing index".to_string())?
+                as usize;
+            let values = entry
+                .get("embedding")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "embedding batch entry missing embedding".to_string())?;
+            indexed.push((index, parse_embedding_values(values)?));
+        }
+        indexed.sort_by_key(|(index, _)| *index);
+        Ok(indexed.into_iter().map(|(_, vector)| vector).collect())
     }
 
     fn embedding_model_id(&self) -> &str {
         &self.model_label
     }
+}
+
+fn parse_embedding_values(values: &[Value]) -> Result<Vec<f32>, String> {
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .map(|number| number as f32)
+                .ok_or_else(|| "embedding value was not a number".to_string())
+        })
+        .collect()
 }
 
 /// Cosine similarity between two equal-length vectors, in `[-1, 1]`. Returns `0.0` for a
