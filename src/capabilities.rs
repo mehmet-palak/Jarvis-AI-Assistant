@@ -51,6 +51,15 @@ impl CapabilityRegistry {
     pub(crate) fn get_mut(&mut self, capability: &str) -> Option<&mut CapabilityManifest> {
         self.manifests.get_mut(capability)
     }
+
+    /// Crate-internal test hook: every currently-registered manifest, for a policy invariant
+    /// that must hold across the whole baseline (F3 "Untrusted-content isolation: ... data
+    /// exfiltration denemeleri reddedilir" — no capability requires network access) without
+    /// hardcoding the capability ID list a second time next to `baseline()`.
+    #[cfg(test)]
+    pub(crate) fn all(&self) -> impl Iterator<Item = &CapabilityManifest> {
+        self.manifests.values()
+    }
 }
 
 pub fn capability_manifest(capability: &str) -> Option<CapabilityManifest> {
