@@ -370,6 +370,12 @@ Bu turda kanıtlanan alt dilim:
 
 Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak gösteren cevap alabilir ve saklanan tüm kişisel veriyi görüntüleyip silebilir.
 
+**F3 sonrası düzeltmeler (16 Ağustos 2026, kullanıcı bildirdi):**
+
+- [x] **Bellek güncelleme hatası**: aynı `(namespace, key)` ile tekrar `/remember` yazmak eskisinin üzerine yazmak yerine ikinci bir kayıt daha ekliyordu — `memory_id`, değer + kaynak + nanosaniye nonce'undan türetiliyordu, yani aynı anahtar bile her seferinde "yeni" sayılıyordu. Gerçek bir şişme riskiydi; daha kötüsü, eski ve yeni değer ikisi de geçerliyse ikisi de birden modele gidebiliyordu.
+  - Düzeltme: `propose_memory` artık `memory_id`'yi yalnız `(namespace, key)`'den türetiyor — aynı anahtar her zaman aynı kimliğe çözülüyor, bu da zaten var olan `ON CONFLICT(memory_id) DO UPDATE` SQL yolunu (persistence.rs, hiç değişmedi) gerçek bir güncelleme için tetikliyor. `created_at` korunuyor (UPDATE SET listesinde yok), `updated_at` ilerliyor. `proposal_id` (bekleyen öneri takibi) ayrı kaldı, hâlâ değer/zaman bazlı.
+  - Kanıt: yeni test `remembering_the_same_key_again_updates_the_existing_record_instead_of_duplicating_it` — aynı anahtara iki farklı değerle `/remember`, tek kayıt kaldığını, eski değerin hiçbir yerde (ne `list_memory()` ne `retrieve_memory()`) görünmediğini kanıtlıyor. Var olan bir test (`memory_export_then_import_...`) eski (hatalı) davranışı doğruluyordu, yeni doğru davranışı yansıtacak şekilde güncellendi. Tam paket: `cargo fmt`, `cargo test --offline` (140 lib + 30 main + 6 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
+
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
 Durum: BEKLENİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; F4 işi henüz başlamadı.

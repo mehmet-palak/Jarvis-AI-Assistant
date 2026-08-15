@@ -415,22 +415,26 @@ pub fn propose_memory(
     let value = value.into();
     let source = source.into();
     let created_at = now_epoch();
+    // `memory_id` is the record's stable identity: `(namespace, key)` only — never the value,
+    // source or a timestamp. This is what makes remembering the same key again an *update*
+    // (`commit_memory_proposal`'s `ON CONFLICT(memory_id) DO UPDATE` in `src/persistence.rs`
+    // then matches the existing row) instead of silently inserting a duplicate every time the
+    // value changes. `created_at` is deliberately excluded from that SQL's `DO UPDATE SET` list,
+    // so an update still keeps the record's original creation time; only `updated_at` moves.
+    let memory_identity = format!("memory-v1|{}|{}", namespace.as_str(), key);
+    let memory_id = format!("memory-{}", &sha256_hex(&memory_identity)[..16]);
+    // `proposal_id` identifies *this specific proposed write* (so a UI's "is my pending proposal
+    // still the one I showed the user" check never collides across two different proposals for
+    // the same key) — it still varies by value/source/time, unlike `memory_id` above.
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let identity = format!(
-        "memory-v1|{}|{}|{}|{}|{}",
-        namespace.as_str(),
-        key,
-        value,
-        source,
-        nonce
-    );
-    let identity_hash = sha256_hex(&identity);
+    let proposal_identity = format!("memory-proposal-v1|{memory_id}|{value}|{source}|{nonce}");
+    let proposal_id = format!("memory-proposal-{}", &sha256_hex(&proposal_identity)[..16]);
     let record = MemoryRecord {
         schema_version: 1,
-        memory_id: format!("memory-{}", &identity_hash[..16]),
+        memory_id,
         namespace,
         key,
         value,
@@ -443,7 +447,7 @@ pub fn propose_memory(
     };
     validate_memory_record(&record)?;
     Ok(MemoryProposal {
-        proposal_id: format!("memory-proposal-{}", &identity_hash[16..32]),
+        proposal_id,
         record,
     })
 }
@@ -2333,6 +2337,71 @@ mod tests {
         assert_eq!(runtime.store.as_ref().unwrap().memory_count().unwrap(), 0);
     }
 
+    /// Real bug found and fixed 2026-08-16: remembering the same `(namespace, key)` again used to
+    /// insert a second row instead of updating the first (old `memory_id` was derived from
+    /// value+source+a nanosecond nonce, so it was different every time even for an identical
+    /// key) — repeated `/remember` on the same key silently duplicated instead of overwriting,
+    /// and a stale value could still be valid and reach the model alongside the new one. Fixed by
+    /// deriving `memory_id` from `(namespace, key)` alone.
+    #[test]
+    fn remembering_the_same_key_again_updates_the_existing_record_instead_of_duplicating_it() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let first = propose_memory(
+            MemoryNamespace::UserProfile,
+            "isim",
+            "Mehmet",
+            DataSensitivity::Internal,
+            "user-command",
+            true,
+            None,
+        )
+        .expect("first proposal");
+        let first_saved = runtime
+            .commit_memory_proposal(&first, true)
+            .expect("first commit persists");
+        assert_eq!(runtime.store.as_ref().unwrap().memory_count().unwrap(), 1);
+
+        let second = propose_memory(
+            MemoryNamespace::UserProfile,
+            "isim",
+            "Ali",
+            DataSensitivity::Internal,
+            "user-command",
+            true,
+            None,
+        )
+        .expect("second proposal for the same key");
+        assert_eq!(
+            second.record.memory_id, first_saved.memory_id,
+            "same namespace+key must resolve to the same stable identity"
+        );
+        let second_saved = runtime
+            .commit_memory_proposal(&second, true)
+            .expect("second commit updates the same record");
+
+        // Still exactly one row — not two.
+        assert_eq!(runtime.store.as_ref().unwrap().memory_count().unwrap(), 1);
+        let all = runtime.list_memory().expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].value, "Ali", "the old value must actually be gone");
+        assert_eq!(all[0].memory_id, first_saved.memory_id);
+        // created_at is preserved across the update (this is still the same logical record);
+        // updated_at moves forward to reflect the real edit.
+        assert_eq!(second_saved.created_at, first_saved.created_at);
+        assert!(second_saved.updated_at >= first_saved.updated_at);
+
+        // The stale value must never still be retrievable alongside the new one.
+        let retrieved = runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .retrieve_memory(&[MemoryNamespace::UserProfile], 8)
+            .expect("retrieval succeeds");
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].value, "Ali");
+    }
+
     #[test]
     fn expired_or_context_disabled_memory_is_not_given_to_the_model() {
         let store = SqliteStore::in_memory().expect("sqlite schema");
@@ -2666,8 +2735,11 @@ mod tests {
     }
 
     /// F3 "Memory migration/backup ... export/import": a round trip must reproduce every field
-    /// that matters (namespace/key/value/sensitivity/model-context/expiry), and never leak the
-    /// original `memory_id`/`source` as if they were meant to be restored verbatim.
+    /// that matters (namespace/key/value/sensitivity/model-context/expiry), and the export format
+    /// itself never carries the original `memory_id`/`source` as literal data to restore. The
+    /// *recomputed* `memory_id` (namespace+key are a stable identity, see `propose_memory`) still
+    /// matches the original — that is what makes re-importing the same key an update, not a
+    /// duplicate, exactly like re-running `/remember` on an already-remembered key.
     #[test]
     fn memory_export_then_import_round_trips_every_field_except_id_and_source() {
         let store = SqliteStore::in_memory().expect("sqlite schema");
@@ -2701,7 +2773,11 @@ mod tests {
         assert!(!imported.include_in_model_context);
         assert_eq!(imported.expires_at, proposal.record.expires_at);
         assert_eq!(imported.source, "memory-import");
-        assert_ne!(imported.memory_id, proposal.record.memory_id);
+        assert_eq!(
+            imported.memory_id, proposal.record.memory_id,
+            "same namespace+key must resolve to the same stable identity so re-import updates \
+             the existing record instead of duplicating it"
+        );
     }
 
     /// A malformed entry must not abort the whole import; the caller decides what to do with the
