@@ -222,6 +222,11 @@ impl Runtime {
                 // All five namespaces are eligible; `retrieve_memory` already excludes expired
                 // rows (`expires_at IS NULL OR expires_at > now`), so an expired Session or
                 // EphemeralToolOutput record never reaches the model as if it were still current.
+                // `task_scope: None` — an ordinary conversational turn is not "about" any one
+                // task, so `Task` namespace records are excluded entirely here (kullanıcının
+                // "concurrent task'lar birbirinin context'ini kirletmesin" kuralı): a specific
+                // task's memory only ever reaches the model through
+                // `Runtime::task_scoped_memory_context`, scoped to exactly that task_id.
                 store
                     .retrieve_memory(
                         &[
@@ -231,8 +236,26 @@ impl Runtime {
                             MemoryNamespace::Session,
                             MemoryNamespace::EphemeralToolOutput,
                         ],
+                        None,
                         8,
                     )
+                    .ok()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Kullanıcının "concurrent task'lar birbirinin context'ini kirletmesin" kuralının doğrudan
+    /// uygulama noktası: yalnız `task_id`'ye taahhüt edilmiş `Task` namespace kayıtlarını döner —
+    /// başka hiçbir task'ın kaydı asla karışmaz. Sıradan sohbet bağlamı (`approved_memory_context`)
+    /// bunu hiç çağırmaz; bu yalnız belirli bir task'ın gerçekten aktif olarak takip edildiği bir
+    /// akışta kullanılmak üzere var (henüz hiçbir üretim çağrı noktası yok — F3 sonrası şema/API
+    /// hazırlığı, bkz. `MemoryRecord::scope_id`).
+    pub fn task_scoped_memory_context(&self, task_id: &str) -> Vec<MemoryRecord> {
+        self.store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .retrieve_memory(&[MemoryNamespace::Task], Some(task_id), 8)
                     .ok()
             })
             .unwrap_or_default()

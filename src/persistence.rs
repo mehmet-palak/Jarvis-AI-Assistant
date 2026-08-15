@@ -22,8 +22,8 @@ use crate::{
     validate_memory_record, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     EmbeddingProvider, MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample,
-    WorkspaceCitation, WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
-    MIN_RELEVANT_SIMILARITY,
+    TrustLevel, WorkspaceCitation, WorkspaceIngestionReport,
+    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -48,7 +48,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -176,6 +176,14 @@ impl SqliteStore {
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS secrets (
+                secret_id TEXT PRIMARY KEY,
+                secret_key TEXT NOT NULL,
+                secret_value TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -193,6 +201,12 @@ impl SqliteStore {
             "sensitivity",
             "TEXT NOT NULL DEFAULT 'INTERNAL'",
         )?;
+        self.ensure_column(
+            "memories",
+            "trust_level",
+            "TEXT NOT NULL DEFAULT 'USER_ASSERTED'",
+        )?;
+        self.ensure_column("memories", "scope_id", "TEXT")?;
         self.backfill_legacy_audit_chain()?;
         if self.repair_concurrent_audit_chain()? {
             self.append_audit_chain(
@@ -234,6 +248,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (9, 'workspace document sensitivity')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (10, 'memory trust_level/scope_id, secret manager')",
             [],
         )?;
         Ok(())
@@ -511,8 +529,9 @@ impl SqliteStore {
             .execute(
                 "INSERT INTO memories(
                     memory_id, schema_version, namespace, memory_key, memory_value, sensitivity,
-                    source, include_in_model_context, created_at, updated_at, expires_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    source, include_in_model_context, created_at, updated_at, expires_at,
+                    trust_level, scope_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(memory_id) DO UPDATE SET
                     memory_key=excluded.memory_key,
                     memory_value=excluded.memory_value,
@@ -520,7 +539,9 @@ impl SqliteStore {
                     source=excluded.source,
                     include_in_model_context=excluded.include_in_model_context,
                     updated_at=excluded.updated_at,
-                    expires_at=excluded.expires_at",
+                    expires_at=excluded.expires_at,
+                    trust_level=excluded.trust_level,
+                    scope_id=excluded.scope_id",
                 params![
                     proposal.record.memory_id,
                     proposal.record.schema_version,
@@ -533,6 +554,8 @@ impl SqliteStore {
                     proposal.record.created_at as i64,
                     now_epoch() as i64,
                     proposal.record.expires_at.map(|value| value as i64),
+                    proposal.record.trust_level.as_str(),
+                    proposal.record.scope_id,
                 ],
             )
             .map_err(|error| format!("memory persistence failed: {error}"))?;
@@ -1173,9 +1196,17 @@ impl SqliteStore {
 
     /// Returns records that are still valid and explicitly opted into model context. This is a
     /// retrieval API, not an implicit prompt mutation: callers decide when to include it.
+    /// `task_scope`: kullanıcının "concurrent task'lar birbirinin context'ini kirletmesin"
+    /// kuralının uygulama noktası. `Task` namespace'i `namespaces` listesindeyse:
+    /// - `task_scope=Some(id)` ise yalnız `scope_id==id` olan `Task` kayıtları döner — başka
+    ///   hiçbir task'ın kaydı asla karışmaz.
+    /// - `task_scope=None` ise `Task` namespace'i **tamamen hariç tutulur** (listede olsa bile) —
+    ///   hangi task'ın bağlamında olduğumuz bilinmiyorsa, hiçbirinin kaydını karıştırmamak tek
+    ///   güvenli varsayılan. Diğer dört namespace bundan etkilenmez.
     pub fn retrieve_memory(
         &self,
         namespaces: &[MemoryNamespace],
+        task_scope: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, String> {
         if namespaces.is_empty() || limit == 0 {
@@ -1188,7 +1219,7 @@ impl SqliteStore {
                 .prepare(
                     "SELECT memory_id, schema_version, namespace, memory_key, memory_value,
                             sensitivity, source, include_in_model_context, created_at, updated_at,
-                            expires_at
+                            expires_at, trust_level, scope_id
                      FROM memories
                      WHERE include_in_model_context=1
                        AND (expires_at IS NULL OR expires_at > ?1)
@@ -1209,6 +1240,8 @@ impl SqliteStore {
                         row.get::<_, i64>(8)? as u64,
                         row.get::<_, i64>(9)? as u64,
                         row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+                        row.get::<_, String>(11)?,
+                        row.get::<_, Option<String>>(12)?,
                     ))
                 })
                 .map_err(|error| format!("memory retrieval query failed: {error}"))?;
@@ -1231,9 +1264,14 @@ impl SqliteStore {
                     created_at,
                     updated_at,
                     expires_at,
+                    trust_level,
+                    scope_id,
                 )| {
                     let namespace = MemoryNamespace::from_str(&namespace).ok()?;
                     if !namespaces.contains(&namespace) {
+                        return None;
+                    }
+                    if namespace == MemoryNamespace::Task && scope_id.as_deref() != task_scope {
                         return None;
                     }
                     let sensitivity = DataSensitivity::from_str(&sensitivity).ok()?;
@@ -1249,6 +1287,8 @@ impl SqliteStore {
                         created_at,
                         updated_at,
                         expires_at,
+                        trust_level: TrustLevel::from_str(&trust_level),
+                        scope_id,
                     })
                 },
             )
@@ -1266,7 +1306,7 @@ impl SqliteStore {
                 .prepare(
                     "SELECT memory_id, schema_version, namespace, memory_key, memory_value,
                             sensitivity, source, include_in_model_context, created_at, updated_at,
-                            expires_at
+                            expires_at, trust_level, scope_id
                      FROM memories ORDER BY updated_at DESC, memory_id ASC",
                 )
                 .map_err(|error| format!("memory list setup failed: {error}"))?;
@@ -1284,6 +1324,8 @@ impl SqliteStore {
                         row.get::<_, i64>(8)? as u64,
                         row.get::<_, i64>(9)? as u64,
                         row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+                        row.get::<_, String>(11)?,
+                        row.get::<_, Option<String>>(12)?,
                     ))
                 })
                 .map_err(|error| format!("memory list query failed: {error}"))?;
@@ -1305,6 +1347,8 @@ impl SqliteStore {
                     created_at,
                     updated_at,
                     expires_at,
+                    trust_level,
+                    scope_id,
                 )| {
                     Ok(MemoryRecord {
                         schema_version,
@@ -1318,6 +1362,8 @@ impl SqliteStore {
                         created_at,
                         updated_at,
                         expires_at,
+                        trust_level: TrustLevel::from_str(&trust_level),
+                        scope_id,
                     })
                 },
             )

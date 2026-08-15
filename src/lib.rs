@@ -383,6 +383,43 @@ pub fn parse_memory_namespace(input: &str) -> Option<MemoryNamespace> {
     None
 }
 
+/// Kullanıcının katmanlı bellek tasarımının "her kayıtta mümkünse provenance/trust level/scope/
+/// sensitivity metadata'sı olsun" kuralının karşılığı. `source` zaten provenance'ı taşıyordu;
+/// `trust_level` bu kuralın eksik parçasıydı — bugüne kadar tek bir güven seviyesi vardı (açık
+/// kullanıcı komutu), bu yüzden görünmüyordu. Şimdilik yalnız gerçekten ayırt edilebilir iki
+/// seviye var; yeni bir seviye (örn. bir belgeden çıkarılmış ama henüz onaylanmamış bir öneri)
+/// gerçek bir üretici olmadan eklenmedi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustLevel {
+    /// Kullanıcı bu değeri doğrudan bu oturumda yazdı/onayladı (`/remember`, doğal dil bellek
+    /// komutları, `/profile set`). Bu alan eklenmeden önce var olan **tek** seviyeydi; her iki
+    /// doğrudan yazma yolu da hâlâ bunu üretiyor.
+    UserAsserted,
+    /// `/memory import` ile geldi — yine yalnız açık bir kullanıcı komutuyla erişilebilir (import
+    /// asla otomatik değildir), ama kaydın nihai kökeni (kullanıcının sağladığı bir JSON dosyası)
+    /// "kullanıcı bu değeri az önce JARVIS'e yazdı"dan bir adım uzakta.
+    Imported,
+}
+
+impl TrustLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserAsserted => "USER_ASSERTED",
+            Self::Imported => "IMPORTED",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "IMPORTED" => Self::Imported,
+            // Bilinmeyen/eski (bu alan eklenmeden önce yazılmış) satırlar orijinal (tek) seviyeye
+            // düşer — bu, o satırların gerçek kökenini yanlış yansıtmaz, çünkü hepsi zaten
+            // `UserAsserted` idi.
+            _ => Self::UserAsserted,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRecord {
     pub schema_version: u16,
@@ -396,6 +433,14 @@ pub struct MemoryRecord {
     pub created_at: u64,
     pub updated_at: u64,
     pub expires_at: Option<u64>,
+    pub trust_level: TrustLevel,
+    /// Kullanıcının "concurrent task'lar birbirinin context'ini kirletmesin" kuralının karşılığı.
+    /// Yalnız `MemoryNamespace::Task` için anlamlıdır — o zaman bu, kaydın ait olduğu tam task_id.
+    /// `None` (diğer tüm namespace'ler için, ya da eski satırlar için) "bu kayıt belirli bir
+    /// task'a taahhüt edilmemiş" demektir. Bkz. `Runtime::task_scoped_memory_context` — normal
+    /// sohbet bağlamı artık `Task` namespace'ini hiç çekmiyor, yalnız bu fonksiyon, açıkça bir
+    /// `task_id` verilerek, yalnız o task'ın kayıtlarını döner.
+    pub scope_id: Option<String>,
 }
 
 /// A pending memory write. Creating one has no persistent side effect; it exists so the UI can
@@ -415,17 +460,49 @@ pub fn propose_memory(
     include_in_model_context: bool,
     expires_at: Option<u64>,
 ) -> Result<MemoryProposal, String> {
+    propose_memory_with_trust_and_scope(
+        namespace,
+        key,
+        value,
+        sensitivity,
+        source,
+        include_in_model_context,
+        expires_at,
+        TrustLevel::UserAsserted,
+        None,
+    )
+}
+
+/// Same as `propose_memory`, with an explicit `trust_level` and (for `MemoryNamespace::Task`
+/// records) a `scope_id` — the task_id this record is committed to. `propose_memory` itself stays
+/// untouched (still every existing call site's exact signature) and simply calls this with
+/// `(TrustLevel::UserAsserted, None)`, its own original, only-ever-existing behavior.
+#[allow(clippy::too_many_arguments)]
+pub fn propose_memory_with_trust_and_scope(
+    namespace: MemoryNamespace,
+    key: impl Into<String>,
+    value: impl Into<String>,
+    sensitivity: DataSensitivity,
+    source: impl Into<String>,
+    include_in_model_context: bool,
+    expires_at: Option<u64>,
+    trust_level: TrustLevel,
+    scope_id: Option<String>,
+) -> Result<MemoryProposal, String> {
     let key = key.into();
     let value = value.into();
     let source = source.into();
     let created_at = now_epoch();
-    // `memory_id` is the record's stable identity: `(namespace, key)` only — never the value,
-    // source or a timestamp. This is what makes remembering the same key again an *update*
-    // (`commit_memory_proposal`'s `ON CONFLICT(memory_id) DO UPDATE` in `src/persistence.rs`
-    // then matches the existing row) instead of silently inserting a duplicate every time the
-    // value changes. `created_at` is deliberately excluded from that SQL's `DO UPDATE SET` list,
-    // so an update still keeps the record's original creation time; only `updated_at` moves.
-    let memory_identity = format!("memory-v1|{}|{}", namespace.as_str(), key);
+    // `memory_id` is the record's stable identity: `(namespace, key)` normally — never the
+    // value, source or a timestamp. A `scope_id` (Task-namespace records) is folded in too, so
+    // two different tasks writing the same key never collide into one row — this is the whole
+    // point of task-scoped memory; without it, task B's "karar" would silently overwrite task
+    // A's. When `scope_id` is `None` the formula is byte-for-byte the original one, so every
+    // record written before this field existed keeps the exact same `memory_id` it always had.
+    let memory_identity = match &scope_id {
+        Some(scope) => format!("memory-v1|{}|{}|{}", namespace.as_str(), scope, key),
+        None => format!("memory-v1|{}|{}", namespace.as_str(), key),
+    };
     let memory_id = format!("memory-{}", &sha256_hex(&memory_identity)[..16]);
     // `proposal_id` identifies *this specific proposed write* (so a UI's "is my pending proposal
     // still the one I showed the user" check never collides across two different proposals for
@@ -448,6 +525,8 @@ pub fn propose_memory(
         created_at,
         updated_at: created_at,
         expires_at,
+        trust_level,
+        scope_id,
     };
     validate_memory_record(&record)?;
     Ok(MemoryProposal {
@@ -485,6 +564,28 @@ pub fn validate_memory_record(record: &MemoryRecord) -> Result<(), String> {
         }
         _ => {}
     }
+    match &record.scope_id {
+        Some(scope_id) => {
+            if scope_id.trim().is_empty() || scope_id.chars().count() > 120 {
+                return Err("memory scope_id must be non-empty and within its safety limit".into());
+            }
+            if record.namespace != MemoryNamespace::Task {
+                return Err(format!(
+                    "scope_id is only meaningful for {} memory, not {}",
+                    MemoryNamespace::Task.as_str(),
+                    record.namespace.as_str()
+                ));
+            }
+        }
+        // Mirrors `requires_expiry()`'s structural constraint (Session/EphemeralToolOutput):
+        // a `Task` record with no `scope_id` would be an orphan — nothing to isolate it from
+        // other tasks, defeating the entire point of the namespace. Not just a convention, this
+        // is enforced the same way an unbounded Session record is refused.
+        None if record.namespace == MemoryNamespace::Task => {
+            return Err("Task memory requires a scope_id (the task_id it belongs to)".into());
+        }
+        None => {}
+    }
     Ok(())
 }
 
@@ -518,6 +619,7 @@ pub fn memory_export(records: &[MemoryRecord]) -> Result<String, String> {
                 "sensitivity": record.sensitivity.as_str(),
                 "include_in_model_context": record.include_in_model_context,
                 "expires_at": record.expires_at,
+                "scope_id": record.scope_id,
             })
         })
         .collect::<Vec<_>>();
@@ -574,7 +676,19 @@ pub fn memory_import(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let expires_at = entry.get("expires_at").and_then(serde_json::Value::as_u64);
-            propose_memory(
+            // `Task` alanı için isteğe bağlı `scope_id`: önceden dışa aktarılmış bir Task kaydı
+            // geri içe aktarılırken hangi task'a ait olduğunu korur. Eksikse ve namespace `Task`
+            // ise `validate_memory_record` zaten reddedecek (task_id'siz bir Task kaydı yapısal
+            // olarak geçersiz) — bu, o girdiyi sessizce yok saymak yerine `skipped` listesine
+            // düşürür.
+            let scope_id = entry
+                .get("scope_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            // Kullanıcının "her kayıtta mümkünse trust level" kuralı: import her zaman
+            // `Imported` — kaydın nihai kökeni kullanıcının sağladığı bir JSON dosyası, "kullanıcı
+            // bunu az önce JARVIS'e yazdı"dan bir adım uzakta.
+            propose_memory_with_trust_and_scope(
                 namespace,
                 key,
                 value,
@@ -582,6 +696,8 @@ pub fn memory_import(
                 source.clone(),
                 include_in_model_context,
                 expires_at,
+                TrustLevel::Imported,
+                scope_id,
             )
         })();
         match parsed {
@@ -2023,7 +2139,7 @@ mod tests {
         let example = verified_teacher_example("example-1");
         store.append_teacher_example(&example, &registry).unwrap();
         assert_eq!(store.teacher_example_count().unwrap(), 1);
-        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(store.schema_version().unwrap(), 10);
     }
 
     #[test]
@@ -2333,7 +2449,7 @@ mod tests {
             .store
             .as_ref()
             .unwrap()
-            .retrieve_memory(&[MemoryNamespace::UserProfile], 8)
+            .retrieve_memory(&[MemoryNamespace::UserProfile], None, 8)
             .expect("retrieval succeeds");
         assert_eq!(retrieved, vec![saved.clone()]);
         assert!(isolate_memory_as_data(&saved).contains("memory-data"));
@@ -2400,7 +2516,7 @@ mod tests {
             .store
             .as_ref()
             .unwrap()
-            .retrieve_memory(&[MemoryNamespace::UserProfile], 8)
+            .retrieve_memory(&[MemoryNamespace::UserProfile], None, 8)
             .expect("retrieval succeeds");
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].value, "Ali");
@@ -2442,6 +2558,8 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             expires_at: Some(2),
+            trust_level: TrustLevel::UserAsserted,
+            scope_id: None,
         };
         let proposal = MemoryProposal {
             proposal_id: "expired-proposal".into(),
@@ -2580,12 +2698,18 @@ mod tests {
             );
             assert!(with_expiry.is_ok(), "an explicit expiry must be accepted");
         }
-        for durable_namespace in [
-            MemoryNamespace::UserProfile,
-            MemoryNamespace::Project,
-            MemoryNamespace::Task,
+        for (durable_namespace, scope_id) in [
+            (MemoryNamespace::UserProfile, None),
+            (MemoryNamespace::Project, None),
+            // `Task` also requires a `scope_id` (a separate, orthogonal constraint from
+            // durability) — supplying one here isolates this assertion to exactly what it is
+            // meant to test: that `Task` still needs no *expiry*, unlike Session/EphemeralToolOutput.
+            (
+                MemoryNamespace::Task,
+                Some("task-durability-test".to_string()),
+            ),
         ] {
-            let without_expiry = propose_memory(
+            let without_expiry = propose_memory_with_trust_and_scope(
                 durable_namespace,
                 "fact",
                 "value",
@@ -2593,6 +2717,8 @@ mod tests {
                 "test",
                 false,
                 None,
+                TrustLevel::UserAsserted,
+                scope_id,
             );
             assert!(
                 without_expiry.is_ok(),
@@ -2648,12 +2774,16 @@ mod tests {
     fn forget_all_memory_actually_empties_storage() {
         let store = SqliteStore::in_memory().expect("sqlite schema");
         let mut runtime = Runtime::with_store(store);
-        for (namespace, key) in [
-            (MemoryNamespace::UserProfile, "ad"),
-            (MemoryNamespace::Project, "proje-notu"),
-            (MemoryNamespace::Task, "gorev-notu"),
+        for (namespace, key, scope_id) in [
+            (MemoryNamespace::UserProfile, "ad", None),
+            (MemoryNamespace::Project, "proje-notu", None),
+            (
+                MemoryNamespace::Task,
+                "gorev-notu",
+                Some("task-test".to_string()),
+            ),
         ] {
-            let proposal = propose_memory(
+            let proposal = propose_memory_with_trust_and_scope(
                 namespace,
                 key,
                 "deger",
@@ -2661,6 +2791,8 @@ mod tests {
                 "test",
                 true,
                 None,
+                TrustLevel::UserAsserted,
+                scope_id,
             )
             .expect("valid proposal");
             runtime
@@ -2782,6 +2914,83 @@ mod tests {
             "same namespace+key must resolve to the same stable identity so re-import updates \
              the existing record instead of duplicating it"
         );
+    }
+
+    /// Kullanıcının katmanlı bellek tasarımı kuralı: "her kayıtta mümkünse provenance/trust
+    /// level/scope/sensitivity metadata'sı var." `trust_level` bu kuralın önceden eksik olan
+    /// parçasıydı — doğrudan yazma (`/remember`, doğal dil) `UserAsserted`, `/memory import`
+    /// `Imported` üretmeli.
+    #[test]
+    fn trust_level_distinguishes_direct_writes_from_imports() {
+        let direct = propose_memory(
+            MemoryNamespace::UserProfile,
+            "ad",
+            "Ali",
+            DataSensitivity::Internal,
+            "tui-user-approved-profile",
+            true,
+            None,
+        )
+        .expect("valid proposal");
+        assert_eq!(direct.record.trust_level, TrustLevel::UserAsserted);
+
+        let exported = memory_export(&[direct.record]).expect("exports");
+        let (proposals, _) = memory_import("memory-import", &exported).expect("import parses");
+        assert_eq!(proposals[0].record.trust_level, TrustLevel::Imported);
+    }
+
+    /// Kullanıcının kuralı: "concurrent task'lar birbirinin context'ini kirletmesin diye
+    /// task-scoped context mümkün olduğunca izole tutuluyor." İki farklı task'ın aynı anahtarlı
+    /// Task belleği asla karışmamalı — ne birbirine, ne de sıradan (task'a özel olmayan) sohbet
+    /// bağlamına.
+    #[test]
+    fn task_scoped_memory_isolates_concurrent_tasks_from_each_other_and_from_ordinary_context() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        for (task_id, decision) in [("task-a", "kutuphane-x"), ("task-b", "kutuphane-y")] {
+            let proposal = propose_memory_with_trust_and_scope(
+                MemoryNamespace::Task,
+                "karar",
+                decision,
+                DataSensitivity::Internal,
+                "test",
+                true,
+                None,
+                TrustLevel::UserAsserted,
+                Some(task_id.to_string()),
+            )
+            .expect("valid task-scoped proposal");
+            runtime
+                .commit_memory_proposal(&proposal, true)
+                .expect("record persists");
+        }
+
+        // Aynı anahtar ("karar") iki farklı task'ta — scope_id memory_id'ye karıştığı için iki
+        // ayrı kayıt olarak kalmalı, biri diğerini ezmemeli.
+        assert_eq!(runtime.list_memory().expect("list").len(), 2);
+
+        let task_a_context = runtime.task_scoped_memory_context("task-a");
+        assert_eq!(task_a_context.len(), 1);
+        assert_eq!(task_a_context[0].value, "kutuphane-x");
+
+        let task_b_context = runtime.task_scoped_memory_context("task-b");
+        assert_eq!(task_b_context.len(), 1);
+        assert_eq!(task_b_context[0].value, "kutuphane-y");
+
+        // Var olmayan/ilgisiz bir task için hiçbir kayıt sızmamalı.
+        assert!(runtime.task_scoped_memory_context("task-c").is_empty());
+
+        // Sıradan (task'a özel olmayan) bir sohbet turu Task belleğinden hiçbirini görmemeli —
+        // gerçek bir konuşma turu üzerinden uçtan uca kanıt.
+        let provider = ContextCapturingProvider::default();
+        runtime.handle_with_provider(request("task-scope-1", "karar nedir"), &provider);
+        let messages = provider.messages.lock().expect("test lock");
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("kutuphane-x")));
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("kutuphane-y")));
     }
 
     /// A malformed entry must not abort the whole import; the caller decides what to do with the
@@ -4495,7 +4704,7 @@ mod tests {
         let store = runtime.store.as_ref().expect("store attached");
         assert_eq!(store.task_count().unwrap(), 1);
         assert_eq!(store.audit_count().unwrap(), 5);
-        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(store.schema_version().unwrap(), 10);
         assert!(store.audit_chain_is_valid().unwrap());
     }
 

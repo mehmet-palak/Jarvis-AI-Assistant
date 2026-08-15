@@ -231,7 +231,7 @@ pub fn profile_manifest(snapshot: &ProfileSnapshot) -> Result<String, String> {
 #[cfg(test)]
 mod manifest_and_reset_tests {
     use super::*;
-    use crate::DataSensitivity;
+    use crate::{DataSensitivity, TrustLevel};
 
     fn record(key: &str, value: &str, namespace: MemoryNamespace, updated_at: u64) -> MemoryRecord {
         MemoryRecord {
@@ -246,6 +246,8 @@ mod manifest_and_reset_tests {
             created_at: updated_at,
             updated_at,
             expires_at: None,
+            trust_level: TrustLevel::UserAsserted,
+            scope_id: None,
         }
     }
 
@@ -288,7 +290,7 @@ mod manifest_and_reset_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DataSensitivity;
+    use crate::{DataSensitivity, TrustLevel};
 
     fn record(key: &str, value: &str, namespace: MemoryNamespace, updated_at: u64) -> MemoryRecord {
         MemoryRecord {
@@ -303,6 +305,8 @@ mod tests {
             created_at: updated_at,
             updated_at,
             expires_at: None,
+            trust_level: TrustLevel::UserAsserted,
+            scope_id: None,
         }
     }
 
