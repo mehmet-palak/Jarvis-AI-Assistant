@@ -2023,7 +2023,7 @@ mod tests {
         let example = verified_teacher_example("example-1");
         store.append_teacher_example(&example, &registry).unwrap();
         assert_eq!(store.teacher_example_count().unwrap(), 1);
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
     }
 
     #[test]
@@ -3585,6 +3585,116 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// F3 post-close "retrieval öncesi permission/sensitivity filtresi" (GPT önerisi 1/7): a
+    /// document indexed as `Sensitive` must never come back from ordinary retrieval, even though
+    /// it FTS-matches — end to end through a real conversation turn's citations, not just the raw
+    /// store query.
+    #[test]
+    fn sensitive_workspace_document_is_excluded_from_conversation_citations() {
+        let root = temporary_workspace("sensitivity-filter");
+        fs::write(
+            root.join("gizli.md"),
+            "safir-projesi hakkında hassas finansal detaylar",
+        )
+        .expect("sensitive fixture");
+        fs::write(
+            root.join("genel.md"),
+            "safir-projesi hakkında genel, herkese açık bir özet",
+        )
+        .expect("ordinary fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .index_workspace_document_with_sensitivity(
+                &root,
+                Path::new("gizli.md"),
+                DataSensitivity::Sensitive,
+                true,
+            )
+            .expect("sensitive document still indexes");
+        runtime
+            .index_workspace_document(&root, Path::new("genel.md"), true)
+            .expect("ordinary document indexes");
+
+        // Direct store query — the enforcement point itself.
+        let results = runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .hybrid_search_workspace("safir-projesi", None, 4)
+            .expect("search succeeds");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].canonical_path.ends_with("genel.md"));
+
+        // End to end: a real conversation turn's citations must not include it either.
+        let provider = ContextCapturingProvider::default();
+        let (_, result, _) = runtime.handle_with_provider(
+            request(
+                "sensitivity-filter-1",
+                "safir-projesi hakkında ne biliyorsun?",
+            ),
+            &provider,
+        );
+        assert!(result
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("genel.md")));
+        assert!(!result
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("gizli.md")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Re-indexing with a different sensitivity level, content unchanged, must still update the
+    /// stored level — promoting/demoting sensitivity must not require an unrelated content edit.
+    #[test]
+    fn reindexing_updates_sensitivity_even_when_content_is_unchanged() {
+        let root = temporary_workspace("sensitivity-update");
+        fs::write(root.join("notlar.md"), "topaz-notu değişmeyen içerik").expect("fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .index_workspace_document(&root, Path::new("notlar.md"), true)
+            .expect("first index (Internal by default)");
+        assert_eq!(
+            runtime
+                .store
+                .as_ref()
+                .unwrap()
+                .search_workspace("topaz-notu", 4)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let second = runtime
+            .index_workspace_document_with_sensitivity(
+                &root,
+                Path::new("notlar.md"),
+                DataSensitivity::Sensitive,
+                true,
+            )
+            .expect("re-index with a new sensitivity level, same content");
+        assert!(
+            !second.content_changed,
+            "content itself did not change, only the sensitivity level"
+        );
+        assert!(
+            runtime
+                .store
+                .as_ref()
+                .unwrap()
+                .search_workspace("topaz-notu", 4)
+                .unwrap()
+                .is_empty(),
+            "the document must now be excluded after being promoted to Sensitive"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// Senaryo 4/7 — eski indeks: after a document's content changes on disk and it is
     /// re-indexed, retrieval must reflect the new content — the old text must never still be
     /// findable as if the index were unaware of the change.
@@ -4385,7 +4495,7 @@ mod tests {
         let store = runtime.store.as_ref().expect("store attached");
         assert_eq!(store.task_count().unwrap(), 1);
         assert_eq!(store.audit_count().unwrap(), 5);
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
         assert!(store.audit_chain_is_valid().unwrap());
     }
 

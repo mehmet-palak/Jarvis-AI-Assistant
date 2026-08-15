@@ -377,6 +377,25 @@ impl Runtime {
         relative_path: &Path,
         user_approved: bool,
     ) -> Result<WorkspaceIngestionReport, String> {
+        self.index_workspace_document_with_sensitivity(
+            approved_root,
+            relative_path,
+            DataSensitivity::Internal,
+            user_approved,
+        )
+    }
+
+    /// Same as `index_workspace_document`, with an explicit sensitivity level (F3 post-close
+    /// "retrieval öncesi permission/sensitivity filtresi", GPT önerisi 1/7). `Sensitive`
+    /// documents are excluded from ordinary conversational retrieval — see
+    /// `SqliteStore::search_workspace`'s doc comment for exactly where that filter lives.
+    pub fn index_workspace_document_with_sensitivity(
+        &mut self,
+        approved_root: &Path,
+        relative_path: &Path,
+        sensitivity: DataSensitivity,
+        user_approved: bool,
+    ) -> Result<WorkspaceIngestionReport, String> {
         if !user_approved {
             return Err("workspace indexing requires explicit user approval".into());
         }
@@ -384,10 +403,11 @@ impl Runtime {
             .store
             .as_ref()
             .ok_or_else(|| "workspace indexing requires an attached local store".to_string())?;
-        let outcome = store.index_workspace_document_with_embedding(
+        let outcome = store.index_workspace_document_with_embedding_and_sensitivity(
             approved_root,
             relative_path,
             self.embedding_provider.as_deref(),
+            sensitivity,
         );
         // F3 "Secret/hassas filtre: ... filtre loglanır ama sır saklanmaz." A rejection is always
         // audited — the relative path and a fixed reason category, never the file's bytes/text —
@@ -528,13 +548,36 @@ impl Runtime {
         exclude_patterns: &[String],
         user_approved: bool,
     ) -> Result<WorkspaceFolderIndexReport, String> {
+        self.index_workspace_folder_with_sensitivity(
+            approved_root,
+            exclude_patterns,
+            DataSensitivity::Internal,
+            user_approved,
+        )
+    }
+
+    /// Same as `index_workspace_folder`, with every file in the folder indexed at the given
+    /// sensitivity level (F3 post-close "retrieval öncesi permission/sensitivity filtresi", GPT
+    /// önerisi 1/7) — a whole folder ("finans klasörüm") marked `Sensitive` in one command.
+    pub fn index_workspace_folder_with_sensitivity(
+        &mut self,
+        approved_root: &Path,
+        exclude_patterns: &[String],
+        sensitivity: DataSensitivity,
+        user_approved: bool,
+    ) -> Result<WorkspaceFolderIndexReport, String> {
         if !user_approved {
             return Err("workspace folder indexing requires explicit user approval".into());
         }
         let preview = preview_workspace_index(approved_root, exclude_patterns)?;
         let mut report = WorkspaceFolderIndexReport::default();
         for relative_path in preview.included {
-            match self.index_workspace_document(approved_root, &relative_path, true) {
+            match self.index_workspace_document_with_sensitivity(
+                approved_root,
+                &relative_path,
+                sensitivity,
+                true,
+            ) {
                 Ok(ingestion) => report.indexed.push(ingestion),
                 Err(error) => report.failed.push((relative_path, error)),
             }

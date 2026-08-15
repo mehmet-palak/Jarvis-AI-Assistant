@@ -69,9 +69,15 @@ gerçekten sıralamayı değiştirdiği, `Runtime` seviyesinde uçtan uca sohbet
 ChatGPT'den gelen bir gözden geçirmeyle bulunan, gerçek ama bugünün kapsamı dışında bırakılan
 maddeler:
 
-1. **Retrieval öncesi permission/sensitivity filtresi** — şu an her indekslenen belge zaten aynı
-   tek onay seviyesinden geçiyor, ayrı bir hassasiyet katmanı yok; workspace belgelerine
-   `MemoryRecord` gibi bir sensitivity alanı eklenirse yeniden değerlendirilmeli.
+1. ~~**Retrieval öncesi permission/sensitivity filtresi**~~ — 16 Ağustos 2026'da uygulandı:
+   `workspace_documents` artık `MemoryRecord`'daki gibi bir `DataSensitivity` alanı taşıyor
+   (`index_workspace_document_with_embedding_and_sensitivity`, varsayılan `Internal` — mevcut
+   davranış değişmedi). `Sensitive` işaretli belgeler `search_workspace`'te (tek uygulama
+   noktası, `hybrid_search_workspace` de buradan geçiyor) tamamen filtreleniyor — indekslenmiş ve
+   `file.read_workspace` ile doğrudan okunabilir kalıyor, yalnız otomatik sohbet alıntısı olarak
+   asla çıkmıyor. TUI: `/index <dosya> [public|internal|sensitive]`,
+   `/index-folder <klasör> ... [public|internal|sensitive]`. İçerik değişmeden sadece
+   hassasiyet seviyesi değiştirilirse bile (aynı SHA-256) güncelleniyor.
 2. ~~**Semantic-aware chunking**~~ — Markdown kısmı 16 Ağustos 2026'da uygulandı:
    `chunk_workspace_text` artık `.md`/`.markdown` için başlık sınırlarına göre bölüyor (bir bölüm,
    sığdığı sürece başlığıyla birlikte tek chunk — `chunk_markdown_by_heading`), sığmayan bölümler

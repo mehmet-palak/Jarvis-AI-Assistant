@@ -473,6 +473,21 @@ fn tui_exit_action(input: &str) -> Option<TuiExitAction> {
     }
 }
 
+/// `/index <path> [sensitivity]`: if the last whitespace-separated word of `rest` parses as a
+/// known sensitivity word (English or Turkish, `parse_data_sensitivity`), it is split off and
+/// the rest is the path; otherwise the whole input is the path and sensitivity defaults to
+/// `Internal` — a path that legitimately ends in a word like "public" (unlikely, but possible)
+/// only breaks this if it is *also* nothing else on the line, the same ambiguity every trailing-
+/// flag command design accepts.
+fn split_trailing_sensitivity(rest: &str) -> (&str, DataSensitivity) {
+    if let Some((path, last_word)) = rest.trim_end().rsplit_once(char::is_whitespace) {
+        if let Some(sensitivity) = parse_data_sensitivity(last_word) {
+            return (path.trim_end(), sensitivity);
+        }
+    }
+    (rest, DataSensitivity::Internal)
+}
+
 fn apply_history_mouse_scroll(scroll: &mut u16, kind: MouseEventKind) -> bool {
     match kind {
         MouseEventKind::ScrollUp => *scroll = scroll.saturating_add(3),
@@ -1161,16 +1176,26 @@ fn submit(
     if let Some(rest) = input.strip_prefix("/index-folder ").map(str::trim) {
         let mut parts = rest.split_whitespace();
         let Some(folder) = parts.next() else {
-            app.push_system("Kullanım: /index-folder <proje-içi-göreli-klasör> [hariç-desen ...]");
+            app.push_system("Kullanım: /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive]");
             return;
         };
-        let exclude_patterns: Vec<String> = parts.map(str::to_owned).collect();
+        let mut exclude_patterns: Vec<String> = parts.map(str::to_owned).collect();
+        // F3 post-close "retrieval öncesi permission/sensitivity filtresi": an optional trailing
+        // word marks every file in the folder — "finans klasörüm hassas" in one command, not one
+        // per file.
+        let sensitivity = exclude_patterns
+            .last()
+            .and_then(|word| parse_data_sensitivity(word))
+            .inspect(|_| {
+                exclude_patterns.pop();
+            })
+            .unwrap_or(DataSensitivity::Internal);
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let target = root.join(folder);
         match runtime
             .lock()
             .expect("JARVIS runtime lock poisoned")
-            .index_workspace_folder(&target, &exclude_patterns, true)
+            .index_workspace_folder_with_sensitivity(&target, &exclude_patterns, sensitivity, true)
         {
             Ok(report) => {
                 let changed = report
@@ -1197,12 +1222,22 @@ fn submit(
         }
         return;
     }
-    if let Some(relative_path) = input.strip_prefix("/index ").map(str::trim) {
+    if let Some(rest) = input.strip_prefix("/index ").map(str::trim) {
+        // F3 post-close "retrieval öncesi permission/sensitivity filtresi": an optional trailing
+        // word ("hassas"/"sensitive"/...) marks this file so it never surfaces as an automatic
+        // citation in ordinary conversation — omit it and the file indexes at the same default
+        // (Internal) it always has.
+        let (relative_path, sensitivity) = split_trailing_sensitivity(rest);
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         match runtime
             .lock()
             .expect("JARVIS runtime lock poisoned")
-            .index_workspace_document(&root, std::path::Path::new(relative_path), true)
+            .index_workspace_document_with_sensitivity(
+                &root,
+                std::path::Path::new(relative_path),
+                sensitivity,
+                true,
+            )
         {
             Ok(report) if report.content_changed => app.push_system(format!(
                 "Dosya indekslendi: {} • {} parça • SHA-256:{}…\nBu klasöre ait metin artık yalnız ilgili sorularda kaynaklı data olarak kullanılabilir.",
@@ -1397,7 +1432,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>, /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2578,6 +2613,34 @@ mod tests {
         app.input = "/rag verify".into();
         submit(&mut app, &runtime, &provider, &vision, &sender);
         assert!(app.messages.last().unwrap().content.contains("sağlıklı"));
+    }
+
+    /// F3 post-close "retrieval öncesi permission/sensitivity filtresi" (GPT önerisi 1/7): the
+    /// TUI wiring accepts an optional trailing sensitivity word for both `/index` and
+    /// `/index-folder`, without breaking the ordinary (no sensitivity word) case.
+    #[test]
+    fn index_commands_accept_an_optional_trailing_sensitivity_word() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/index Cargo.toml sensitive".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("indekslendi"));
+
+        app.input = "/index-folder docs/adr sensitive".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("dosya indekslendi"));
+
+        let status = runtime.lock().unwrap().rag_status().unwrap();
+        assert!(
+            status.document_count >= 2,
+            "both the single-file and folder index must have actually indexed something"
+        );
     }
 
     #[test]

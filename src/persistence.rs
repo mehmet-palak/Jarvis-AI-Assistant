@@ -48,7 +48,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -188,6 +188,11 @@ impl SqliteStore {
             "index_schema_version",
             "INTEGER NOT NULL DEFAULT 1",
         )?;
+        self.ensure_column(
+            "workspace_documents",
+            "sensitivity",
+            "TEXT NOT NULL DEFAULT 'INTERNAL'",
+        )?;
         self.backfill_legacy_audit_chain()?;
         if self.repair_concurrent_audit_chain()? {
             self.append_audit_chain(
@@ -225,6 +230,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (8, 'persistent chat history')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (9, 'workspace document sensitivity')",
             [],
         )?;
         Ok(())
@@ -558,6 +567,28 @@ impl SqliteStore {
         relative_path: &Path,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<WorkspaceIngestionReport, String> {
+        self.index_workspace_document_with_embedding_and_sensitivity(
+            approved_root,
+            relative_path,
+            embedding_provider,
+            DataSensitivity::Internal,
+        )
+    }
+
+    /// Same as `index_workspace_document_with_embedding`, with an explicit sensitivity level
+    /// stored alongside the document (F3 post-close "retrieval öncesi permission/sensitivity
+    /// filtresi", GPT önerisi 1/7). `Sensitive` documents are excluded from ordinary
+    /// conversational retrieval by `search_workspace` — indexed and still directly readable
+    /// (`file.read_workspace`), just never surfaced as an automatic citation. Defaults to
+    /// `Internal` (unrestricted retrieval) through `index_workspace_document_with_embedding`,
+    /// matching every document indexed before this level existed.
+    pub fn index_workspace_document_with_embedding_and_sensitivity(
+        &self,
+        approved_root: &Path,
+        relative_path: &Path,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
+        sensitivity: DataSensitivity,
+    ) -> Result<WorkspaceIngestionReport, String> {
         let canonical_path = validate_workspace_document_path(approved_root, relative_path)?;
         let metadata = fs::metadata(&canonical_path)
             .map_err(|error| format!("workspace document metadata failed: {error}"))?;
@@ -594,16 +625,27 @@ impl SqliteStore {
         // Incremental re-index: if this exact path is already indexed with byte-for-byte
         // identical extracted content, skip the chunk delete/re-insert churn entirely and report
         // the existing state as unchanged, rather than redoing work indexing didn't need to redo.
-        let existing_state: Option<(String, i64, i64)> = self
+        let existing_state: Option<(String, i64, i64, String)> = self
             .connection
             .query_row(
-                "SELECT content_sha256, indexed_at, index_schema_version FROM workspace_documents WHERE canonical_path=?1",
+                "SELECT content_sha256, indexed_at, index_schema_version, sensitivity FROM workspace_documents WHERE canonical_path=?1",
                 [&canonical_path_text],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .ok();
-        if let Some((existing_sha256, existing_indexed_at, existing_index_schema_version)) =
-            &existing_state
+        if let Some((
+            existing_sha256,
+            existing_indexed_at,
+            existing_index_schema_version,
+            existing_sensitivity,
+        )) = &existing_state
         {
             // A version bump forces re-indexing even for byte-identical content: the *derived*
             // chunks could be stale relative to a changed chunking/extraction algorithm.
@@ -623,6 +665,17 @@ impl SqliteStore {
                         self.backfill_missing_embeddings(provider, &document_id);
                     }
                 }
+                // A re-index can still change the *sensitivity level* alone, without the content
+                // changing — cheap to apply even on this fast path, so promoting/demoting a
+                // document's sensitivity never requires an unrelated content edit to take effect.
+                if existing_sensitivity != sensitivity.as_str() {
+                    self.connection
+                        .execute(
+                            "UPDATE workspace_documents SET sensitivity=?1 WHERE document_id=?2",
+                            params![sensitivity.as_str(), document_id],
+                        )
+                        .map_err(|error| format!("sensitivity update failed: {error}"))?;
+                }
                 return Ok(WorkspaceIngestionReport {
                     schema_version: 1,
                     document_id,
@@ -638,19 +691,21 @@ impl SqliteStore {
         let indexed_at = now_epoch();
         self.connection
             .execute(
-                "INSERT INTO workspace_documents(document_id, canonical_path, content_sha256, indexed_at, index_schema_version)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO workspace_documents(document_id, canonical_path, content_sha256, indexed_at, index_schema_version, sensitivity)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(canonical_path) DO UPDATE SET
                     document_id=excluded.document_id,
                     content_sha256=excluded.content_sha256,
                     indexed_at=excluded.indexed_at,
+                    sensitivity=excluded.sensitivity,
                     index_schema_version=excluded.index_schema_version",
                 params![
                     document_id,
                     canonical_path_text,
                     content_sha256,
                     indexed_at as i64,
-                    i64::from(CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION)
+                    i64::from(CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION),
+                    sensitivity.as_str(),
                 ],
             )
             .map_err(|error| format!("workspace document persistence failed: {error}"))?;
@@ -697,6 +752,13 @@ impl SqliteStore {
         })
     }
 
+    /// F3 post-close "retrieval öncesi permission/sensitivity filtresi" (GPT önerisi 1/7):
+    /// documents indexed as `Sensitive` (see `index_workspace_document_with_embedding_and_sensitivity`)
+    /// never come back from ordinary search — this is the single point every retrieval path goes
+    /// through (`hybrid_search_workspace` calls this for its FTS candidate pool), so the filter
+    /// cannot be bypassed by a different retrieval entry point. The document is still indexed and
+    /// still directly readable (`file.read_workspace`); it just never becomes an automatic
+    /// citation in ordinary conversation.
     pub fn search_workspace(
         &self,
         query: &str,
@@ -715,6 +777,7 @@ impl SqliteStore {
                      FROM workspace_chunks AS chunks
                      JOIN workspace_documents AS documents ON documents.document_id=chunks.document_id
                      WHERE workspace_chunks MATCH ?1
+                       AND documents.sensitivity != 'SENSITIVE'
                      ORDER BY rank
                      LIMIT ?2",
                 )
