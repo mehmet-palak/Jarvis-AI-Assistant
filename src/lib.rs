@@ -31,7 +31,9 @@ pub use policy::{
     authorize_pentest_target, classify, policy_for, validate_pentest_scope, validate_request,
     validate_teacher_example,
 };
-pub use profile::{validate_profile_value, ProfileField, ProfileSnapshot};
+pub use profile::{
+    profile_manifest, propose_profile_field, validate_profile_value, ProfileField, ProfileSnapshot,
+};
 pub use runtime::Runtime;
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use workbench::{
@@ -633,6 +635,26 @@ pub(crate) fn sha256_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Türkçe-doğru küçük harfe çevirme. Rust'ın standart `str::to_lowercase()`'i Unicode
+/// case-folding kurallarını kullanır: 'İ' (noktalı büyük I) 'i' değil, 'i' + birleşik nokta
+/// işaretine ("i̇") döner ve 'I' (noktasız büyük I) 'ı' yerine düz 'i'ye döner. Bu, kullanıcının
+/// yazdığı Türkçe metni karşılaştırırken sessizce yanlış eşleşmeye (ya da profil alanı gibi
+/// durumlarda hiç eşleşmemeye) yol açar. Bu fonksiyon 'I'/'İ'yi elle doğru harfe eşler, geri kalan
+/// her karakter için standart `to_lowercase()`'e güvenir. Native masaüstündeki mesaj arama ve
+/// `profile` modülündeki alan adı çözümleme aynı bu fonksiyonu kullanır — iki ayrı yerde iki farklı
+/// (ve tutarsız) Türkçe katlama mantığı olmasın diye.
+pub fn turkish_case_fold(value: &str) -> String {
+    let mut folded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            'I' => folded.push('ı'),
+            'İ' => folded.push('i'),
+            _ => folded.extend(character.to_lowercase()),
+        }
+    }
+    folded
 }
 
 impl TaskState {

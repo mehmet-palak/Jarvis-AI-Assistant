@@ -13,9 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
     attachment_receipt_manifest, default_desktop_preferences_path, inspect_local_attachment,
-    load_desktop_preferences, save_desktop_preferences, AttachmentReceipt, AttachmentRef,
-    DesktopPreferences, InputType, LlamaServerProvider, LlamaVisionServerProvider, Request,
-    Runtime, SqliteStore, TaskState, ThemePreference, VisionProvider,
+    load_desktop_preferences, propose_profile_field, save_desktop_preferences,
+    turkish_case_fold as turkish_search_fold, AttachmentReceipt, AttachmentRef, DesktopPreferences,
+    InputType, LlamaServerProvider, LlamaVisionServerProvider, ProfileField, Request, Runtime,
+    SqliteStore, TaskState, ThemePreference, VisionProvider,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +144,10 @@ struct JarvisDesktop {
     /// keyboard-first user who starts typing immediately would type into nothing. Defaulting focus
     /// to the composer instead matches how a chat app is actually used.
     composer_focus_claimed: bool,
+    /// Profil formunun düzenleme taslakları. Kaydedilmiş değerden ayrı tutulur ki kullanıcı bir
+    /// alanı düzenlerken (henüz "Kaydet"e basmadan) pencere yeniden çizildiğinde taslağı
+    /// kaybolmasın. Pencere açılışında mevcut profil değerleriyle doldurulur.
+    profile_drafts: HashMap<ProfileField, String>,
 }
 
 const STOP_MODEL_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
@@ -184,6 +189,23 @@ impl JarvisDesktop {
             .into_iter()
             .map(|approval| approval.task_id.clone())
             .collect();
+        let profile_drafts = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .profile_snapshot()
+            .map(|snapshot| {
+                ProfileField::ALL
+                    .into_iter()
+                    .map(|field| {
+                        let value = snapshot
+                            .record_for(field)
+                            .map(|record| record.value.clone())
+                            .unwrap_or_default();
+                        (field, value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             runtime,
             provider,
@@ -217,6 +239,7 @@ impl JarvisDesktop {
             close_requested: false,
             stop_model_armed_at: None,
             composer_focus_claimed: false,
+            profile_drafts,
         }
     }
 
@@ -777,9 +800,83 @@ impl JarvisDesktop {
         ui.label(RichText::new("Pencereyi kapatmak modeli durdurmaz.").size(12.0));
 
         ui.add_space(10.0);
+        egui::CollapsingHeader::new("PROFİL")
+            .default_open(false)
+            .show(ui, |ui| self.show_profile_controls(ui));
+
+        ui.add_space(10.0);
         egui::CollapsingHeader::new("GÖRÜNÜM AYARLARI")
             .default_open(false)
             .show(ui, |ui| self.show_preferences_controls(ui));
+    }
+
+    /// Bilinen dört profil alanını (Ad/Hitap biçimi/Dil/Rol) gösterir; her biri düzenlenebilir,
+    /// tek tıkla kaydedilir/silinir. TUI'deki `/profile set` + `/remember approve` iki adımı
+    /// burada tek "Kaydet" tıklamasına indirgenir — kullanıcı zaten alanı elle düzenleyip Kaydet'e
+    /// basarak açık onay vermiş oluyor, ayrı bir onay ekranı eklemedik.
+    fn show_profile_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Bu bilgiler yalnız yerelde saklanır; model context'ine dahil edilir.")
+                .size(12.0),
+        );
+        let snapshot = self
+            .runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .profile_snapshot()
+            .ok();
+        for field in ProfileField::ALL {
+            ui.add_space(6.0);
+            ui.label(RichText::new(field.label()).size(12.0).color(COLOR_TEAL));
+            ui.horizontal(|ui| {
+                let draft = self.profile_drafts.entry(field).or_default();
+                ui.add(egui::TextEdit::singleline(draft).desired_width(140.0));
+                if ui.small_button("Kaydet").clicked() {
+                    let value = draft.clone();
+                    match propose_profile_field(field, &value, "native-profile", true).and_then(
+                        |proposal| {
+                            self.runtime
+                                .lock()
+                                .expect("JARVIS runtime lock poisoned")
+                                .commit_memory_proposal(&proposal, true)
+                        },
+                    ) {
+                        Ok(record) => {
+                            self.status = format!("{} kaydedildi.", field.label());
+                            self.profile_drafts.insert(field, record.value);
+                        }
+                        Err(error) => {
+                            self.status = format!("{} kaydedilemedi: {error}", field.label())
+                        }
+                    }
+                }
+                let has_saved_value = snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.record_for(field).is_some());
+                if has_saved_value && ui.small_button("Sil").clicked() {
+                    let record_id = snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.record_for(field))
+                        .map(|record| record.memory_id.clone());
+                    if let Some(record_id) = record_id {
+                        match self
+                            .runtime
+                            .lock()
+                            .expect("JARVIS runtime lock poisoned")
+                            .delete_memory(&record_id)
+                        {
+                            Ok(_) => {
+                                self.status = format!("{} silindi.", field.label());
+                                self.profile_drafts.insert(field, String::new());
+                            }
+                            Err(error) => {
+                                self.status = format!("{} silinemedi: {error}", field.label())
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
 
     fn show_chat_console(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
@@ -1279,18 +1376,6 @@ fn message_matches_filter(
 ) -> bool {
     role_filter.is_none_or(|role| message.role == role)
         && turkish_search_fold(&message.content).contains(&turkish_search_fold(search))
-}
-
-fn turkish_search_fold(value: &str) -> String {
-    let mut folded = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            'I' => folded.push('ı'),
-            'İ' => folded.push('i'),
-            _ => folded.extend(character.to_lowercase()),
-        }
-    }
-    folded
 }
 
 fn load_preview(

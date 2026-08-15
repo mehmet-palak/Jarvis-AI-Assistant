@@ -209,6 +209,13 @@ impl Runtime {
             .list_memory()
     }
 
+    /// Bilinen profil alanlarının (ad/hitap/dil/rol) güncel değerlerini döner. TUI ve native UI
+    /// aynı anlığı görsün diye tek yerde toplanır; `ProfileSnapshot::from_records` mantığını iki
+    /// arayüzde de ayrı ayrı yazmamak için.
+    pub fn profile_snapshot(&self) -> Result<ProfileSnapshot, String> {
+        Ok(ProfileSnapshot::from_records(&self.list_memory()?))
+    }
+
     pub fn forget_all_memory(&mut self) -> Result<usize, String> {
         let store = self
             .store

@@ -13,9 +13,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    attachment_receipt_manifest, inspect_local_attachment, propose_memory, AttachmentReceipt,
-    AttachmentRef, DataSensitivity, InputType, LlamaServerProvider, LlamaVisionServerProvider,
-    MemoryNamespace, MemoryProposal, Request, Runtime, SqliteStore, TaskState, VisionProvider,
+    attachment_receipt_manifest, inspect_local_attachment, profile_manifest, propose_memory,
+    propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity, InputType,
+    LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, ProfileField,
+    Request, Runtime, SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -738,6 +739,131 @@ fn submit(
         }
         return;
     }
+    if let Some(path) = input
+        .strip_prefix("/profile export ")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let snapshot = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .profile_snapshot();
+        match snapshot.and_then(|snapshot| {
+            profile_manifest(&snapshot).and_then(|manifest| {
+                std::fs::write(path, manifest)
+                    .map_err(|error| format!("profile manifest write failed: {error}"))
+            })
+        }) {
+            Ok(()) => app.push_system(
+                "Profil dışa aktarıldı; yalnız bilinen alan adları/değerleri/güncelleme zamanı içerir.",
+            ),
+            Err(error) => app.push_system(format!("Profil dışa aktarılamadı: {error}")),
+        }
+        return;
+    }
+    if input == "/profile reset" {
+        let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+        match runtime_guard.profile_snapshot() {
+            Ok(snapshot) => {
+                let populated = snapshot.populated_fields();
+                if populated.is_empty() {
+                    app.push_system("Silinecek profil alanı yok.");
+                } else {
+                    let mut deleted = 0usize;
+                    for field in populated {
+                        if let Some(record) = snapshot.record_for(field) {
+                            if runtime_guard
+                                .delete_memory(&record.memory_id)
+                                .unwrap_or(false)
+                            {
+                                deleted += 1;
+                            }
+                        }
+                    }
+                    app.push_system(format!(
+                        "{deleted} profil alanı silindi. Serbest anahtarlarla kaydedilmiş diğer bellekler (/memory) etkilenmedi."
+                    ));
+                }
+            }
+            Err(error) => app.push_system(format!("Profil okunamadı: {error}")),
+        }
+        return;
+    }
+    if let Some(field_name) = input.strip_prefix("/profile delete ").map(str::trim) {
+        let Some(field) = ProfileField::from_user_input(field_name) else {
+            app.push_system(
+                "Bilinmeyen profil alanı. Kullan: ad, hitap, dil veya rol.".to_string(),
+            );
+            return;
+        };
+        let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+        match runtime_guard.profile_snapshot() {
+            Ok(snapshot) => match snapshot.record_for(field) {
+                Some(record) => match runtime_guard.delete_memory(&record.memory_id) {
+                    Ok(true) => app.push_system(format!("{} silindi.", field.label())),
+                    Ok(false) => app.push_system("Bu alan zaten kayıtlı değildi.".to_string()),
+                    Err(error) => app.push_system(format!("Silinemedi: {error}")),
+                },
+                None => app.push_system(format!("{} zaten ayarlanmamış.", field.label())),
+            },
+            Err(error) => app.push_system(format!("Profil okunamadı: {error}")),
+        }
+        return;
+    }
+    if let Some(specification) = input.strip_prefix("/profile set ").map(str::trim) {
+        let Some((field_name, value)) = specification.split_once('=') else {
+            app.push_system(
+                "Kullanım: /profile set <ad|hitap|dil|rol> = <değer> • ardından /remember approve veya /remember reject",
+            );
+            return;
+        };
+        let Some(field) = ProfileField::from_user_input(field_name) else {
+            app.push_system(
+                "Bilinmeyen profil alanı. Kullan: ad, hitap, dil veya rol.".to_string(),
+            );
+            return;
+        };
+        match propose_profile_field(field, value.trim(), "tui-profile", true) {
+            Ok(proposal) => {
+                app.push_system(format!(
+                    "Profil teklifi (henüz kaydedilmedi): {} = {}\nOnay: /remember approve • Vazgeç: /remember reject",
+                    field.label(),
+                    proposal.record.value,
+                ));
+                app.pending_memory = Some(proposal);
+            }
+            Err(error) => app.push_system(format!("Profil teklifi geçersiz: {error}")),
+        }
+        return;
+    }
+    if input == "/profile" {
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .profile_snapshot()
+        {
+            Ok(snapshot) => {
+                let lines = ProfileField::ALL
+                    .into_iter()
+                    .map(|field| match snapshot.record_for(field) {
+                        Some(record) => format!(
+                            "{}: {} • modele dahil={}",
+                            field.label(),
+                            record.value,
+                            record.include_in_model_context
+                        ),
+                        None => format!("{}: ayarlanmamış", field.label()),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.push_system(format!(
+                    "Profil:\n{lines}\nDeğiştir: /profile set <ad|hitap|dil|rol> = <değer> • Sil: /profile delete <alan> • Hepsini sil: /profile reset • Dışa aktar: /profile export <dosya-yolu>"
+                ));
+            }
+            Err(error) => app.push_system(format!("Profil okunamadı: {error}")),
+        }
+        return;
+    }
     if let Some(relative_path) = input.strip_prefix("/index ").map(str::trim) {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         match runtime
@@ -838,7 +964,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -1340,12 +1466,31 @@ mod tests {
         is_primary_selection_paste, native_desktop_binary_path, notification_arguments,
         notification_preview, return_to_latest, should_clear_draft, should_close_tui_for_key,
         submit, try_notify_desktop, tui_exit_action, tui_notification, App, Message, MessageRole,
-        TuiExitAction,
+        TuiExitAction, WorkerReply,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-    use jarvis_core::{LlamaServerProvider, LlamaVisionServerProvider, Runtime, TaskState};
+    use jarvis_core::{
+        LlamaServerProvider, LlamaVisionServerProvider, Runtime, SqliteStore, TaskState,
+    };
     use ratatui::{backend::TestBackend, Terminal};
     use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// TUI komut testleri kalıcı bellek/profil gerektirdiği için gerçek (geçici) bir SQLite
+    /// store'a bağlı bir Runtime kurar; `Runtime::new()` (store'suz) bu komutlarda hep hata döner.
+    fn stored_runtime_fixture() -> (
+        Arc<Mutex<Runtime>>,
+        LlamaServerProvider,
+        LlamaVisionServerProvider,
+        mpsc::Sender<WorkerReply>,
+    ) {
+        let store = SqliteStore::in_memory().expect("in-memory sqlite store");
+        let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
+        let provider = LlamaServerProvider::local_default();
+        let vision = LlamaVisionServerProvider::local_default();
+        let (sender, _receiver) = mpsc::channel();
+        (runtime, provider, vision, sender)
+    }
 
     #[test]
     fn long_draft_keeps_its_tail_visible() {
@@ -1622,5 +1767,172 @@ mod tests {
         assert!(!is_primary_selection_paste(MouseEventKind::Down(
             MouseButton::Left
         )));
+    }
+
+    #[test]
+    fn profile_shows_unset_fields_until_a_set_and_approve_round_trip_saves_one() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/profile".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Ad: ayarlanmamış"));
+
+        app.input = "/profile set ad = Mehmet".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.pending_memory.is_some());
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Profil teklifi"));
+
+        app.input = "/remember approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.pending_memory.is_none());
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Bellek kaydedildi"));
+
+        app.input = "/profile".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("Ad: Mehmet"));
+    }
+
+    #[test]
+    fn profile_set_rejects_an_unknown_field_and_an_invalid_value_without_arming_anything() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/profile set favori_renk = teal".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.pending_memory.is_none());
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Bilinmeyen profil alanı"));
+
+        app.input = "/profile set ad =    ".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.pending_memory.is_none());
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Profil teklifi geçersiz"));
+    }
+
+    #[test]
+    fn profile_delete_removes_only_the_named_field() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        for command in ["/profile set ad = Mehmet", "/remember approve"] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+        for command in ["/profile set dil = tr", "/remember approve"] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+
+        app.input = "/profile delete ad".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("Ad silindi"));
+
+        app.input = "/profile".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let shown = &app.messages.last().unwrap().content;
+        assert!(shown.contains("Ad: ayarlanmamış"));
+        assert!(shown.contains("Dil: tr"));
+    }
+
+    #[test]
+    fn profile_reset_clears_every_populated_field_but_leaves_free_form_memory_alone() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        for command in [
+            "/profile set ad = Mehmet",
+            "/remember approve",
+            "/profile set dil = tr",
+            "/remember approve",
+            "/remember favori_renk = teal",
+            "/remember approve",
+        ] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+
+        app.input = "/profile reset".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("2 profil alanı silindi"));
+
+        app.input = "/profile".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let shown = &app.messages.last().unwrap().content;
+        assert!(shown.contains("Ad: ayarlanmamış"));
+        assert!(shown.contains("Dil: ayarlanmamış"));
+
+        // Profil dışı serbest anahtar /profile reset'ten etkilenmemeli, /memory'de kalmalı.
+        app.input = "/memory".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("favori_renk = teal"));
+    }
+
+    #[test]
+    fn profile_export_writes_a_manifest_with_only_known_fields() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        for command in ["/profile set ad = Mehmet", "/remember approve"] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-profile-export-test-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        app.input = format!("/profile export {}", path.display());
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Profil dışa aktarıldı"));
+
+        let written = std::fs::read_to_string(&path).expect("export file exists");
+        assert!(written.contains("jarvis-user-profile"));
+        assert!(written.contains("\"value\": \"Mehmet\""));
+        assert!(!written.contains("memory_id"));
+        let _ = std::fs::remove_file(&path);
     }
 }

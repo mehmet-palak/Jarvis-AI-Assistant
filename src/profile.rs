@@ -10,7 +10,11 @@
 //! komutlarının (örn. `/remember`) çağıracağı bir yardımcıdır, kendi başına hiçbir depolama
 //! tetiklemez ve model tarafından doğrudan çağrılamaz.
 
-use crate::{MemoryNamespace, MemoryRecord};
+use crate::{
+    propose_memory, turkish_case_fold, DataSensitivity, MemoryNamespace, MemoryProposal,
+    MemoryRecord,
+};
+use serde_json::json;
 
 /// Bilinen profil alanları. Kullanıcı bunların dışında serbest anahtarlar da tutabilir (genel
 /// bellek sistemi zaten bunu destekliyor); bu liste yalnız profil CRUD arayüzünün göstereceği
@@ -58,6 +62,49 @@ impl ProfileField {
             .into_iter()
             .find(|field| field.memory_key() == key)
     }
+
+    /// Kısa Türkçe takma ad (`ad`, `hitap`, `dil`, `rol`). Komut satırında `memory_key`'in tam
+    /// İngilizce hâlini yazmak zorunda kalmasın diye.
+    fn short_alias(self) -> &'static str {
+        match self {
+            Self::DisplayName => "ad",
+            Self::PreferredAddress => "hitap",
+            Self::Language => "dil",
+            Self::RolePreference => "rol",
+        }
+    }
+
+    /// Kullanıcının komut satırında yazdığı serbest metni bilinen bir alana çözer; hem tam
+    /// bellek anahtarını (`display_name`) hem kısa takma adı (`ad`) kabul eder, büyük/küçük harf
+    /// duyarsız.
+    pub fn from_user_input(input: &str) -> Option<Self> {
+        let normalized = turkish_case_fold(input.trim());
+        Self::ALL
+            .into_iter()
+            .find(|field| field.memory_key() == normalized || field.short_alias() == normalized)
+    }
+}
+
+/// Bir profil alanı için bellek teklifi oluşturur. Doğrulama burada yapılır; namespace her zaman
+/// `UserProfile`, anahtar her zaman `field.memory_key()`'dir — çağıran taraf (TUI/native) yanlış
+/// namespace veya anahtar seçemez. Bu, `propose_memory`'nin üzerine ince bir sarmalayıcıdır;
+/// depolamayı yine `commit_memory_proposal` yapar, teklif burada henüz kalıcı değildir.
+pub fn propose_profile_field(
+    field: ProfileField,
+    value: &str,
+    source: impl Into<String>,
+    include_in_model_context: bool,
+) -> Result<MemoryProposal, String> {
+    validate_profile_value(field, value)?;
+    propose_memory(
+        MemoryNamespace::UserProfile,
+        field.memory_key(),
+        value.trim(),
+        DataSensitivity::Internal,
+        source,
+        include_in_model_context,
+        None,
+    )
 }
 
 const PROFILE_VALUE_MAX_LEN: usize = 200;
@@ -96,6 +143,17 @@ pub struct ProfileSnapshot {
 }
 
 impl ProfileSnapshot {
+    /// Belirli bir alanın şu anki (varsa) kaydını döner. UI, kullanıcıya "sil" seçeneği
+    /// sunarken ham `memory_id`'yi bilmesine gerek kalmadan bunu kullanabilir.
+    pub fn record_for(&self, field: ProfileField) -> Option<&MemoryRecord> {
+        match field {
+            ProfileField::DisplayName => self.display_name.as_ref(),
+            ProfileField::PreferredAddress => self.preferred_address.as_ref(),
+            ProfileField::Language => self.language.as_ref(),
+            ProfileField::RolePreference => self.role_preference.as_ref(),
+        }
+    }
+
     pub fn from_records(records: &[MemoryRecord]) -> Self {
         let mut snapshot = Self::default();
         for record in records {
@@ -119,6 +177,99 @@ impl ProfileSnapshot {
             }
         }
         snapshot
+    }
+
+    /// Şu an değeri olan bilinen alanların listesi. `/profile reset` gibi "hepsini temizle"
+    /// akışlarının hangi kayıtları sileceğini bulmasında kullanılır.
+    pub fn populated_fields(&self) -> Vec<ProfileField> {
+        ProfileField::ALL
+            .into_iter()
+            .filter(|field| self.record_for(*field).is_some())
+            .collect()
+    }
+}
+
+/// Profili, ek makbuzu dışa aktarımıyla aynı üslupta bir JSON belgesine çevirir: yalnız bilinen
+/// dört alanın anahtarı/değeri/güncellenme zamanı/model-context durumu içerir. Ham `memory_id`,
+/// `source` veya profil dışı serbest bellek kayıtları hiç dahil edilmez.
+pub fn profile_manifest(snapshot: &ProfileSnapshot) -> Result<String, String> {
+    let fields = ProfileField::ALL
+        .into_iter()
+        .filter_map(|field| {
+            snapshot.record_for(field).map(|record| {
+                json!({
+                    "field": field.memory_key(),
+                    "label": field.label(),
+                    "value": record.value,
+                    "include_in_model_context": record.include_in_model_context,
+                    "updated_at": record.updated_at,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&json!({
+        "schema_version": 1,
+        "kind": "jarvis-user-profile",
+        "fields": fields,
+    }))
+    .map(|serialized| format!("{serialized}\n"))
+    .map_err(|error| format!("profile manifest serialization failed: {error}"))
+}
+
+#[cfg(test)]
+mod manifest_and_reset_tests {
+    use super::*;
+    use crate::DataSensitivity;
+
+    fn record(key: &str, value: &str, namespace: MemoryNamespace, updated_at: u64) -> MemoryRecord {
+        MemoryRecord {
+            schema_version: 1,
+            memory_id: format!("memory-{key}-{updated_at}"),
+            namespace,
+            key: key.into(),
+            value: value.into(),
+            sensitivity: DataSensitivity::Internal,
+            source: "test".into(),
+            include_in_model_context: true,
+            created_at: updated_at,
+            updated_at,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn populated_fields_lists_only_fields_with_a_current_record() {
+        let records = vec![
+            record("display_name", "Mehmet", MemoryNamespace::UserProfile, 1),
+            record("language", "tr", MemoryNamespace::UserProfile, 2),
+        ];
+        let snapshot = ProfileSnapshot::from_records(&records);
+        assert_eq!(
+            snapshot.populated_fields(),
+            vec![ProfileField::DisplayName, ProfileField::Language]
+        );
+    }
+
+    #[test]
+    fn manifest_contains_only_known_fields_never_raw_memory_id_or_source() {
+        let records = vec![record(
+            "display_name",
+            "Mehmet",
+            MemoryNamespace::UserProfile,
+            1,
+        )];
+        let snapshot = ProfileSnapshot::from_records(&records);
+        let manifest = profile_manifest(&snapshot).expect("manifest serializes");
+        assert!(manifest.contains("\"value\": \"Mehmet\""));
+        assert!(manifest.contains("jarvis-user-profile"));
+        assert!(!manifest.contains("memory_id"));
+        assert!(!manifest.contains("\"source\""));
+    }
+
+    #[test]
+    fn empty_snapshot_produces_an_empty_field_list_not_an_error() {
+        let manifest = profile_manifest(&ProfileSnapshot::default()).expect("still serializes");
+        assert!(manifest.contains("\"fields\": []"));
     }
 }
 
@@ -160,6 +311,57 @@ mod tests {
         assert!(validate_profile_value(ProfileField::DisplayName, "   ").is_err());
         assert!(validate_profile_value(ProfileField::DisplayName, &"a".repeat(201)).is_err());
         assert!(validate_profile_value(ProfileField::DisplayName, "Meh\u{0007}met").is_err());
+    }
+
+    #[test]
+    fn user_input_accepts_both_the_memory_key_and_the_short_turkish_alias() {
+        assert_eq!(
+            ProfileField::from_user_input("display_name"),
+            Some(ProfileField::DisplayName)
+        );
+        assert_eq!(
+            ProfileField::from_user_input("Ad"),
+            Some(ProfileField::DisplayName)
+        );
+        // "İ" (noktalı büyük I) standart to_lowercase() ile 'i' + birleşik nokta işaretine döner;
+        // turkish_case_fold bunu doğru şekilde düz 'i'ye çevirir.
+        assert_eq!(
+            ProfileField::from_user_input("  DİL  "),
+            Some(ProfileField::Language)
+        );
+        assert_eq!(ProfileField::from_user_input("bilinmeyen"), None);
+    }
+
+    #[test]
+    fn propose_profile_field_validates_before_building_a_proposal() {
+        let proposal =
+            propose_profile_field(ProfileField::DisplayName, "Mehmet", "test-source", true)
+                .expect("valid value proposes cleanly");
+        assert_eq!(proposal.record.key, "display_name");
+        assert_eq!(proposal.record.value, "Mehmet");
+        assert_eq!(proposal.record.namespace, MemoryNamespace::UserProfile);
+        assert!(
+            propose_profile_field(ProfileField::DisplayName, "   ", "test-source", true).is_err()
+        );
+    }
+
+    #[test]
+    fn record_for_exposes_the_current_record_without_a_raw_memory_id() {
+        let records = vec![record(
+            "preferred_address",
+            "Mehmet Bey",
+            MemoryNamespace::UserProfile,
+            1,
+        )];
+        let snapshot = ProfileSnapshot::from_records(&records);
+        assert_eq!(
+            snapshot
+                .record_for(ProfileField::PreferredAddress)
+                .unwrap()
+                .value,
+            "Mehmet Bey"
+        );
+        assert!(snapshot.record_for(ProfileField::DisplayName).is_none());
     }
 
     #[test]
