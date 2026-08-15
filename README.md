@@ -99,7 +99,38 @@ sohbet modeli bunu bağlam verisi olarak kullanır. İlk farklı görsel CPU'da 
 ayrıntılı smoke ve ölçüm kaydı [f2_vision_smoke_2026-08-14.md](docs/f2_vision_smoke_2026-08-14.md)
 içindedir.
 
-Modelin tool veya policy yetkisi yoktur. Doğal sohbet modelden gelir; geçmiş, modele gerçek `user`/`assistant` rolleriyle ve tam konuşma çiftleri halinde iletilir. Son kullanıcı mesajı önceliklidir; kısa takip soruları yakın turlardan bağlam alır fakat önceki yanıtı gereksizce tekrar etmez. Kişisel bilgi veya tercih uygulama koduna gömülmez; bunun için sonraki dilimde kullanıcı profili/bellek katmanı eklenecektir. İzin gerektiren dosya değişiklikleri Policy Gate ve task-bound approval akışından geçer. Başka bir çalışma alanını okumak için `JARVIS_WORKSPACE_ROOT=/path/to/workspace` ayarlanabilir.
+Modelin tool veya policy yetkisi yoktur. Doğal sohbet modelden gelir; geçmiş, modele gerçek `user`/`assistant` rolleriyle ve tam konuşma çiftleri halinde iletilir (artık diske de yazılır, bkz. aşağıdaki "Bellek, profil ve RAG" bölümü). Son kullanıcı mesajı önceliklidir; kısa takip soruları yakın turlardan bağlam alır fakat önceki yanıtı gereksizce tekrar etmez. Kişisel bilgi veya tercih uygulama koduna gömülmez; bunun için kalıcı, kullanıcı onaylı bir profil/bellek katmanı kurulu. İzin gerektiren dosya değişiklikleri Policy Gate ve task-bound approval akışından geçer. Başka bir çalışma alanını okumak için `JARVIS_WORKSPACE_ROOT=/path/to/workspace` ayarlanabilir.
+
+## Bellek, profil ve RAG
+
+JARVIS kalıcı, denetlenebilir bir hafızaya ve belge tabanlı bilgiye (RAG) sahip. Hiçbir kayıt model
+kendi kendine karar vererek yazılmaz — yalnız açık kullanıcı komutuyla (slash komutu veya doğal dil
+tetikleyicisiyle); model normal sohbet üretirken bu yollara hiç erişemez.
+
+**Bellek (kalıcı, `jarvis.db` içinde):**
+- `/remember anahtar = değer` → önizleme → `/remember approve` (ya da `reject`)
+- Doğal dille tek adımda: "hafızana yaz: adım Ali", "hafızandan isim bilgimi sil" — ikinci bir onay
+  adımı gerekmez, cümlenin kendisi zaten açık komuttur. Aynı anahtarı tekrar yazmak günceller,
+  ikinci bir kayıt oluşturmaz.
+- `/memory` (listele), `/forget <id>|all`, `/forget namespace <profil|proje|görev|oturum|geçici>`
+- `/memory export <dosya-yolu>` / `/memory import <dosya-yolu>`
+- Profil (ad/hitap/dil/rol): `/profile`, `/profile set <alan> = <değer>`, `/profile delete <alan>`,
+  `/profile reset`, `/profile export <dosya-yolu>`
+
+**RAG (belge indeksleme ve kaynaklı cevap):**
+- `/index <proje-içi-göreli-dosya> [public|internal|sensitive]`
+- `/index-preview <klasör> [hariç-desen ...]` / `/index-folder <klasör> [hariç-desen ...] [public|internal|sensitive]`
+- `/rag status` (belge/chunk/embedding sayısı, hibrit mi FTS-only mi), `/rag rebuild`, `/rag verify`
+- Bir yanıt belge kaynaklıysa altında `[n] dosya#chunk — "kısa alıntı"` görünür; `/source <n>` tam
+  metni açar. `sensitive` işaretli belgeler indekslenir ama otomatik alıntı olarak asla çıkmaz.
+- Arama, kelime eşleşmesini (FTS) isteğe bağlı yerel embedding modelinin (bağlıysa) anlam
+  eşleşmesiyle birleştirir (Reciprocal Rank Fusion) — embedding servisi kapalıyken bile FTS çalışır.
+
+**Sohbet geçmişi:** diske de yazılır (yalnız RAM değil) — JARVIS yeniden başlatılınca kaldığı yerden
+devam eder. `/clear` hem görünen listeyi hem modele giden bağlamı hem diskteki kaydı siler.
+
+Detaylı karar/gerekçe: [ADR-0003](docs/adr/0003-user-profile-schema.md) (bellek/profil şeması),
+[ADR-0004](docs/adr/0004-hybrid-rag-embedding.md) (hibrit RAG/embedding).
 
 ## İlk desteklenen governed istekler
 

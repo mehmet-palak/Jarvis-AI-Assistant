@@ -35,22 +35,28 @@ doğrulama/okuma katmanıdır.
   (örn. yalnız "tr"/"en") dayatmadık — bu hem gereksiz kısıtlayıcı olurdu hem de kullanıcı kendi
   yazdığı biçimde (örn. "Türkçe" veya "tr") saklayabilsin istiyoruz. Doğrulama yalnız boş/aşırı
   uzun/kontrol karakteri içeren girdileri reddeder.
-- **En güncel kayıt kazanır.** Bellek sistemi `memory_id`'yi her onayda yeniden üretiyor (nonce
-  içeriyor), yani aynı alanı iki kez `/remember` ile yazmak iki ayrı satır oluşturuyor — bilinçli
-  bir tasarım (geçmiş değerler tamamen kaybolmuyor, `/memory`'de görünür kalıyor). `ProfileSnapshot`
-  bu satırlar arasından yalnız `updated_at`'i en yeni olanı profil değeri sayar.
+- **En güncel kayıt kazanır — `ProfileSnapshot` düzeyinde bir güvenlik ağı, birincil mekanizma
+  değil.** `memory_id` artık (16 Ağustos 2026'dan sonra, bkz. aşağıdaki ek) `(namespace, key)`'den
+  türetiliyor, yani aynı alanı iki kez `/remember` ile yazmak normalde tek satırı günceller, ikinci
+  bir satır oluşturmaz. `ProfileSnapshot`'ın "en güncel `updated_at` kazanır" mantığı yine de kalır
+  — yalnız eski (şema öncesi) içe aktarılmış bir yedek gibi istisnai durumlar için bir yedek/emniyet
+  katmanı olarak.
 
 ## Sohbetten otomatik kalıcı yazma
 
-Kod tabanında `propose_memory`/`commit_memory_proposal`'a giden tek yol, TUI'deki açık `/remember`
-komutudur (`src/main.rs`); model, normal sohbet yanıtı üretirken bu fonksiyonları hiçbir zaman
-çağırmaz — `handle_with_provider*` zinciri bunlara erişmez. `src/profile.rs` da aynı kısıtı miras
-alır: kendi başına hiçbir depolama tetiklemez, yalnız açık kullanıcı komutlarının çağıracağı bir
-yardımcıdır.
+Kod tabanında `propose_memory`/`commit_memory_proposal`'a giden yollar iki tane (16 Ağustos
+2026'dan beri, bkz. aşağıdaki ek): TUI'deki açık `/remember` komutu (`src/main.rs`) ve doğal dil
+tetikleyicileri (`src/memory_intent.rs`, örn. "hafızana yaz: ..."). İkisi de aynı kısıtı paylaşır:
+model, normal sohbet yanıtı üretirken bu fonksiyonlara hiçbir zaman erişemez —
+`handle_with_provider*` zinciri onlara dokunmaz; karar her zaman kullanıcının kendi yazdığı ham
+metne (slash komutu veya doğal dil tetikleyicisi) bakılarak veriliyor, model hiç danışılmıyor.
+`src/profile.rs` da aynı kısıtı miras alır: kendi başına hiçbir depolama tetiklemez, yalnız açık
+kullanıcı komutlarının çağıracağı bir yardımcıdır.
 
-**Bilinen açık nokta:** native masaüstü (`jarvis_desktop.rs`) şu an `/remember`'ın bir eşdeğerine
-sahip değil — bellek/profil yalnız TUI'den yazılabiliyor. Bu, F3'ün "Profile CRUD UX" maddesinde
-(madde 2) native tarafa da taşınacak; bu ADR yalnız şemayı kapsıyor.
+**Native masaüstü:** artık (16 Ağustos 2026) doğal dil tetikleyicileri üzerinden aynı yeteneğe
+sahip (`handle_natural_language_memory_command`, `src/bin/jarvis_desktop.rs`) — bir `/remember`
+sözdizimi eşdeğeri hâlâ yok, ama bu artık gerçek bir eksiklik değil: doğal dil yolu zaten hem
+TUI'de hem native'de aynı tek adımlı, onay-gerektirmeyen davranışı sağlıyor.
 
 ## Sonuç
 
@@ -91,7 +97,8 @@ silme işlemi geçmişe dönük yedekleri temizlemez.
 ## Ek — Rollback, export/import ve şifreleme kararı (15 Ağustos 2026, F3 madde 8)
 
 **Rollback:** `SqliteStore::open`, açtığı dosyanın üzerindeki `schema_migrations` sürümü bu build'in
-bildiği en yüksek sürümden (şu an 5) düşükse, `migrate()` dokunmadan **önce** `VACUUM INTO` ile
+bildiği en yüksek sürümden (`persistence.rs`'teki `CURRENT_SCHEMA_VERSION`, sık sık artan bir
+sayı — burada sabit bir değer olarak anılmıyor) düşükse, `migrate()` dokunmadan **önce** `VACUUM INTO` ile
 (`backup_to` — zaten var, test'liydi, kullanılmayan bir fonksiyondu) dosyayı `<yol>.pre-migration-
 backup-<epoch>.db` olarak yedekler. Zaten güncel veya yepyeni bir veritabanı hiç yedeklenmez — her
 normal açılışta gereksiz yedek birikmesin diye. "Rollback" burada programatik bir geri alma değil,
@@ -112,3 +119,34 @@ gerçek güvenlik sınırı işletim sisteminin dosya izinleridir — bu, ADR-00
 ettiği aynı sınırdır. `sensitivity` alanı bir sınıflandırma/organizasyon etiketi olarak kalır, şifreleme
 anahtarı yönetimi gibi ek karmaşıklık getirmez. **Bu karar, çok kullanıcılı, senkronize/bulut yedekli
 bir gelecek senaryosunda yeniden gözden geçirilmelidir** — o zaman gerçek bir tehdit modeli değişir.
+
+## Ek — Güncelleme düzeltmesi, doğal dil komutları ve kalıcı sohbet geçmişi (16 Ağustos 2026)
+
+**Gerçek bug düzeltildi:** yukarıdaki "Gerekçe" bölümünde "aynı alanı iki kez `/remember` ile
+yazmak iki ayrı satır oluşturuyor — bilinçli bir tasarım" diye anlatılan davranış aslında bir
+hataydı, bilinçli bir tasarım değildi. `memory_id`, değer/kaynak/nanosaniye nonce'undan
+türetildiği için aynı `(namespace, key)` bile her onayda "yeni" sayılıyordu — gerçek bir şişme
+riski, üstelik eski ve yeni değer ikisi de geçerliyse ikisi de birden modele gidebiliyordu.
+Düzeltme: `memory_id` artık yalnız `(namespace, key)`'den türetiliyor, bu da zaten var olan
+`ON CONFLICT(memory_id) DO UPDATE` yolunu (`src/persistence.rs`, hiç değişmedi) gerçek bir
+güncelleme için tetikliyor. `created_at` korunuyor, `updated_at` ilerliyor. Kanıt:
+`remembering_the_same_key_again_updates_the_existing_record_instead_of_duplicating_it`
+(`src/lib.rs`).
+
+**Doğal dil komutları:** kullanıcı `/remember anahtar = değer` sözdizimini hatırlamak zorunda
+kalmadan, normal bir cümleyle ("hafızana yaz: adım Ali", "hafızandan isim bilgimi sil") tek
+adımda (ikinci bir onay adımı olmadan) bellek yazabilsin/silebilsin istedi. Yeni modül
+`src/memory_intent.rs` (`parse_memory_intent`) sabit bir tetikleyici cümle listesine karşı
+kullanıcının ham girdisini eşleştiriyor — "sohbetten otomatik kalıcı yazma yasağı" burada da
+geçerli: karar modelin kendisine değil, kullanıcının yazdığı ham metne bakılarak veriliyor,
+slash komutlarının çalışma şekliyle birebir aynı ilke. Hem TUI hem native desktop'ta çalışıyor
+(bkz. yukarıdaki "Sohbetten otomatik kalıcı yazma" bölümünün güncellenmiş hâli).
+
+**Kalıcı sohbet geçmişi (yeni, bu ADR'nin doğrudan kapsamı dışında ama ilişkili):** `Runtime.
+chat_history` artık `chat_messages` tablosunda (schema sürüm 8) diske de yazılıyor — önceden
+yalnız RAM'de tutulan, JARVIS kapanınca kaybolan bir tasarımdı (bilinçli bir gizlilik tercihiydi),
+kullanıcı isteğiyle tersine çevrildi. `/clear` artık hem görünen listeyi hem `chat_history`'i hem
+diskteki kaydı siler — geçmiş kalıcı olduğu için "temizle" gerçek bir sıfırlama, yalnız kozmetik
+değil. Bu, bellek kayıtlarının (`MemoryRecord`) tabi olduğu sensitivity/export/delete
+makinesinden **ayrı** bir mekanizma — sohbet geçmişi kendi tablosunda, kendi basit kapsam/silme
+kuralıyla (`Runtime::clear_chat_history`) yönetiliyor, profil/bellek şemasının bir parçası değil.
