@@ -14,9 +14,10 @@ use crossterm::{
 };
 use jarvis_core::{
     attachment_receipt_manifest, inspect_local_attachment, parse_data_sensitivity,
-    profile_manifest, propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef,
-    DataSensitivity, InputType, LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace,
-    MemoryProposal, ProfileField, Request, Runtime, SqliteStore, TaskState, VisionProvider,
+    parse_memory_namespace, profile_manifest, propose_memory, propose_profile_field,
+    AttachmentReceipt, AttachmentRef, DataSensitivity, InputType, LlamaServerProvider,
+    LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, ProfileField, Request, Runtime,
+    SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -858,6 +859,26 @@ fn submit(
         }
         return;
     }
+    if let Some(word) = input.strip_prefix("/forget namespace ").map(str::trim) {
+        let Some(namespace) = parse_memory_namespace(word) else {
+            app.push_system(
+                "Bilinmeyen namespace. Kullan: profil, proje, görev, oturum veya geçici.",
+            );
+            return;
+        };
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .delete_memory_namespace(namespace)
+        {
+            Ok(count) => app.push_system(format!(
+                "{namespace} namespace'inden {count} kayıt silindi. Diğer namespace'ler etkilenmedi.",
+                namespace = namespace.as_str()
+            )),
+            Err(error) => app.push_system(format!("Namespace silinemedi: {error}")),
+        }
+        return;
+    }
     if let Some(memory_id) = input.strip_prefix("/forget ").map(str::trim) {
         let result = if memory_id == "all" {
             runtime
@@ -1109,7 +1130,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2219,5 +2240,41 @@ mod tests {
             .find(|record| record.key == "proje")
             .expect("saved record");
         assert!(!record.include_in_model_context);
+    }
+
+    #[test]
+    fn forget_namespace_deletes_only_that_namespace_and_rejects_unknown_words() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        for command in ["/remember ad = Mehmet", "/remember approve"] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+
+        app.input = "/forget namespace bilinmeyen-namespace".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Bilinmeyen namespace"));
+
+        app.input = "/forget namespace profil".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("USER_PROFILE namespace'inden 1 kayıt silindi"));
+
+        let remaining = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_memory()
+            .expect("memory list");
+        assert!(remaining.is_empty());
     }
 }

@@ -207,6 +207,24 @@ impl Runtime {
         Ok(deleted)
     }
 
+    /// Deletes every record in one namespace only (e.g. all `Project` memory), leaving the other
+    /// four namespaces untouched. A real, hard `DELETE` — see ADR-0003's "Silme: tombstone yok"
+    /// addendum for why this project does not keep a soft-deleted/tombstoned copy.
+    pub fn delete_memory_namespace(&mut self, namespace: MemoryNamespace) -> Result<usize, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "persistent memory requires an attached local store".to_string())?;
+        let deleted = store.delete_memory_namespace(namespace)?;
+        if deleted > 0 {
+            self.record_audit(AuditEvent::pending(
+                format!("memory-namespace-{}", namespace.as_str()),
+                "memory.delete.namespace_user_requested",
+            ));
+        }
+        Ok(deleted)
+    }
+
     pub fn list_memory(&self) -> Result<Vec<MemoryRecord>, String> {
         self.store
             .as_ref()

@@ -336,6 +336,29 @@ impl MemoryNamespace {
     }
 }
 
+/// Parses a user-typed namespace word (English or Turkish), case-insensitive, for commands like
+/// `/forget namespace <...>`. Same dual ASCII/Turkish-fold approach as `parse_data_sensitivity`
+/// and `ProfileField::from_user_input`, for the same "INTERNAL" vs "ınternal" reason.
+pub fn parse_memory_namespace(input: &str) -> Option<MemoryNamespace> {
+    let trimmed = input.trim();
+    for candidate in [trimmed.to_lowercase(), turkish_case_fold(trimmed)] {
+        let namespace = match candidate.as_str() {
+            "user_profile" | "profile" | "profil" => Some(MemoryNamespace::UserProfile),
+            "project" | "proje" => Some(MemoryNamespace::Project),
+            "task" | "görev" | "gorev" => Some(MemoryNamespace::Task),
+            "session" | "oturum" => Some(MemoryNamespace::Session),
+            "ephemeral_tool_output" | "ephemeral" | "geçici" | "gecici" => {
+                Some(MemoryNamespace::EphemeralToolOutput)
+            }
+            _ => None,
+        };
+        if namespace.is_some() {
+            return namespace;
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRecord {
     pub schema_version: u16,
@@ -2450,6 +2473,102 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.content.contains("5 chunk indexlendi")));
+    }
+
+    /// F3 "Memory deletion ... doğrulama testi": `forget_all_memory` had no test coverage at all
+    /// before this. Proves it actually empties storage, not just returns a plausible-looking count.
+    #[test]
+    fn forget_all_memory_actually_empties_storage() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        for (namespace, key) in [
+            (MemoryNamespace::UserProfile, "ad"),
+            (MemoryNamespace::Project, "proje-notu"),
+            (MemoryNamespace::Task, "gorev-notu"),
+        ] {
+            let proposal = propose_memory(
+                namespace,
+                key,
+                "deger",
+                DataSensitivity::Internal,
+                "test",
+                true,
+                None,
+            )
+            .expect("valid proposal");
+            runtime
+                .commit_memory_proposal(&proposal, true)
+                .expect("record persists");
+        }
+        assert_eq!(runtime.list_memory().expect("list before").len(), 3);
+        let deleted = runtime.forget_all_memory().expect("forget all succeeds");
+        assert_eq!(deleted, 3);
+        assert!(runtime.list_memory().expect("list after").is_empty());
+    }
+
+    /// F3 "Memory deletion: ... namespace, proje ... silme": deleting one namespace must not
+    /// touch records in any other namespace.
+    #[test]
+    fn delete_memory_namespace_only_removes_that_namespace() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let profile_proposal = propose_memory(
+            MemoryNamespace::UserProfile,
+            "ad",
+            "Mehmet",
+            DataSensitivity::Internal,
+            "test",
+            true,
+            None,
+        )
+        .expect("valid profile proposal");
+        runtime
+            .commit_memory_proposal(&profile_proposal, true)
+            .expect("profile record persists");
+        let project_proposal = propose_memory(
+            MemoryNamespace::Project,
+            "proje-notu",
+            "jarvis",
+            DataSensitivity::Internal,
+            "test",
+            true,
+            None,
+        )
+        .expect("valid project proposal");
+        runtime
+            .commit_memory_proposal(&project_proposal, true)
+            .expect("project record persists");
+
+        let deleted = runtime
+            .delete_memory_namespace(MemoryNamespace::Project)
+            .expect("namespace deletion succeeds");
+        assert_eq!(deleted, 1);
+
+        let remaining = runtime.list_memory().expect("list after");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].namespace, MemoryNamespace::UserProfile);
+    }
+
+    #[test]
+    fn parse_memory_namespace_accepts_english_and_turkish_words() {
+        assert_eq!(
+            parse_memory_namespace("profil"),
+            Some(MemoryNamespace::UserProfile)
+        );
+        assert_eq!(
+            parse_memory_namespace("PROJECT"),
+            Some(MemoryNamespace::Project)
+        );
+        assert_eq!(parse_memory_namespace("görev"), Some(MemoryNamespace::Task));
+        assert_eq!(
+            parse_memory_namespace("oturum"),
+            Some(MemoryNamespace::Session)
+        );
+        assert_eq!(
+            parse_memory_namespace("geçici"),
+            Some(MemoryNamespace::EphemeralToolOutput)
+        );
+        assert_eq!(parse_memory_namespace("bilinmeyen"), None);
     }
 
     #[test]

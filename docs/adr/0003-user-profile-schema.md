@@ -73,3 +73,19 @@ sızdırmıyor.
 namespace'e yazmıyor — ikisi de yalnız `UserProfile`'a sabitlenmiş durumda. Bu bilinçli: namespace'ler
 şema olarak hazır, ama onları dolduracak somut özellik (örn. görev-bazlı otomatik not, RAG sonucu
 önbelleği) henüz F3'ün ilerideki maddelerinde/F4'te gelecek.
+
+## Ek — Silme: tombstone yok, gerçek `DELETE` (15 Ağustos 2026, F3 madde 7)
+
+Tek kayıt (`/forget <id>`), namespace (`/forget namespace <...>`) ve "her şeyi unut" (`/forget all`)
+silme yolları hepsi gerçek SQL `DELETE` çalıştırır — **tombstone/soft-delete satırı bırakmaz**.
+Bilinçli tercih: ADR-0002'nin ekler için kurduğu "kaldırmak gerçekten kaldırmaktır, gizli bir kopya
+tutmayız" felsefesiyle tutarlı. JARVIS tek-kullanıcı, tek-cihaz, senkronizasyonsuz yerel bir SQLite
+veritabanı kullanıyor; tombstone'un asıl değeri (dağıtık sistemlerde "silindi" bilgisini diğer
+replikalara yaymak) burada karşılığı yok.
+
+**Yedek etkisi (dokümante edilmesi istenen nokta):** Bir silme işlemi yalnız **canlı** `jarvis.db`
+dosyasını etkiler. Kullanıcının daha önce aldığı herhangi bir dosya-seviyeli yedek (örn. bu projede
+zaten bir örneği olan `jarvis.db.audit-race-backup-*.db` gibi) silinen veriyi **hâlâ içerir** —
+silme işlemi geçmişe dönük yedekleri temizlemez. Bu, F3'ün henüz kapsamadığı "Memory migration/backup"
+maddesinin (F3'ün sıradaki maddelerinden biri) doğal bir sınırıdır; burada yalnız mevcut davranış
+olduğu gibi not edilmiştir.
