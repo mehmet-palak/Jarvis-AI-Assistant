@@ -256,7 +256,7 @@ Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf se
 
 ### F3 — Kullanıcı profili, kontrollü bellek ve gerçek RAG
 
-Durum: BEKLENİYOR — F2 exit gate kapanana kadar yeni F3 işi yapılmaz; mevcut temel kod park edilmiştir.
+Durum: TAMAMLANDI — F2 exit gate 15 Ağustos 2026'da kapandı, F3'ün 18 maddesi 15-16 Ağustos 2026'da tek oturumda tamamlandı (bkz. alt maddeler).
 
 Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir biçimde hatırlaması; belgelerden kaynaklı cevap vermesi.
 
@@ -354,7 +354,13 @@ Amaç: JARVIS'in kişisel bilgiyi hard-code etmeden, izinli ve açıklanabilir b
   - Gerçek boşluk (kapatıldı): ek (attachment) dosya adı üzerinden prompt injection hiç uçtan uca test edilmemişti — yalnız workspace RAG ve vision için vardı. Yeni test: şüpheli adlı bir doküman eki (içerik zaten modele gitmiyor, yalnız dosya adı gidiyor) tek başına `has_untrusted_model_context` tetikliyor ve modelin ürettiği `<jarvis-intent>` etiketi yine bastırılıyor (`UNTRUSTED_MODEL_INTENT_SUPPRESSED`).
   - Data exfiltration (yapısal kanıt, yeni): `CapabilityRegistry::baseline()`'daki **hiçbir** capability `requires_network` değil — yani injection bir şekilde onaylı bir task'e dönüşse bile ağ üzerinden veri sızdıracak hiçbir yol yok. Yeni test bunu tüm registry üzerinden (sabit kodlanmış bir liste değil, gerçek `all()` iterator'ü ile) doğruluyor.
   - Kanıt: 3 yeni test (`isolate_untrusted_content_treats_web_provenance_the_same_as_document_provenance`, `untrusted_attachment_filename_cannot_activate_a_model_proposed_capability`, `no_baseline_capability_requires_network_access`) + zaten var olan 3 test (`workspace_rag_content_is_provenanced_and_instruction_isolated`, `retrieved_workspace_data_cannot_activate_a_model_proposed_capability`, `untrusted_vision_context_cannot_activate_a_model_proposed_capability`) hâlâ geçiyor + tam paket: `cargo fmt`, `cargo test --offline` (132 lib + 30 main + 6 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
-- [ ] RAG eval seti: doğru kaynak, yanlış kaynak, secret exclusion, eski indeks, çelişen belge, injection ve silinmiş bellek senaryoları.
+- [x] RAG eval seti: doğru kaynak, yanlış kaynak, secret exclusion, eski indeks, çelişen belge, injection ve silinmiş bellek senaryoları.
+  - Yedi senaryonun her biri için ayrı, adı `rag_eval_` ile başlayan, tek bir yerde toplanmış özel bir test (`cargo test rag_eval_` yalnız bu seti çalıştırır) — madde 9-17'de kurulan mekanizmaların üzerine, bazıları o mekanizmaları kanıtlayan testlerle kavramsal olarak örtüşse de kasıtlı olarak taze/bağımsız örnekler (bir eval setinin işi, baştan sona okunabilir tek bir koleksiyon olmak, önceki maddelere işaretçi zinciri değil).
+  - 1/7 doğru kaynak, 2/7 yanlış kaynak, 3/7 secret exclusion, 4/7 eski indeks (gerçek bug bulundu ve düzeltildi — bkz. not), 5/7 çelişen belge (iki belge de model bağlamına ulaşıyor, biri sessizce gizlenmiyor), 6/7 injection, 7/7 silinmiş bellek (namespace silindikten sonra ne `list_memory()`'de ne de sonraki bir sohbet turunun model bağlamında görünüyor).
+  - Test tasarımı hatası bulundu ve düzeltildi: ilk yazımda "eski indeks" senaryosu `durum-turuncu`/`durum-lacivert` gibi tireli işaretçiler kullanıyordu; `fts_query` sorguyu alfasayısal olmayan karakterlerden (tire dahil) ayırdığı için iki işaretçi de ortak "durum" terimini paylaşıyordu ve test yanlış bir şekilde geçmiyor gibi görünecekti — gerçek bir staleness bug'ı değil, test fikstüründeki paylaşılan kelime kökü sorunuydu. Ortak kök paylaşmayan işaretçilerle (`turuncuseviye`/`lacivertseviye`) düzeltildi.
+  - Kanıt: 7 yeni test (`rag_eval_correct_source_is_retrieved_and_cited`, `rag_eval_wrong_source_is_never_cited_for_an_unrelated_query`, `rag_eval_secret_document_is_excluded_from_retrieval`, `rag_eval_stale_index_is_refreshed_after_content_changes`, `rag_eval_conflicting_documents_are_both_surfaced`, `rag_eval_prompt_injection_in_retrieved_content_never_activates_a_capability`, `rag_eval_deleted_memory_never_resurfaces`) + tam paket: `cargo fmt`, `cargo test --offline` (139 lib + 30 main + 6 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
+
+**F3 tamamlandı — 16 Ağustos 2026.** 18 maddenin tamamı `[x]`, her biri gerçek test kanıtıyla. Tamamlanma ölçütü karşılandı (aşağıda).
 
 Bu turda kanıtlanan alt dilim:
 
@@ -366,7 +372,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: BEKLENİYOR — F2 exit gate kapanana kadar yeni F4 işi yapılmaz; mevcut temel kod park edilmiştir.
+Durum: BEKLENİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; F4 işi henüz başlamadı.
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
