@@ -15,12 +15,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunk_workspace_text, cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query,
-    now_epoch, reject_oversized_workspace_document, reject_secret_like_workspace_document_name,
-    serialize_embedding, sha256_hex, validate_memory_record, validate_teacher_example,
-    validate_workspace_document_content, validate_workspace_document_path, Approval, AuditEvent,
-    CapabilityRegistry, DataSensitivity, EmbeddingProvider, MemoryNamespace, MemoryProposal,
-    MemoryRecord, Task, TeacherExample, WorkspaceCitation, WorkspaceIngestionReport,
-    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
+    now_epoch, reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
+    reject_secret_like_workspace_document_name, serialize_embedding, sha256_hex,
+    validate_memory_record, validate_teacher_example, validate_workspace_document_content,
+    validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
+    EmbeddingProvider, MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample,
+    WorkspaceCitation, WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -562,7 +562,9 @@ impl SqliteStore {
             // skips the plain-text path's binary/UTF-8 rejection — extraction handles that.
             reject_secret_like_workspace_document_name(&canonical_path)?;
             reject_oversized_workspace_document(&bytes)?;
-            extract_pdf_text(&bytes)?
+            let extracted = extract_pdf_text(&bytes)?;
+            reject_secret_like_workspace_document_content(&extracted)?;
+            extracted
         } else {
             validate_workspace_document_content(&canonical_path, &bytes)?;
             String::from_utf8(bytes)

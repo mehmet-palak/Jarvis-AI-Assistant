@@ -48,7 +48,8 @@ pub use workbench::{
     PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork,
 };
 pub(crate) use workspace::{
-    chunk_workspace_text, extract_pdf_text, fts_query, reject_oversized_workspace_document,
+    chunk_workspace_text, extract_pdf_text, fts_query, is_secret_like_rejection,
+    reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
     reject_secret_like_workspace_document_name, validate_workspace_document_content,
     validate_workspace_document_path,
 };
@@ -2674,6 +2675,130 @@ mod tests {
             .chain(&preview.excluded_by_pattern)
             .chain(&preview.included)
             .all(|path| !path.starts_with(".git")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Secret/hassas filtre": the filename list was broadened beyond the original 4 patterns
+    /// (`.env`, `*.pem`, `*.key`, `id_rsa*`) to cover other common credential-store shapes, while
+    /// a file that merely has "env"/"key" as a substring of an unrelated name must stay included
+    /// — this is a name-shape filter, not a keyword ban.
+    #[test]
+    fn broadened_secret_like_filenames_are_excluded_without_over_matching() {
+        let root = temporary_workspace("secret-filenames");
+        for secret_name in [
+            ".env.local",
+            "credentials.json",
+            "secrets.yaml",
+            "id_ed25519",
+            "server.p12",
+            "release.jks",
+            ".npmrc",
+        ] {
+            fs::write(root.join(secret_name), "placeholder").expect("secret-like fixture");
+        }
+        fs::write(root.join("environment.md"), "notlar").expect("must stay included");
+        fs::write(root.join("keynote-summary.md"), "notlar").expect("must stay included");
+
+        let preview = preview_workspace_index(&root, &[]).expect("preview");
+        assert_eq!(preview.excluded_secret_like.len(), 7);
+        assert_eq!(
+            preview.included,
+            vec![
+                PathBuf::from("environment.md"),
+                PathBuf::from("keynote-summary.md"),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Secret/hassas filtre ... filtre loglanır ama sır saklanmaz": a credential pasted
+    /// *inside* an ordinary file (not caught by any filename check) must still be excluded, and
+    /// the audit trail left behind must record only the path and a fixed reason category — never
+    /// the credential itself.
+    #[test]
+    fn embedded_credential_in_content_is_rejected_and_audited_without_leaking_it() {
+        let root = temporary_workspace("secret-content");
+        let leaked_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecretmaterial\n-----END OPENSSH PRIVATE KEY-----";
+        fs::write(root.join("notes.txt"), leaked_key).expect("content-secret fixture");
+        // A word like "password" appearing in ordinary prose must not be enough to reject a
+        // document — the marker list is deliberately narrow to avoid false positives.
+        fs::write(
+            root.join("harmless.txt"),
+            "remember to change your password before the demo",
+        )
+        .expect("benign fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        let error = runtime
+            .index_workspace_document(&root, Path::new("notes.txt"), true)
+            .unwrap_err();
+        assert!(error.contains("embedded credential"));
+        assert!(!error.contains("secretmaterial"));
+
+        runtime
+            .index_workspace_document(&root, Path::new("harmless.txt"), true)
+            .expect("prose mentioning 'password' must still index");
+
+        let rejection = runtime
+            .audit
+            .iter()
+            .find(|event| event.event == "workspace.index.rejected_secret_like")
+            .expect("rejection must be audited");
+        assert!(rejection.task_id.contains("notes.txt"));
+        assert!(!rejection.task_id.contains("secretmaterial"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A non-secret rejection (oversized here) gets the generic audit event name, not the
+    /// secret-like one — the audit trail must distinguish *why* a document was excluded.
+    #[test]
+    fn non_secret_rejection_is_audited_with_the_generic_event_name() {
+        let root = temporary_workspace("generic-rejection");
+        fs::write(
+            root.join("huge.txt"),
+            "a".repeat((MAX_WORKSPACE_DOCUMENT_BYTES + 1) as usize),
+        )
+        .expect("oversized fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        assert!(runtime
+            .index_workspace_document(&root, Path::new("huge.txt"), true)
+            .is_err());
+        assert!(runtime
+            .audit
+            .iter()
+            .any(|event| event.event == "workspace.index.rejected"));
+        assert!(!runtime
+            .audit
+            .iter()
+            .any(|event| event.event == "workspace.index.rejected_secret_like"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The content-based marker check also has to cover PDF-extracted text, not only plain text
+    /// — a PDF's binary bytes never contain the credential in searchable form, only its extracted
+    /// text does.
+    #[test]
+    fn pdf_with_embedded_credential_in_extracted_text_is_rejected() {
+        let root = temporary_workspace("pdf-secret-content");
+        fs::write(
+            root.join("leak.pdf"),
+            minimal_pdf_with_text("AKIAABCDEFGHIJKLMNOP"),
+        )
+        .expect("pdf fixture with a credential-shaped string");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        assert!(runtime
+            .index_workspace_document(&root, Path::new("leak.pdf"), true)
+            .unwrap_err()
+            .contains("embedded credential"));
 
         let _ = fs::remove_dir_all(&root);
     }

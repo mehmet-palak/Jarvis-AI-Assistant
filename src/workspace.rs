@@ -95,6 +95,58 @@ pub(crate) fn validate_workspace_document_path(
     Ok(canonical)
 }
 
+/// F3 "Secret/hassas filtre" — the fixed, low-maintenance filename markers a credential-shaped
+/// file tends to have. Deliberately name/extension-based, not a guess at file *meaning*: exact
+/// names for well-known credential-store files, prefixes that catch a whole family (`.env`,
+/// `.env.local`, `.env.production`; `id_rsa`, `id_ed25519`, ...), suffixes for key/cert
+/// container formats. Single source of truth — both `reject_secret_like_workspace_document_name`
+/// and the folder-level preview read this same list, so they can never silently drift apart.
+const SECRET_LIKE_EXACT_NAMES: &[&str] = &[
+    "credentials",
+    "credentials.json",
+    "secrets.yaml",
+    "secrets.yml",
+    ".secrets",
+];
+const SECRET_LIKE_NAME_PREFIXES: &[&str] = &[
+    ".env",
+    ".netrc",
+    ".npmrc",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+];
+const SECRET_LIKE_NAME_SUFFIXES: &[&str] =
+    &[".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"];
+
+fn is_secret_like_file_name(file_name_lowercase: &str) -> bool {
+    SECRET_LIKE_EXACT_NAMES.contains(&file_name_lowercase)
+        || SECRET_LIKE_NAME_PREFIXES
+            .iter()
+            .any(|prefix| file_name_lowercase.starts_with(prefix))
+        || SECRET_LIKE_NAME_SUFFIXES
+            .iter()
+            .any(|suffix| file_name_lowercase.ends_with(suffix))
+}
+
+/// Fixed rejection reasons the caller (`Runtime::index_workspace_document`) matches on to decide
+/// whether a failed indexing attempt gets the dedicated `workspace.index.rejected_secret_like`
+/// audit event instead of the generic one — never by re-deriving the check, only by comparing
+/// against these same constants, so the audit classification can never drift from the actual
+/// filter.
+pub const SECRET_LIKE_NAME_REJECTION: &str =
+    "workspace secret-like files are excluded from indexing";
+pub const SECRET_LIKE_CONTENT_REJECTION: &str =
+    "workspace document contains a likely embedded credential and is excluded from indexing";
+
+/// True for either flavor of secret-like rejection message (`SECRET_LIKE_NAME_REJECTION` or
+/// `SECRET_LIKE_CONTENT_REJECTION`) — used only for audit-event classification, never for control
+/// flow that changes what gets indexed.
+pub(crate) fn is_secret_like_rejection(error: &str) -> bool {
+    error == SECRET_LIKE_NAME_REJECTION || error == SECRET_LIKE_CONTENT_REJECTION
+}
+
 /// Shared by the plain-text and PDF indexing paths: a secret-like file name is excluded
 /// regardless of format.
 pub(crate) fn reject_secret_like_workspace_document_name(path: &Path) -> Result<(), String> {
@@ -103,12 +155,44 @@ pub(crate) fn reject_secret_like_workspace_document_name(path: &Path) -> Result<
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if file_name == ".env"
-        || file_name.ends_with(".pem")
-        || file_name.ends_with(".key")
-        || file_name.starts_with("id_rsa")
+    if is_secret_like_file_name(&file_name) {
+        return Err(SECRET_LIKE_NAME_REJECTION.into());
+    }
+    Ok(())
+}
+
+/// F3 "Secret/hassas filtre" — a credential can be *pasted inside* an otherwise ordinary file
+/// (notes, a script, a log) that no filename check would ever catch. This scans already-decoded
+/// text (plain-text or PDF-extracted) for a small set of high-confidence, low-false-positive
+/// markers: PEM private-key block headers and well-known token prefixes that are essentially
+/// never written as prose. No regex dependency, matching this module's existing simple-substring
+/// style; deliberately narrow (a generic word like "password" is not included) because a false
+/// positive here silently blocks a legitimate document from being indexed at all.
+const SECRET_LIKE_CONTENT_MARKERS: &[&str] = &[
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN DSA PRIVATE KEY-----",
+    "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+    "AWS_SECRET_ACCESS_KEY",
+    "AKIA",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+];
+
+pub(crate) fn reject_secret_like_workspace_document_content(content: &str) -> Result<(), String> {
+    if SECRET_LIKE_CONTENT_MARKERS
+        .iter()
+        .any(|marker| content.contains(marker))
     {
-        return Err("workspace secret-like files are excluded from indexing".into());
+        return Err(SECRET_LIKE_CONTENT_REJECTION.into());
     }
     Ok(())
 }
@@ -132,8 +216,9 @@ pub(crate) fn validate_workspace_document_content(path: &Path, bytes: &[u8]) -> 
     if bytes.contains(&0) {
         return Err("binary workspace documents are excluded from indexing".into());
     }
-    std::str::from_utf8(bytes)
+    let text = std::str::from_utf8(bytes)
         .map_err(|error| format!("workspace document must be UTF-8 text: {error}"))?;
+    reject_secret_like_workspace_document_content(text)?;
     Ok(())
 }
 
@@ -162,7 +247,8 @@ pub struct WorkspaceIndexPreview {
     pub root: PathBuf,
     /// Relative paths that would currently be eligible for indexing.
     pub included: Vec<PathBuf>,
-    /// Excluded because the file name looks like a secret (`.env`, `*.pem`, `*.key`, `id_rsa*`).
+    /// Excluded because the file name looks like a secret/credential store (see
+    /// `SECRET_LIKE_EXACT_NAMES`/`SECRET_LIKE_NAME_PREFIXES`/`SECRET_LIKE_NAME_SUFFIXES`).
     pub excluded_secret_like: Vec<PathBuf>,
     /// Excluded because the file is larger than `MAX_WORKSPACE_DOCUMENT_BYTES`.
     pub excluded_oversized: Vec<PathBuf>,
@@ -245,11 +331,7 @@ pub fn preview_workspace_index(
                 .and_then(|name| name.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if file_name == ".env"
-                || file_name.ends_with(".pem")
-                || file_name.ends_with(".key")
-                || file_name.starts_with("id_rsa")
-            {
+            if is_secret_like_file_name(&file_name) {
                 preview.excluded_secret_like.push(relative);
                 continue;
             }

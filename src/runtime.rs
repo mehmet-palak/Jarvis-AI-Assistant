@@ -290,11 +290,32 @@ impl Runtime {
             .store
             .as_ref()
             .ok_or_else(|| "workspace indexing requires an attached local store".to_string())?;
-        let report = store.index_workspace_document_with_embedding(
+        let outcome = store.index_workspace_document_with_embedding(
             approved_root,
             relative_path,
             self.embedding_provider.as_deref(),
-        )?;
+        );
+        // F3 "Secret/hassas filtre: ... filtre loglanır ama sır saklanmaz." A rejection is always
+        // audited — the relative path and a fixed reason category, never the file's bytes/text —
+        // so a secret-like exclusion is visible in the audit trail without the audit trail itself
+        // ever becoming a place a credential could leak to. The secret-like reason gets its own
+        // event name so it is distinguishable from an unrelated rejection (oversized, binary,
+        // path-escape, ...).
+        let report = match outcome {
+            Ok(report) => report,
+            Err(error) => {
+                let event_name = if is_secret_like_rejection(&error) {
+                    "workspace.index.rejected_secret_like"
+                } else {
+                    "workspace.index.rejected"
+                };
+                self.record_audit(AuditEvent::pending(
+                    format!("workspace-path:{}", relative_path.display()),
+                    event_name,
+                ));
+                return Err(error);
+            }
+        };
         self.record_audit(AuditEvent::pending(
             format!("workspace-{}", report.document_id),
             "workspace.index.user_approved",
