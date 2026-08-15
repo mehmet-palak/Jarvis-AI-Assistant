@@ -608,6 +608,31 @@ impl DataSensitivity {
     }
 }
 
+/// Parses a user-typed sensitivity word (English or the Turkish word a `/remember`-style command
+/// accepts), case-insensitive. Used by the memory write UX so the user actually chooses
+/// sensitivity instead of every record silently defaulting to one fixed value.
+///
+/// This mixes English and Turkish vocabulary in one input, so a single case-folding rule cannot
+/// be correct for both: `turkish_case_fold("INTERNAL")` folds the bare `I` to Turkish dotless
+/// `ı` (correct for genuine Turkish text), which then fails to match the English word "internal".
+/// Trying plain ASCII-lowercase first (correct for English) and falling back to
+/// `turkish_case_fold` (correct for Turkish) covers both without guessing the input's language.
+pub fn parse_data_sensitivity(input: &str) -> Option<DataSensitivity> {
+    let trimmed = input.trim();
+    for candidate in [trimmed.to_lowercase(), turkish_case_fold(trimmed)] {
+        let sensitivity = match candidate.as_str() {
+            "public" | "genel" | "herkese açık" => Some(DataSensitivity::Public),
+            "internal" | "dahili" => Some(DataSensitivity::Internal),
+            "sensitive" | "hassas" => Some(DataSensitivity::Sensitive),
+            _ => None,
+        };
+        if sensitivity.is_some() {
+            return sensitivity;
+        }
+    }
+    None
+}
+
 /// A candidate training example. It is intentionally a data-governance record, not a model
 /// instruction: only a human-reviewed, verifier-passing example for a registered capability can
 /// be persisted.
@@ -1494,6 +1519,33 @@ mod tests {
         assert!(JARVIS_SYSTEM_PROMPT.contains("do not translate or mix languages"));
         assert!(JARVIS_SYSTEM_PROMPT.contains("changes subject"));
         assert!(JARVIS_SYSTEM_PROMPT.contains("CPU/RAM/disk use"));
+    }
+
+    /// F3 "Memory write policy ... sensitivity/TTL seçimi": the user must actually be able to
+    /// choose a sensitivity, in either language, not just accept one fixed default.
+    #[test]
+    fn parse_data_sensitivity_accepts_english_and_turkish_words_case_insensitively() {
+        assert_eq!(
+            parse_data_sensitivity("public"),
+            Some(DataSensitivity::Public)
+        );
+        assert_eq!(
+            parse_data_sensitivity("Genel"),
+            Some(DataSensitivity::Public)
+        );
+        assert_eq!(
+            parse_data_sensitivity("INTERNAL"),
+            Some(DataSensitivity::Internal)
+        );
+        assert_eq!(
+            parse_data_sensitivity("dahili"),
+            Some(DataSensitivity::Internal)
+        );
+        assert_eq!(
+            parse_data_sensitivity("Hassas"),
+            Some(DataSensitivity::Sensitive)
+        );
+        assert_eq!(parse_data_sensitivity("bilinmeyen"), None);
     }
 
     /// Bir dile bağlı kalmadan, `preferred_address` profil tercihinin kullanıcının cevapladığı

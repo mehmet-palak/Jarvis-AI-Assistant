@@ -78,10 +78,20 @@ impl ProfileField {
     /// bellek anahtarını (`display_name`) hem kısa takma adı (`ad`) kabul eder, büyük/küçük harf
     /// duyarsız.
     pub fn from_user_input(input: &str) -> Option<Self> {
-        let normalized = turkish_case_fold(input.trim());
-        Self::ALL
-            .into_iter()
-            .find(|field| field.memory_key() == normalized || field.short_alias() == normalized)
+        let trimmed = input.trim();
+        // English memory keys (e.g. "DISPLAY_NAME") and Turkish aliases (e.g. "DİL") need
+        // different case-folding rules for a bare 'I'/'İ' — trying plain ASCII-lowercase first
+        // and falling back to the Turkish-aware fold covers both without guessing the language.
+        // See `parse_data_sensitivity` in lib.rs for the same issue and a longer explanation.
+        for normalized in [trimmed.to_lowercase(), turkish_case_fold(trimmed)] {
+            if let Some(field) = Self::ALL
+                .into_iter()
+                .find(|field| field.memory_key() == normalized || field.short_alias() == normalized)
+            {
+                return Some(field);
+            }
+        }
+        None
     }
 }
 
@@ -328,6 +338,12 @@ mod tests {
         assert_eq!(
             ProfileField::from_user_input("  DİL  "),
             Some(ProfileField::Language)
+        );
+        // Regresyon: "DISPLAY_NAME" (İngilizce, büyük harf) turkish_case_fold ile TEK BAŞINA
+        // denenseydi 'I' Türkçe kuralına göre 'ı'ya döner ve "dısplay_name" hiç eşleşmezdi.
+        assert_eq!(
+            ProfileField::from_user_input("DISPLAY_NAME"),
+            Some(ProfileField::DisplayName)
         );
         assert_eq!(ProfileField::from_user_input("bilinmeyen"), None);
     }

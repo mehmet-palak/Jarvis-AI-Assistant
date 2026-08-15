@@ -13,10 +13,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    attachment_receipt_manifest, inspect_local_attachment, profile_manifest, propose_memory,
-    propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity, InputType,
-    LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, ProfileField,
-    Request, Runtime, SqliteStore, TaskState, VisionProvider,
+    attachment_receipt_manifest, inspect_local_attachment, parse_data_sensitivity,
+    profile_manifest, propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef,
+    DataSensitivity, InputType, LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace,
+    MemoryProposal, ProfileField, Request, Runtime, SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -522,6 +522,110 @@ fn delete_previous_word(input: &mut String) {
     input.truncate(input.trim_end_matches(char::is_whitespace).len());
 }
 
+/// Preview shown after `/remember key = value` or any `/remember sensitivity|ttl ...`
+/// adjustment. Nothing is persisted until `/remember approve`; this lets the user see and change
+/// the exact sensitivity/TTL a record will be saved with, rather than every record silently
+/// getting one fixed default.
+fn pending_memory_preview(proposal: &MemoryProposal) -> String {
+    let ttl = match proposal.record.expires_at {
+        Some(expires_at) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            format!(
+                "{} saat sonra silinir",
+                expires_at.saturating_sub(now) / 3600
+            )
+        }
+        None => "kalıcı".into(),
+    };
+    format!(
+        "Bellek teklifi (henüz kaydedilmedi): {} = {}\nNamespace: {} • sensitivity: {} • süre: {} • model context: {}\nDeğiştir: /remember sensitivity <public|internal|sensitive> • /remember ttl <saat|none>\nOnay: /remember approve • Vazgeç: /remember reject",
+        proposal.record.key,
+        proposal.record.value,
+        proposal.record.namespace.as_str(),
+        proposal.record.sensitivity.as_str(),
+        ttl,
+        if proposal.record.include_in_model_context {
+            "evet"
+        } else {
+            "hayır"
+        },
+    )
+}
+
+/// Re-proposes the pending memory record with a different sensitivity, keeping everything else
+/// (key/value/namespace/TTL) the same. Still just a proposal — `/remember approve` is required.
+fn adjust_pending_memory_sensitivity(app: &mut App, word: &str) {
+    let Some(proposal) = app.pending_memory.as_ref() else {
+        app.push_system("Önce /remember anahtar = değer ile bir teklif oluştur.");
+        return;
+    };
+    let Some(sensitivity) = parse_data_sensitivity(word) else {
+        app.push_system("Geçersiz sensitivity. Kullan: public, internal veya sensitive.");
+        return;
+    };
+    let record = proposal.record.clone();
+    match propose_memory(
+        record.namespace,
+        record.key,
+        record.value,
+        sensitivity,
+        record.source,
+        record.include_in_model_context,
+        record.expires_at,
+    ) {
+        Ok(updated) => {
+            app.push_system(pending_memory_preview(&updated));
+            app.pending_memory = Some(updated);
+        }
+        Err(error) => app.push_system(format!("Güncellenemedi: {error}")),
+    }
+}
+
+/// Re-proposes the pending memory record with a different TTL (`ttl <saat>` or `ttl none` for
+/// permanent), keeping key/value/namespace/sensitivity the same.
+fn adjust_pending_memory_ttl(app: &mut App, word: &str) {
+    let Some(proposal) = app.pending_memory.as_ref() else {
+        app.push_system("Önce /remember anahtar = değer ile bir teklif oluştur.");
+        return;
+    };
+    let expires_at = if word.eq_ignore_ascii_case("none") || word == "kalıcı" {
+        None
+    } else {
+        match word.parse::<u64>() {
+            Ok(hours) if hours > 0 => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                Some(now + hours * 3600)
+            }
+            _ => {
+                app.push_system("Kullanım: /remember ttl <saat sayısı> veya /remember ttl none");
+                return;
+            }
+        }
+    };
+    let record = proposal.record.clone();
+    match propose_memory(
+        record.namespace,
+        record.key,
+        record.value,
+        record.sensitivity,
+        record.source,
+        record.include_in_model_context,
+        expires_at,
+    ) {
+        Ok(updated) => {
+            app.push_system(pending_memory_preview(&updated));
+            app.pending_memory = Some(updated);
+        }
+        Err(error) => app.push_system(format!("Güncellenemedi: {error}")),
+    }
+}
+
 fn submit(
     app: &mut App,
     runtime: &Arc<Mutex<Runtime>>,
@@ -683,6 +787,14 @@ fn submit(
             }
             _ => {}
         }
+        if let Some(word) = specification.strip_prefix("sensitivity ").map(str::trim) {
+            adjust_pending_memory_sensitivity(app, word);
+            return;
+        }
+        if let Some(word) = specification.strip_prefix("ttl ").map(str::trim) {
+            adjust_pending_memory_ttl(app, word);
+            return;
+        }
         let Some((key, value)) = specification
             .split_once('=')
             .map(|(key, value)| (key.trim(), value.trim()))
@@ -700,13 +812,7 @@ fn submit(
             None,
         ) {
             Ok(proposal) => {
-                app.push_system(format!(
-                    "Bellek teklifi (henüz kaydedilmedi): {} = {}\nNamespace: {} • sensitivity: {} • model context: evet\nOnay: /remember approve • Vazgeç: /remember reject",
-                    proposal.record.key,
-                    proposal.record.value,
-                    proposal.record.namespace.as_str(),
-                    proposal.record.sensitivity.as_str(),
-                ));
+                app.push_system(pending_memory_preview(&proposal));
                 app.pending_memory = Some(proposal);
             }
             Err(error) => app.push_system(format!("Bellek teklifi geçersiz: {error}")),
@@ -964,7 +1070,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember approve|reject, /memory, /forget <id>|all. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember approve|reject, /memory, /forget <id>|all. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -1934,5 +2040,106 @@ mod tests {
         assert!(written.contains("\"value\": \"Mehmet\""));
         assert!(!written.contains("memory_id"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn remember_defaults_to_internal_and_permanent_until_the_user_changes_it() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/remember proje = jarvis".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let preview = &app.messages.last().unwrap().content;
+        assert!(preview.contains("sensitivity: INTERNAL"));
+        assert!(preview.contains("süre: kalıcı"));
+    }
+
+    #[test]
+    fn remember_sensitivity_and_ttl_change_the_pending_proposal_before_approval() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/remember proje = jarvis".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        app.input = "/remember sensitivity sensitive".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("sensitivity: SENSITIVE"));
+
+        app.input = "/remember ttl 24".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("saat sonra silinir"));
+
+        app.input = "/remember approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        let saved = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_memory()
+            .expect("memory list");
+        let record = saved
+            .iter()
+            .find(|record| record.key == "proje")
+            .expect("saved record");
+        assert_eq!(record.sensitivity.as_str(), "SENSITIVE");
+        assert!(record.expires_at.is_some());
+    }
+
+    #[test]
+    fn remember_ttl_none_reverts_to_permanent_and_invalid_sensitivity_is_rejected() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/remember proje = jarvis".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        app.input = "/remember ttl 24".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        app.input = "/remember ttl none".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("süre: kalıcı"));
+
+        app.input = "/remember sensitivity gizli-degil".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Geçersiz sensitivity"));
+        // The invalid attempt must not have discarded the still-pending proposal.
+        assert!(app.pending_memory.is_some());
+    }
+
+    #[test]
+    fn remember_sensitivity_or_ttl_without_a_pending_proposal_is_a_clear_no_op() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/remember sensitivity public".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Önce /remember anahtar"));
+        assert!(app.pending_memory.is_none());
     }
 }
