@@ -154,13 +154,13 @@ Durum: TAMAMLANDI
 
 ### F2 — Günlük masaüstü ürünü ve multimodal ekler
 
-Durum: TAMAMLANDI — F2 uygulama geliştirmesi, kullanıcı kabulü ve release gate tamamlandı.
+Durum: TAMAMLANDI — F2.0 ve F2.1 tüm alt maddeleriyle 15 Ağustos 2026'da tamamlandı; native Wayland/Hyprland resize/minimize, mesaj gönderme ve bildirim action kullanıcı kabulü dahil ([kayıt](docs/f2_native_wayland_smoke_2026-08-15.md)). Açık kalan tek şey P0/P1 olmayan bir backlog bulgusu (Ctrl+O picker iptalinden sonra bazen sessiz kapanış); F3'ü bloklamıyor.
 
 Amaç: Terminal MVP'yi korurken, gerçek günlük kullanım için native masaüstü deneyimi, dosya/görsel ekleri ve ölçülebilir UX kalitesi oluşturmak.
 
 #### F2.0 — MVP stabilizasyonu ve ürün kalite kapısı
 
-Durum: TEST/ACCEPTANCE — otomasyon tamam; gerçek terminal/ekran kabulü açık.
+Durum: TAMAMLANDI — otomasyon ve gerçek terminal/ekran kabulü 15 Ağustos 2026'da tamamlandı (bkz. alt maddeler).
 
 Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını görünür ve tekrar üretilebilir hale getirmek.
 
@@ -168,26 +168,28 @@ Amaç: Yeni büyük yetenek eklemeden önce günlük kullanım regresyonlarını
   - Kanıt: bracketed paste/`Ctrl+V`/primary-selection mapping, çok satır normalizasyonu, UTF-8 kelime silme, `Ctrl+U` ve `Esc` temizleme unit testleri.
 - [x] Geçmiş otomasyonu: klavye, mouse wheel, `Home/End`, taşan uzun kullanıcı/model turu ve yeni yanıt geldiğinde en alta dönüş.
   - Kanıt: keyboard/mouse navigation, explicit latest-reset ve küçük terminal TestBackend render/scrollbar regression testleri.
-- [ ] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start; `/quit`, `Ctrl+C` ve terminal-close `SIGHUP` → iki servisi RAM'de bırakma smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış/yeniden açılış ve DB recovery'nin gerçek release koşumları açık.
+- [x] Yaşam döngüsü otomasyonu: gerçek release TUI'de `exit` → text + vision stop/start; `/quit`, `Ctrl+C` ve terminal-close `SIGHUP` → iki servisi RAM'de bırakma smoke PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-14.md)); ilk açılış, yeniden açılış ve DB recovery (yinelenen audit sequence otomatik onarımı) gerçek release binary koşumuyla PASS ([kayıt](docs/f2_lifecycle_smoke_2026-08-15.md)).
 - [x] Bildirim otomasyonu: yanıt hazır, model/servis hatası, approval bekleme; notification daemon yokken graceful fallback.
   - Kanıt: TUI/native completed, approval ve failed/interrupted başlıkları; native model `HAZIR → BAŞLATILIYOR` geçişinde tek hata bildirimi üretir. `try_notify_desktop` testleri daemon transport hatasını yutar, task/UI sonucunun değişmediğini doğrular; kullanıcı tercihi kapalıysa native bildirim üretilmez.
-- [ ] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
-  - Otomatik kanıt: Ratatui `TestBackend` küçük/geniş ve üç yeniden-boyutlandırma ölçüsünde en yeni tur, composer ve cursor sınırlarını PASS doğrular. Gerçek terminalde DPI/font/kontrast/focus kabulü açık kalır.
-- [ ] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
-  - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 gerçek local koşum senaryosu. C01–C07 ve C13 için kayıtsız local model smoke, C08–C10 için core task/audit regression geçti; tam insan değerlendirmesi ve ekran kabulü açık.
-- [ ] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
-  - Koşum kaydı model dosya/hash'i, CPU/RAM durumu, task ID ve kısa insan değerlendirmesi için alan içerir; kişisel prompt/yanıtı varsayılan olarak kaydetmez.
+- [x] TUI görsel smoke: küçük/büyük terminal, resize, yüksek DPI/font farklılığı, okunabilir kontrast ve odak/cursor davranışı.
+  - Otomatik kanıt: Ratatui `TestBackend` küçük/geniş ve üç yeniden-boyutlandırma ölçüsünde en yeni tur, composer ve cursor sınırlarını PASS doğrular.
+  - Gerçek terminal kanıtı: [docs/f2_tui_visual_smoke_2026-08-15.md](docs/f2_tui_visual_smoke_2026-08-15.md) — gerçek Hyprland/`foot` terminalinde (1.25 ölçek) küçük/büyük pencere ve büyük font koşumu; kontrast okunaklı, odak/cursor davranışı (dolu/boş imleç) doğru ayrışıyor. Tek kozmetik bulgu: büyük fontta durum çubuğu rozetleri taşıyor — P0/P1 değil, UX backlog'una eklendi.
+- [x] Sürümlü sohbet kalite seti: Türkçe **ve İngilizce** selamlaşma, kısa takip sorusu, uzun bağlam, konu değişimi, belirsizlik, tool-iddiası ve güvenli reddetme.
+  - Plan/koşum kaydı: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) — 20 senaryonun tamamı (C01–C20) gerçek TUI/native koşumu ve insan değerlendirmesiyle sonuçlandırıldı; 15 Ağustos 2026 kapanış retestinde model routing, sistem durumu, dosya seçici ve yaşam döngüsü davranışları PASS. C04/C12 bulguları düzeltildi, kalan emoji-cursor/latency notları UX backlog'unda ayrıca izleniyor.
+- [x] Her kalite örneği için beklenen davranış, model/prompt sürümü, latency limiti ve insan değerlendirme alanı.
+  - Kanıt: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) "Sohbet ve güvenlik senaryoları" tablosu; her satırda girdi, beklenen gözlem, kanıt kaynağı ve durum alanı dolu.
 - [x] Hata/backlog şablonu: kullanıcı raporu, tekrar adımı, beklenen/gerçek sonuç, log/task ID, düzeltme commit'i ve regression testi.
   - Şablon: [docs/f2_bug_report_template.md](docs/f2_bug_report_template.md). Hassas sohbet/ek verisi yerine redakte özet ve correlation ID kullanılır.
 - [x] Tek release komutu: format, test, clippy, dependency check, release build, servis health, kritik E2E smoke ve özet rapor.
   - Kanıt: `bash scripts/release_check.sh` offline format/test/Clippy/release build ile izole geçici SQLite üzerinde MCP `system.health` PASS ve unknown-tool DENY smoke çalıştırır. `--with-service` text model health'ini, `--with-vision` kurulu text + vision loopback health'ini ekler; hiçbiri modeli başlatmaz.
-- [ ] F2.0 exit review: açık P0/P1 kullanım hatası kalmadığının manuel kabulü.
+- [x] F2.0 exit review: açık P0/P1 kullanım hatası kalmadığının manuel kabulü.
+  - Kanıt: [docs/f2_conversation_qa.md](docs/f2_conversation_qa.md) "Sonuç kapısı" ve "F2 kapanış retesti — 15 Ağustos 2026" bölümleri; F2 release gate ve kullanıcı kabulü PASS olarak kapatıldı.
 
 Tamamlanma ölçütü: Günlük metin giriş/çıkış davranışı en az 20 senaryoda tekrar üretilebilir; yeni dilimler bu regression setini geçmeden birleşmez.
 
 #### F2.1 — Native desktop kabuğu ve gerçek görsel ekler
 
-Durum: TEST/ACCEPTANCE — native UI, güvenli attachment intake ve vision dikey dilimi kod/test olarak tamam; gerçek pencere kabulü açık.
+Durum: TAMAMLANDI — native UI, güvenli attachment intake, vision dikey dilimi ve gerçek pencere kabulü (resize/minimize, mesaj gönderme, bildirim action) 15 Ağustos 2026'da tamamlandı.
 
 Amaç: Terminal MVP'yi terk etmeden, fotoğraf ve dosya eklemeye uygun gerçek masaüstü deneyimini kurmak.
 
@@ -244,7 +246,7 @@ Bu turda kanıtlanan alt dilim:
 - [x] Çok dilli sohbet contractı: sistem prompt'u son kullanıcı mesajının dilini temel alır; Türkçe ve İngilizce doğal cevap istenir, kullanıcı istemedikçe çeviri/dil karışımı yapılmaz. Bu bir yanıt şablonu veya kullanıcıya özel kural değildir; gerçek çıktılar sürümlü QA setinde model kalitesi olarak ölçülür.
 - [x] Oturumluk ek makbuzu: ek gönderiminden sonra kullanıcı, yalnız filename/MIME/boyut/dimension/SHA-256/attachment ID metadata'sını görür; tekli/tümü temizler veya açıkça seçtiği JSON konumuna dışa aktarır. Makbuzlar 50 kayıtla sınırlı, persistent değildir; canonical path, ham byte, prompt, model yanıtı ve task/audit saklanmaz.
 - [x] Serbest metin tool yönlendirme sınırı: sohbet girdisi artık anahtar-kelime `if/else` ile capability'ye bağlanmaz. Tek model üretimi ya doğal yanıt ya da allowlist'teki tam capability kimliğini taşıyan dar bir intent envelope üretir; envelope registry, policy ve verifier tarafından bağımsız doğrulanır. Normal sohbet ek routing çağrısı veya yanıt şablonu kullanmaz.
-- [ ] Native UI Wayland/Hyprland gerçek smoke: release binary açılışı, HUD/composer görsel kontrolü, güncel focus dispatcher ve pencere kapanışı PASS ([kayıt](docs/f2_native_wayland_smoke_2026-08-14.md)); resize/minimize, `Ctrl+O` picker, mesaj gönderme ve bildirim action'ı için kullanıcı kabul koşumu açık.
+- [x] Native UI Wayland/Hyprland gerçek smoke: release binary açılışı, HUD/composer görsel kontrolü, güncel focus dispatcher ve pencere kapanışı PASS ([kayıt](docs/f2_native_wayland_smoke_2026-08-14.md)). 15 Ağustos 2026 takip koşumu ([kayıt](docs/f2_native_wayland_smoke_2026-08-15.md)): `Ctrl+O` picker gerçek dosya seçiciyle PASS. Bulunan "Tab ilk durağı yıkıcı düğme" riski aynı turda **düzeltildi ve gerçek binary'de doğrulandı**: composer artık açılışta varsayılan odağı alıyor, "Modeli RAM'den çıkar" tek aktivasyonla değil 4 saniyelik onay penceresiyle çalışıyor (`stop_model_button_is_armed`, test: `stop_model_button_requires_a_second_click_within_the_confirm_window`). Kullanıcı elle kabulü (15 Ağustos 2026): fare ile resize/minimize, gerçek klavyeyle mesaj yazıp gönderme ve bildirim action tıklaması PASS. Açık backlog notu: picker iptalinden sonra pencerenin bazen sessizce kapanması — muhtemelen `f2_conversation_qa.md` C14'teki bilinen "uygulama yanıt vermiyor" sorunuyla aynı kök neden (senkron `rfd` çağrısı event loop'u kilitliyor); P0/P1 değil, ayrıca izlenecek.
 - [x] Vision modeli/multimodal E2E: kullanıcı onayıyla indirilen Qwen2.5-VL 3B Q4_K_M + `mmproj`, CPU-only ayrı loopback servisinde gerçek PNG smoke'undan geçti. Kanıt: [f2_vision_smoke_2026-08-14.md](docs/f2_vision_smoke_2026-08-14.md).
 
 Tamamlanma ölçütü: Kullanıcı masaüstü penceresinden tek bir fotoğraf seçip ne gördüğünü sorabilir; ek hem UI'da görünür hem de core policy/audit zincirinde güvenli data olarak kalır.

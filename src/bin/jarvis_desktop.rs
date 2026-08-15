@@ -132,6 +132,24 @@ struct JarvisDesktop {
     orb_phase: f32,
     scroll_to_latest: bool,
     close_requested: bool,
+    /// Set when "MODELİ RAM'DEN ÇIKAR" is clicked/activated once; the button then requires a
+    /// second click within `STOP_MODEL_CONFIRM_WINDOW` to actually stop the service. This exists
+    /// because the button sits early in the left panel's keyboard tab order: without an armed
+    /// confirmation, a stray `Tab` followed by a space keystroke (for example while typing a
+    /// chat message that happens to contain one) would silently stop the local model.
+    stop_model_armed_at: Option<Instant>,
+    /// True once the composer has claimed initial keyboard focus. Without this, the left panel's
+    /// "MODELİ RAM'DEN ÇIKAR" button — being earlier in the layout — is the first `Tab` stop, so a
+    /// keyboard-first user who starts typing immediately would type into nothing. Defaulting focus
+    /// to the composer instead matches how a chat app is actually used.
+    composer_focus_claimed: bool,
+}
+
+const STOP_MODEL_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
+
+/// True while a "MODELİ RAM'DEN ÇIKAR" click is armed and awaiting its confirming second click.
+fn stop_model_button_is_armed(armed_at: Option<Instant>) -> bool {
+    armed_at.is_some_and(|armed_at| armed_at.elapsed() < STOP_MODEL_CONFIRM_WINDOW)
 }
 
 impl JarvisDesktop {
@@ -197,6 +215,8 @@ impl JarvisDesktop {
             orb_phase: 0.0,
             scroll_to_latest: true,
             close_requested: false,
+            stop_model_armed_at: None,
+            composer_focus_claimed: false,
         }
     }
 
@@ -728,17 +748,31 @@ impl JarvisDesktop {
         self.show_approval_controls(ui);
 
         ui.add_space(8.0);
+        let stop_model_armed = stop_model_button_is_armed(self.stop_model_armed_at);
+        let stop_model_button = if stop_model_armed {
+            egui::Button::new("EMİN MİSİN? TEKRAR TIKLA").fill(COLOR_GOLD)
+        } else {
+            egui::Button::new("MODELİ RAM'DEN ÇIKAR")
+        };
         if ui
-            .add_sized(
-                [ui.available_width(), 30.0],
-                egui::Button::new("MODELİ RAM'DEN ÇIKAR"),
-            )
+            .add_sized([ui.available_width(), 30.0], stop_model_button)
             .clicked()
         {
-            self.status = match stop_local_model_server() {
-                Ok(()) => "Model sunucusu durduruldu; RAM serbest bırakıldı.".into(),
-                Err(error) => error,
-            };
+            if stop_model_armed {
+                self.stop_model_armed_at = None;
+                self.status = match stop_local_model_server() {
+                    Ok(()) => "Model sunucusu durduruldu; RAM serbest bırakıldı.".into(),
+                    Err(error) => error,
+                };
+            } else {
+                // First click/activation only arms the button; a stray Tab+space (or a single
+                // misclick) can no longer stop the model server outright.
+                self.stop_model_armed_at = Some(Instant::now());
+            }
+        } else if stop_model_armed {
+            // Keep repainting while armed so the confirmation window visibly expires instead of
+            // silently staying armed until the next unrelated redraw.
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
         ui.label(RichText::new("Pencereyi kapatmak modeli durdurmaz.").size(12.0));
 
@@ -856,6 +890,10 @@ impl JarvisDesktop {
                 .desired_rows(3)
                 .hint_text("Mesajını yaz. Enter gönderir; Shift+Enter yeni satır ekler."),
         );
+        if !self.composer_focus_claimed {
+            response.request_focus();
+            self.composer_focus_claimed = true;
+        }
         let submit_with_enter = response.has_focus()
             && ui.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift);
         ui.horizontal(|ui| {
@@ -1494,13 +1532,14 @@ mod tests {
     use super::{
         acquire_desktop_instance_lock, desktop_notification, focus_jarvis_window_with,
         is_explicit_model_exit, message_matches_filter, model_unavailable_notification,
-        notification_requests_jarvis_focus, send_notification_with, turkish_search_fold, Message,
-        MessageRole, NOTIFICATION_FOCUS_ACTION,
+        notification_requests_jarvis_focus, send_notification_with, stop_model_button_is_armed,
+        turkish_search_fold, Message, MessageRole, NOTIFICATION_FOCUS_ACTION,
+        STOP_MODEL_CONFIRM_WINDOW,
     };
     use jarvis_core::TaskState;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temporary_lock_path() -> PathBuf {
         std::env::temp_dir()
@@ -1630,5 +1669,18 @@ mod tests {
         assert!(
             model_unavailable_notification("MODEL HAZIR", "MODEL BAŞLATILIYOR", false).is_none()
         );
+    }
+
+    #[test]
+    fn stop_model_button_requires_a_second_click_within_the_confirm_window() {
+        // Unarmed: no accidental first click/keyboard-activate (e.g. a stray Tab + space while
+        // typing a chat message) stops the model server outright.
+        assert!(!stop_model_button_is_armed(None));
+        // Just armed: the very next click within the window is treated as confirmation.
+        assert!(stop_model_button_is_armed(Some(Instant::now())));
+        // Expired: an old arm timestamp (well past STOP_MODEL_CONFIRM_WINDOW) requires the user
+        // to click again from scratch rather than staying silently armed forever.
+        let expired = Instant::now() - (STOP_MODEL_CONFIRM_WINDOW + Duration::from_secs(1));
+        assert!(!stop_model_button_is_armed(Some(expired)));
     }
 }
