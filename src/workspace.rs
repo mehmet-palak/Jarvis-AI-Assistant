@@ -15,6 +15,26 @@ use crate::{ContentProvenance, ContentRef};
 pub const MAX_WORKSPACE_DOCUMENT_BYTES: u64 = 512 * 1024;
 pub const MAX_WORKSPACE_CHUNK_CHARS: usize = 1_200;
 
+/// F3 "Retrieval policy: ... result sayısı". How many ranked citations a single conversational
+/// turn ever asks the store for. A named, single value rather than a literal at the call site so
+/// the policy is one visible thing, not an implicit magic number.
+pub const WORKSPACE_RETRIEVAL_RESULT_LIMIT: usize = 4;
+
+/// F3 "Retrieval policy: ... token/context budget". The combined character ceiling across every
+/// citation injected into one turn's model context — a separate backstop from
+/// `WORKSPACE_RETRIEVAL_RESULT_LIMIT`, because raising the result limit or `MAX_WORKSPACE_CHUNK_CHARS`
+/// later must never silently grow how much untrusted text reaches the model in one turn without
+/// this also being revisited.
+pub const WORKSPACE_CONTEXT_CHAR_BUDGET: usize = 4_000;
+
+/// F3 "Retrieval policy: relevance threshold". When an embedding signal is available, a chunk
+/// that *does* have a stored vector but scores below this cosine-similarity floor is treated as
+/// not actually relevant, even if it happened to FTS-match a query term — this is what stops a
+/// weak, incidental keyword overlap from being surfaced as if it were a real source hit. Chunks
+/// with no stored embedding yet are exempt from this specific check (their relevance still rests
+/// on the FTS match alone, so FTS-only mode is completely unaffected by this constant).
+pub const MIN_RELEVANT_SIMILARITY: f32 = 0.10;
+
 /// F3 "Metadata/FTS index: ... indeks sürümü". The chunking/extraction algorithm's own version,
 /// persisted per document (`workspace_documents.index_schema_version`) — distinct from the
 /// SQLite column-migration version (`persistence::CURRENT_SCHEMA_VERSION`). If a future JARVIS

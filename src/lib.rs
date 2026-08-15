@@ -56,7 +56,8 @@ pub(crate) use workspace::{
 pub use workspace::{
     preview_workspace_index, WorkspaceCitation, WorkspaceFolderIndexReport, WorkspaceIndexPreview,
     WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MAX_WORKSPACE_CHUNK_CHARS,
-    MAX_WORKSPACE_DOCUMENT_BYTES,
+    MAX_WORKSPACE_DOCUMENT_BYTES, MIN_RELEVANT_SIMILARITY, WORKSPACE_CONTEXT_CHAR_BUDGET,
+    WORKSPACE_RETRIEVAL_RESULT_LIMIT,
 };
 
 use std::ffi::CString;
@@ -3010,6 +3011,153 @@ mod tests {
             1,
             "already-embedded content must not be re-embedded on a second pass"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Retrieval policy: relevance threshold". `far.md` shares a real FTS term with the query
+    /// ("elma") but `FixedEmbeddingProvider` embeds it orthogonally to the query's marker
+    /// direction (cosine similarity 0.0, below `MIN_RELEVANT_SIMILARITY`) — it must be dropped
+    /// entirely, not merely ranked second, proving the floor actually excludes weak matches
+    /// rather than only reordering them.
+    #[test]
+    fn hybrid_search_drops_a_weakly_relevant_chunk_below_the_similarity_floor() {
+        let root = temporary_workspace("hybrid-relevance-floor");
+        fs::write(
+            root.join("close.md"),
+            "elma hakkında bir not MARKER burada duruyor",
+        )
+        .expect("semantically close fixture");
+        fs::write(root.join("far.md"), "elma hakkında ayrı bir not").expect("far fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("close.md"), Some(&provider))
+            .expect("close.md indexes");
+        store
+            .index_workspace_document_with_embedding(&root, Path::new("far.md"), Some(&provider))
+            .expect("far.md indexes");
+
+        let query = "elma MARKER";
+        let query_embedding = provider.embed(query).expect("query embeds");
+        let results = store
+            .hybrid_search_workspace(
+                query,
+                Some((provider.embedding_model_id(), &query_embedding)),
+                4,
+            )
+            .expect("hybrid search succeeds");
+        assert_eq!(
+            results.len(),
+            1,
+            "the orthogonal, weakly-relevant chunk must be excluded, not just re-ranked"
+        );
+        assert_eq!(
+            results[0]
+                .canonical_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("close.md")
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Retrieval policy: duplicate suppression". Two different documents that happen to share
+    /// byte-identical chunk text (the architecture already reuses one embedding across them, per
+    /// ADR-0004) must still surface only once in retrieval results — the second occurrence adds
+    /// no information and would only spend context budget for nothing.
+    #[test]
+    fn hybrid_search_suppresses_duplicate_chunk_content_across_documents() {
+        let root = temporary_workspace("hybrid-dedup");
+        let shared_text = "ortak paragraf tekrarlanan-terim burada duruyor";
+        fs::write(root.join("a.md"), shared_text).expect("first copy");
+        fs::write(root.join("b.md"), shared_text).expect("second, byte-identical copy");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+
+        store
+            .index_workspace_document(&root, Path::new("a.md"))
+            .expect("a.md indexes");
+        store
+            .index_workspace_document(&root, Path::new("b.md"))
+            .expect("b.md indexes");
+
+        let results = store
+            .hybrid_search_workspace("tekrarlanan-terim", None, 4)
+            .expect("plain FTS hybrid search succeeds");
+        assert_eq!(
+            results.len(),
+            1,
+            "identical chunk text from two documents must be deduplicated"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Retrieval policy: ... kaynağı olmayan cevabı engelleme". A query with no genuine
+    /// overlap with anything indexed must retrieve nothing at all — never a low-quality guess
+    /// padded out just to fill the result count. This is the concrete backstop that keeps a reply
+    /// from ever being dressed up with a source that was not actually found.
+    #[test]
+    fn no_relevant_match_yields_zero_citations_not_a_padded_guess() {
+        let root = temporary_workspace("hybrid-no-match");
+        fs::write(root.join("notes.md"), "elma hakkında bir not").expect("unrelated fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        store
+            .index_workspace_document(&root, Path::new("notes.md"))
+            .expect("notes.md indexes");
+
+        let results = store
+            .hybrid_search_workspace("bariztamamenalakasizsorgu", None, 4)
+            .expect("hybrid search succeeds even with zero matches");
+        assert!(results.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 "Retrieval policy: ... token/context budget", end-to-end through a real conversation
+    /// turn. Four documents each near `MAX_WORKSPACE_CHUNK_CHARS` share a unique search term, so
+    /// all four would otherwise qualify under `WORKSPACE_RETRIEVAL_RESULT_LIMIT` — but their
+    /// combined size exceeds `WORKSPACE_CONTEXT_CHAR_BUDGET`, so fewer than 4 must actually reach
+    /// the model as citations.
+    #[test]
+    fn conversation_context_stays_under_the_workspace_char_budget() {
+        let root = temporary_workspace("hybrid-budget");
+        for index in 0..4 {
+            let padding = "dolgu metni satırı burada tekrar ediyor ".repeat(28);
+            fs::write(
+                root.join(format!("doc{index}.md")),
+                format!("bugetterimi{index} {padding}"),
+            )
+            .expect("budget fixture");
+        }
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        for index in 0..4 {
+            runtime
+                .index_workspace_document(&root, Path::new(&format!("doc{index}.md")), true)
+                .expect("fixture indexes");
+        }
+
+        let provider = ContextCapturingProvider::default();
+        let (_, result, _) = runtime.handle_with_provider(
+            request(
+                "hybrid-budget-1",
+                "bugetterimi0 bugetterimi1 bugetterimi2 bugetterimi3 hakkında ne var?",
+            ),
+            &provider,
+        );
+        let cited = result
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.starts_with("workspace.citation:"))
+            .count();
+        assert!(
+            cited < 4,
+            "the char budget must stop citations short of the raw result-count limit, got {cited}"
+        );
+        assert!(cited > 0, "some of the budget must still be used");
 
         let _ = fs::remove_dir_all(&root);
     }

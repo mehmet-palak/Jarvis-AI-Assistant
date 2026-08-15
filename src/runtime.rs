@@ -378,9 +378,26 @@ impl Runtime {
         let query_embedding_ref = query_embedding
             .as_ref()
             .map(|(model_id, vector)| (model_id.as_str(), vector.as_slice()));
-        store
-            .hybrid_search_workspace(query, query_embedding_ref, 4)
-            .unwrap_or_default()
+        let citations = store
+            .hybrid_search_workspace(query, query_embedding_ref, WORKSPACE_RETRIEVAL_RESULT_LIMIT)
+            .unwrap_or_default();
+        // F3 "Retrieval policy: token/context budget". `citations` already comes back best-first
+        // and duplicate-suppressed; this is the last, caller-side backstop that keeps the total
+        // untrusted text handed to the model in one turn under a fixed ceiling regardless of how
+        // many results the result-count limit or a future chunk-size change would otherwise allow.
+        let mut budget_remaining = WORKSPACE_CONTEXT_CHAR_BUDGET;
+        citations
+            .into_iter()
+            .take_while(|citation| {
+                let cost = citation.content.chars().count();
+                if cost > budget_remaining {
+                    false
+                } else {
+                    budget_remaining -= cost;
+                    true
+                }
+            })
+            .collect()
     }
 
     pub fn pending_approvals(&self) -> Vec<&Approval> {

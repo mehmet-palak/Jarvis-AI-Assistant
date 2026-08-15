@@ -6,6 +6,7 @@
 //! validation the rest of the crate uses (`validate_teacher_example`, `validate_memory_record`,
 //! workspace path/content checks) before anything reaches SQLite.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,6 +22,7 @@ use crate::{
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     EmbeddingProvider, MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample,
     WorkspaceCitation, WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
+    MIN_RELEVANT_SIMILARITY,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -833,11 +835,21 @@ impl SqliteStore {
     /// FTS + embedding hybrid retrieval via Reciprocal Rank Fusion: both signals contribute to
     /// the final order, neither is "primary" with the other as a fallback. `query_embedding` is
     /// `None` whenever the caller has no reachable embedding provider — in that case this
-    /// degrades to exactly `search_workspace`'s plain FTS order, unchanged. A chunk without a
-    /// stored embedding *from the same model* (indexed before an embedding provider was ever
-    /// attached, or left over from a since-swapped model) still participates via its FTS rank
-    /// alone; it is never penalized to zero. `query_embedding` carries its own model id so a
-    /// stored vector from a different model can never be compared against it by mistake.
+    /// degrades to exactly `search_workspace`'s plain FTS order (still duplicate-suppressed). A
+    /// chunk without a stored embedding *from the same model* (indexed before an embedding
+    /// provider was ever attached, or left over from a since-swapped model) still participates
+    /// via its FTS rank alone; it is never penalized to zero. `query_embedding` carries its own
+    /// model id so a stored vector from a different model can never be compared against it by
+    /// mistake.
+    ///
+    /// F3 "Retrieval policy": also enforces the parts of that policy that belong at the ranking
+    /// layer, not the caller — relevance threshold (`MIN_RELEVANT_SIMILARITY`) and duplicate
+    /// suppression (identical chunk text kept once, highest-ranked occurrence only). `limit` is
+    /// a ceiling on the *count* returned, never a guarantee that many will actually come back —
+    /// a query with no genuinely relevant match yields fewer results, down to zero, rather than
+    /// padding out to `limit` with weak matches. This is the concrete backstop behind "kaynağı
+    /// olmayan cevabı engelleme": a caller can never receive a citation dressed up as a source
+    /// when nothing actually cleared the relevance bar.
     pub fn hybrid_search_workspace(
         &self,
         query: &str,
@@ -850,42 +862,55 @@ impl SqliteStore {
         // A broader FTS candidate pool gives the embedding signal something real to re-rank;
         // re-ranking a single top-1 FTS hit would be a no-op.
         let candidates = self.search_workspace(query, (limit * 4).clamp(limit, 16))?;
-        let Some((embedding_model_id, query_embedding)) = query_embedding else {
-            return Ok(candidates.into_iter().take(limit).collect());
-        };
-        if candidates.is_empty() {
-            return Ok(candidates);
-        }
-        const RRF_K: f64 = 60.0;
-        let mut scored: Vec<(f64, WorkspaceCitation)> = candidates
-            .into_iter()
-            .enumerate()
-            .map(|(fts_rank, citation)| (1.0 / (RRF_K + (fts_rank + 1) as f64), citation))
-            .collect();
-        let similarities: Vec<f32> = scored
-            .iter()
-            .map(|(_, citation)| {
-                self.chunk_embedding(&citation.chunk_id, embedding_model_id)
-                    .map(|stored| cosine_similarity(query_embedding, &stored))
-                    .unwrap_or(f32::NEG_INFINITY)
-            })
-            .collect();
-        let mut similarity_order: Vec<usize> = (0..scored.len()).collect();
-        similarity_order.sort_by(|&a, &b| {
-            similarities[b]
-                .partial_cmp(&similarities[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for (embedding_rank, &index) in similarity_order.iter().enumerate() {
-            if similarities[index].is_finite() {
-                scored[index].0 += 1.0 / (RRF_K + (embedding_rank + 1) as f64);
+        let ranked = match query_embedding {
+            None => candidates,
+            Some(_) if candidates.is_empty() => candidates,
+            Some((embedding_model_id, query_embedding)) => {
+                const RRF_K: f64 = 60.0;
+                let mut scored: Vec<(f64, Option<f32>, WorkspaceCitation)> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(fts_rank, citation)| {
+                        let similarity = self
+                            .chunk_embedding(&citation.chunk_id, embedding_model_id)
+                            .map(|stored| cosine_similarity(query_embedding, &stored));
+                        (1.0 / (RRF_K + (fts_rank + 1) as f64), similarity, citation)
+                    })
+                    .collect();
+                let mut similarity_order: Vec<usize> = (0..scored.len()).collect();
+                similarity_order.sort_by(|&a, &b| {
+                    let similarity_a = scored[a].1.unwrap_or(f32::NEG_INFINITY);
+                    let similarity_b = scored[b].1.unwrap_or(f32::NEG_INFINITY);
+                    similarity_b
+                        .partial_cmp(&similarity_a)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for (embedding_rank, &index) in similarity_order.iter().enumerate() {
+                    if scored[index].1.is_some_and(f32::is_finite) {
+                        scored[index].0 += 1.0 / (RRF_K + (embedding_rank + 1) as f64);
+                    }
+                }
+                // Relevance threshold: a stored-but-weak vector disqualifies the chunk even
+                // though it FTS-matched; a chunk with no stored vector at all is exempt (its FTS
+                // match is still the whole story for it, unchanged from before this policy).
+                scored.retain(|(_, similarity, _)| {
+                    similarity.is_none_or(|value| value >= MIN_RELEVANT_SIMILARITY)
+                });
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored
+                    .into_iter()
+                    .map(|(_, _, citation)| citation)
+                    .collect()
             }
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scored
+        };
+        // Duplicate suppression: identical chunk text (the same content indexed under more than
+        // one document/path) adds no new information the second time and only spends context
+        // budget for nothing — keep the first, highest-ranked occurrence only.
+        let mut seen_content = HashSet::new();
+        Ok(ranked
             .into_iter()
+            .filter(|citation| seen_content.insert(citation.content.clone()))
             .take(limit)
-            .map(|(_, citation)| citation)
             .collect())
     }
 
