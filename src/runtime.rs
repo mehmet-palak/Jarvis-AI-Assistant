@@ -293,6 +293,30 @@ impl Runtime {
         Ok(report)
     }
 
+    /// Indexes every file `preview_workspace_index` reports as `included` under `approved_root`.
+    /// Reuses `index_workspace_document` per file — no second, divergent ingestion path — so
+    /// every existing per-file guarantee (secret-name/size/binary/UTF-8 rejection, path
+    /// containment, chunking, audit) still applies exactly once, file by file.
+    pub fn index_workspace_folder(
+        &mut self,
+        approved_root: &Path,
+        exclude_patterns: &[String],
+        user_approved: bool,
+    ) -> Result<WorkspaceFolderIndexReport, String> {
+        if !user_approved {
+            return Err("workspace folder indexing requires explicit user approval".into());
+        }
+        let preview = preview_workspace_index(approved_root, exclude_patterns)?;
+        let mut report = WorkspaceFolderIndexReport::default();
+        for relative_path in preview.included {
+            match self.index_workspace_document(approved_root, &relative_path, true) {
+                Ok(ingestion) => report.indexed.push(ingestion),
+                Err(error) => report.failed.push((relative_path, error)),
+            }
+        }
+        Ok(report)
+    }
+
     fn approved_workspace_context(&self, query: &str) -> Vec<WorkspaceCitation> {
         self.store
             .as_ref()

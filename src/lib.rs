@@ -577,6 +577,15 @@ pub struct WorkspaceIngestionReport {
     pub indexed_at: u64,
 }
 
+/// Result of indexing every file `preview_workspace_index` reported as `included`. A per-file
+/// failure (e.g. it turned out to be binary once actually opened, even though the metadata-only
+/// preview didn't know that) does not abort the rest of the folder.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceFolderIndexReport {
+    pub indexed: Vec<WorkspaceIngestionReport>,
+    pub failed: Vec<(PathBuf, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCitation {
     pub document_id: String,
@@ -650,6 +659,122 @@ pub(crate) fn validate_workspace_document_content(path: &Path, bytes: &[u8]) -> 
     std::str::from_utf8(bytes)
         .map_err(|error| format!("workspace document must be UTF-8 text: {error}"))?;
     Ok(())
+}
+
+/// A cheap, metadata-only scan of a folder a user is considering for indexing — the "izin UX'i"
+/// preview shown before folder-level indexing runs. It never opens a file's content (that full
+/// secret/binary/UTF-8/size check still runs per-file in `index_workspace_document` at actual
+/// indexing time); this only reports scope so the user can decide before anything is read.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceIndexPreview {
+    pub root: PathBuf,
+    /// Relative paths that would currently be eligible for indexing.
+    pub included: Vec<PathBuf>,
+    /// Excluded because the file name looks like a secret (`.env`, `*.pem`, `*.key`, `id_rsa*`).
+    pub excluded_secret_like: Vec<PathBuf>,
+    /// Excluded because the file is larger than `MAX_WORKSPACE_DOCUMENT_BYTES`.
+    pub excluded_oversized: Vec<PathBuf>,
+    /// Excluded because it matched a caller-supplied exclude pattern.
+    pub excluded_by_pattern: Vec<PathBuf>,
+    /// Sum of `included` file sizes — a size estimate, not an exact post-chunking count.
+    pub estimated_total_bytes: u64,
+}
+
+/// Directories never worth indexing regardless of user-supplied exclude patterns: version
+/// control internals and dependency/build caches. The user can still index files inside them by
+/// pointing `/index` directly at one; this only affects the folder-level preview/scan default.
+const WORKSPACE_INDEX_SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv"];
+
+/// True if `relative` matches a caller-supplied exclude pattern. Deliberately simple — a bare
+/// `*.ext` matches by extension, anything else matches by substring containment — rather than a
+/// full glob engine, so this has no new dependency and stays predictable to explain to a user.
+fn path_matches_exclude_pattern(relative: &Path, pattern: &str) -> bool {
+    if let Some(extension) = pattern.strip_prefix("*.") {
+        return relative
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension));
+    }
+    relative.to_string_lossy().contains(pattern)
+}
+
+/// Scans `root` (which must already be a real, contained directory — same containment rule as
+/// `validate_workspace_document_path`) and reports what folder-level indexing would include.
+pub fn preview_workspace_index(
+    root: &Path,
+    exclude_patterns: &[String],
+) -> Result<WorkspaceIndexPreview, String> {
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("workspace root unavailable: {error}"))?;
+    if !canonical_root.is_dir() {
+        return Err("workspace root must be a directory".into());
+    }
+    let mut preview = WorkspaceIndexPreview {
+        root: canonical_root.clone(),
+        ..Default::default()
+    };
+    let mut pending_dirs = vec![canonical_root.clone()];
+    while let Some(directory) = pending_dirs.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("workspace directory unreadable: {error}"))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("workspace directory entry error: {error}"))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&canonical_root)
+                .unwrap_or(&path)
+                .to_path_buf();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("workspace entry type unknown: {error}"))?;
+            if file_type.is_dir() {
+                let is_skipped_dir = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| WORKSPACE_INDEX_SKIP_DIRS.contains(&name));
+                if !is_skipped_dir {
+                    pending_dirs.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue; // symlinks and other special entries are not indexed
+            }
+            if exclude_patterns
+                .iter()
+                .any(|pattern| path_matches_exclude_pattern(&relative, pattern))
+            {
+                preview.excluded_by_pattern.push(relative);
+                continue;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if file_name == ".env"
+                || file_name.ends_with(".pem")
+                || file_name.ends_with(".key")
+                || file_name.starts_with("id_rsa")
+            {
+                preview.excluded_secret_like.push(relative);
+                continue;
+            }
+            let byte_size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            if byte_size > MAX_WORKSPACE_DOCUMENT_BYTES {
+                preview.excluded_oversized.push(relative);
+                continue;
+            }
+            preview.estimated_total_bytes += byte_size;
+            preview.included.push(relative);
+        }
+    }
+    preview.included.sort();
+    preview.excluded_secret_like.sort();
+    preview.excluded_oversized.sort();
+    preview.excluded_by_pattern.sort();
+    Ok(preview)
 }
 
 pub(crate) fn chunk_workspace_text(content: &str) -> Vec<String> {
@@ -2718,6 +2843,69 @@ mod tests {
         assert_eq!(proposals[0].record.key, "ok");
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("entries[1]"));
+    }
+
+    /// F3 "Workspace izin UX'i: klasör seçimi, kök sınırı, indeks kapsamı, exclude pattern ve
+    /// indeks boyutu tahmini kullanıcıya gösterilir": proves the preview categorizes correctly
+    /// without ever needing `index_workspace_folder`/DB access — it is metadata-only.
+    #[test]
+    fn preview_workspace_index_categorizes_files_without_opening_them() {
+        let root = temporary_workspace("preview");
+        fs::write(root.join("notes.md"), "kısa bir not").expect("normal file");
+        fs::write(root.join(".env"), "SECRET=1").expect("secret-like file");
+        fs::write(root.join("id_rsa"), "not really a key").expect("secret-like file");
+        fs::write(
+            root.join("huge.txt"),
+            "a".repeat((MAX_WORKSPACE_DOCUMENT_BYTES + 1) as usize),
+        )
+        .expect("oversized file");
+        fs::write(root.join("debug.log"), "log satırı").expect("pattern-excluded file");
+        fs::create_dir_all(root.join(".git")).expect("skip dir");
+        fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main")
+            .expect(".git internals must never be scanned by default");
+
+        let preview = preview_workspace_index(&root, &["*.log".to_string()]).expect("preview");
+        assert_eq!(preview.included, vec![PathBuf::from("notes.md")]);
+        assert_eq!(preview.excluded_secret_like.len(), 2);
+        assert_eq!(preview.excluded_oversized, vec![PathBuf::from("huge.txt")]);
+        assert_eq!(
+            preview.excluded_by_pattern,
+            vec![PathBuf::from("debug.log")]
+        );
+        assert!(preview.estimated_total_bytes < MAX_WORKSPACE_DOCUMENT_BYTES);
+        // .git internals must not appear anywhere, not even as an exclusion reason.
+        assert!(preview
+            .excluded_secret_like
+            .iter()
+            .chain(&preview.excluded_oversized)
+            .chain(&preview.excluded_by_pattern)
+            .chain(&preview.included)
+            .all(|path| !path.starts_with(".git")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_workspace_folder_indexes_only_the_preview_included_set_and_requires_approval() {
+        let root = temporary_workspace("folder-index");
+        fs::write(root.join("a.md"), "A dosyası içerik").expect("file a");
+        fs::write(root.join("b.md"), "B dosyası içerik").expect("file b");
+        fs::write(root.join(".env"), "SECRET=1").expect("secret-like file");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        assert!(runtime
+            .index_workspace_folder(&root, &[], false)
+            .unwrap_err()
+            .contains("approval"));
+
+        let report = runtime
+            .index_workspace_folder(&root, &[], true)
+            .expect("folder indexing succeeds");
+        assert_eq!(report.indexed.len(), 2);
+        assert!(report.failed.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -14,10 +14,10 @@ use crossterm::{
 };
 use jarvis_core::{
     attachment_receipt_manifest, inspect_local_attachment, memory_export, memory_import,
-    parse_data_sensitivity, parse_memory_namespace, profile_manifest, propose_memory,
-    propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity, InputType,
-    LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, ProfileField,
-    Request, Runtime, SqliteStore, TaskState, VisionProvider,
+    parse_data_sensitivity, parse_memory_namespace, preview_workspace_index, profile_manifest,
+    propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity,
+    InputType, LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal,
+    ProfileField, Request, Runtime, SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -1030,6 +1030,80 @@ fn submit(
         }
         return;
     }
+    if let Some(rest) = input.strip_prefix("/index-preview ").map(str::trim) {
+        let mut parts = rest.split_whitespace();
+        let Some(folder) = parts.next() else {
+            app.push_system("Kullanım: /index-preview <proje-içi-göreli-klasör> [hariç-desen ...]");
+            return;
+        };
+        let exclude_patterns: Vec<String> = parts.map(str::to_owned).collect();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let target = root.join(folder);
+        match preview_workspace_index(&target, &exclude_patterns) {
+            Ok(preview) => {
+                let sample = preview
+                    .included
+                    .iter()
+                    .take(10)
+                    .map(|path| format!("  {}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let more = preview.included.len().saturating_sub(10);
+                let more_note = if more > 0 {
+                    format!("\n  … ve {more} dosya daha")
+                } else {
+                    String::new()
+                };
+                app.push_system(format!(
+                    "Önizleme: {} — {} dosya indekslenecek (~{} KiB), {} şifre-benzeri, {} boyut limiti üstü, {} desenle hariç tutuldu.\n{sample}{more_note}\nGerçekten indekslemek için: /index-folder {folder}{}",
+                    preview.root.display(),
+                    preview.included.len(),
+                    preview.estimated_total_bytes.div_ceil(1024),
+                    preview.excluded_secret_like.len(),
+                    preview.excluded_oversized.len(),
+                    preview.excluded_by_pattern.len(),
+                    if exclude_patterns.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", exclude_patterns.join(" "))
+                    }
+                ));
+            }
+            Err(error) => app.push_system(format!("Önizleme alınamadı: {error}")),
+        }
+        return;
+    }
+    if let Some(rest) = input.strip_prefix("/index-folder ").map(str::trim) {
+        let mut parts = rest.split_whitespace();
+        let Some(folder) = parts.next() else {
+            app.push_system("Kullanım: /index-folder <proje-içi-göreli-klasör> [hariç-desen ...]");
+            return;
+        };
+        let exclude_patterns: Vec<String> = parts.map(str::to_owned).collect();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let target = root.join(folder);
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .index_workspace_folder(&target, &exclude_patterns, true)
+        {
+            Ok(report) => {
+                let mut message = format!("{} dosya indekslendi.", report.indexed.len());
+                if !report.failed.is_empty() {
+                    let failures = report
+                        .failed
+                        .iter()
+                        .map(|(path, error)| format!("{}: {error}", path.display()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    message.push_str(&format!("\nBaşarısız: {failures}"));
+                }
+                app.push_system(message);
+            }
+            Err(error) => app.push_system(format!("Klasör indekslenemedi: {error}")),
+        }
+        return;
+    }
     if let Some(relative_path) = input.strip_prefix("/index ").map(str::trim) {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         match runtime
@@ -1188,7 +1262,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>, /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...]. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
