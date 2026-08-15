@@ -474,6 +474,96 @@ pub fn isolate_memory_as_data(record: &MemoryRecord) -> String {
     )
 }
 
+/// Portable JSON backup of every memory record (any namespace), for the F3 "Memory
+/// migration/backup ... export/import" requirement. Excludes `memory_id` and `source`: import
+/// always mints a fresh id (matching how `propose_memory` already works — nothing round-trips a
+/// stable external id) and re-attributes `source` to the import action itself, so the origin of a
+/// re-imported record is never confused with wherever it first came from.
+pub fn memory_export(records: &[MemoryRecord]) -> Result<String, String> {
+    let entries = records
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "namespace": record.namespace.as_str(),
+                "key": record.key,
+                "value": record.value,
+                "sensitivity": record.sensitivity.as_str(),
+                "include_in_model_context": record.include_in_model_context,
+                "expires_at": record.expires_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "kind": "jarvis-memory-export",
+        "entries": entries,
+    }))
+    .map(|serialized| format!("{serialized}\n"))
+    .map_err(|error| format!("memory export serialization failed: {error}"))
+}
+
+/// Parses a `memory_export` document back into proposals — never commits anything directly.
+/// Import is only ever reachable through an explicit user command (`/memory import <path>`); the
+/// caller must still run each proposal through the same approval path as any other memory write
+/// (this project has exactly one way to persist memory, and import does not get a second one).
+/// A malformed entry is skipped with its reason collected rather than aborting the whole import,
+/// so one bad row in a hand-edited export file doesn't block the rest.
+pub fn memory_import(
+    source: impl Into<String>,
+    json: &str,
+) -> Result<(Vec<MemoryProposal>, Vec<String>), String> {
+    let source = source.into();
+    let document: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| format!("invalid memory export JSON: {error}"))?;
+    let entries = document
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "memory export JSON has no \"entries\" array".to_string())?;
+    let mut proposals = Vec::new();
+    let mut skipped = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let parsed = (|| -> Result<MemoryProposal, String> {
+            let namespace_word = entry
+                .get("namespace")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing namespace")?;
+            let namespace = MemoryNamespace::from_str(namespace_word)?;
+            let key = entry
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing key")?;
+            let value = entry
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing value")?;
+            let sensitivity_word = entry
+                .get("sensitivity")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing sensitivity")?;
+            let sensitivity = DataSensitivity::from_str(sensitivity_word)?;
+            let include_in_model_context = entry
+                .get("include_in_model_context")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let expires_at = entry.get("expires_at").and_then(serde_json::Value::as_u64);
+            propose_memory(
+                namespace,
+                key,
+                value,
+                sensitivity,
+                source.clone(),
+                include_in_model_context,
+                expires_at,
+            )
+        })();
+        match parsed {
+            Ok(proposal) => proposals.push(proposal),
+            Err(error) => skipped.push(format!("entries[{index}]: {error}")),
+        }
+    }
+    Ok((proposals, skipped))
+}
+
 pub const MAX_WORKSPACE_DOCUMENT_BYTES: u64 = 512 * 1024;
 pub const MAX_WORKSPACE_CHUNK_CHARS: usize = 1_200;
 
@@ -2571,6 +2661,65 @@ mod tests {
         assert_eq!(parse_memory_namespace("bilinmeyen"), None);
     }
 
+    /// F3 "Memory migration/backup ... export/import": a round trip must reproduce every field
+    /// that matters (namespace/key/value/sensitivity/model-context/expiry), and never leak the
+    /// original `memory_id`/`source` as if they were meant to be restored verbatim.
+    #[test]
+    fn memory_export_then_import_round_trips_every_field_except_id_and_source() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let proposal = propose_memory(
+            MemoryNamespace::Project,
+            "proje-notu",
+            "JARVIS F3 devam ediyor",
+            DataSensitivity::Sensitive,
+            "tui-user-approved-profile",
+            false,
+            Some(now_epoch() + 3_600),
+        )
+        .expect("valid proposal");
+        runtime
+            .commit_memory_proposal(&proposal, true)
+            .expect("record persists");
+        let exported = memory_export(&runtime.list_memory().expect("list")).expect("exports");
+        assert!(!exported.contains("memory_id"));
+        assert!(!exported.contains("tui-user-approved-profile"));
+
+        let (proposals, skipped) =
+            memory_import("memory-import", &exported).expect("import parses");
+        assert!(skipped.is_empty());
+        assert_eq!(proposals.len(), 1);
+        let imported = &proposals[0].record;
+        assert_eq!(imported.namespace, MemoryNamespace::Project);
+        assert_eq!(imported.key, "proje-notu");
+        assert_eq!(imported.value, "JARVIS F3 devam ediyor");
+        assert_eq!(imported.sensitivity, DataSensitivity::Sensitive);
+        assert!(!imported.include_in_model_context);
+        assert_eq!(imported.expires_at, proposal.record.expires_at);
+        assert_eq!(imported.source, "memory-import");
+        assert_ne!(imported.memory_id, proposal.record.memory_id);
+    }
+
+    /// A malformed entry must not abort the whole import; the caller decides what to do with the
+    /// skipped list (e.g. show it to the user), and the entries that were fine still import.
+    #[test]
+    fn memory_import_skips_a_malformed_entry_without_discarding_the_valid_ones() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "kind": "jarvis-memory-export",
+            "entries": [
+                {"namespace": "PROJECT", "key": "ok", "value": "iyi", "sensitivity": "INTERNAL", "include_in_model_context": true, "expires_at": null},
+                {"namespace": "NOT_A_REAL_NAMESPACE", "key": "bozuk", "value": "x", "sensitivity": "INTERNAL"},
+            ],
+        })
+        .to_string();
+        let (proposals, skipped) = memory_import("test", &json).expect("import parses");
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].record.key, "ok");
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("entries[1]"));
+    }
+
     #[test]
     fn workspace_rag_requires_approval_indexes_citations_and_isolates_content() {
         let root = temporary_workspace("rag");
@@ -2976,6 +3125,103 @@ mod tests {
             "backup must not overwrite"
         );
         std::fs::remove_file(backup).expect("remove test backup");
+    }
+
+    /// F3 "Memory migration/backup ... rollback": before `migrate()` touches a database whose
+    /// on-disk schema is behind this build's, `SqliteStore::open` must leave a restorable
+    /// pre-migration copy on disk — that copy *is* the rollback story for a bad migration.
+    #[test]
+    fn open_backs_up_an_outdated_database_before_migrating_it_and_leaves_a_current_one_alone() {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-premigration-test-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let path_str = path.to_str().expect("utf-8 temp path").to_owned();
+        {
+            let store = SqliteStore::open(&path_str).expect("fresh database opens");
+            store
+                .save_task(&Task {
+                    task_id: "task-premigration".into(),
+                    request_id: "request-premigration".into(),
+                    state: TaskState::Completed,
+                    capability: "system.health".into(),
+                })
+                .unwrap();
+            // Simulate an older on-disk schema without needing an actual old build.
+            store
+                .raw_connection()
+                .execute("DELETE FROM schema_migrations WHERE version >= 4", [])
+                .expect("simulate an outdated schema");
+        }
+        let sibling_backups_before = list_pre_migration_backups(&path);
+        assert!(sibling_backups_before.is_empty());
+
+        // Reopening with an outdated on-disk schema must back it up before migrate() runs.
+        let reopened = SqliteStore::open(&path_str).expect("reopen migrates forward");
+        assert_eq!(
+            reopened.task_count().unwrap(),
+            1,
+            "migration must not lose existing data"
+        );
+        let backups = list_pre_migration_backups(&path);
+        assert_eq!(backups.len(), 1, "exactly one pre-migration backup");
+        let recovered = SqliteStore::open(backups[0].to_str().expect("utf-8 backup path"))
+            .expect("the backup itself opens");
+        assert_eq!(
+            recovered.task_count().unwrap(),
+            1,
+            "the backup preserves the pre-migration data"
+        );
+
+        // Opening an already-current database again must not create a second backup.
+        drop(SqliteStore::open(&path_str).expect("already-current reopen"));
+        assert_eq!(
+            list_pre_migration_backups(&path).len(),
+            1,
+            "no backup on a normal, already-migrated startup"
+        );
+
+        for backup in list_pre_migration_backups(&path) {
+            let _ = fs::remove_file(backup);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Matches exactly `<original file name>.pre-migration-backup-<digits>.db` — not a broader
+    /// "contains" check, so opening a backup file itself (which also has an outdated on-disk
+    /// schema, since it is a pre-migration snapshot) and thereby creating a nested backup-of-a-
+    /// backup doesn't inflate this count; that nested file has extra trailing content after the
+    /// first `.db` and so does not match.
+    fn list_pre_migration_backups(db_path: &std::path::Path) -> Vec<PathBuf> {
+        let file_name = db_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("utf-8 file name")
+            .to_owned();
+        let prefix = format!("{file_name}.pre-migration-backup-");
+        let directory = db_path.parent().expect("db path has a parent directory");
+        fs::read_dir(directory)
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.strip_prefix(&prefix).is_some_and(|suffix| {
+                            suffix.strip_suffix(".db").is_some_and(|digits| {
+                                !digits.is_empty()
+                                    && digits.bytes().all(|byte| byte.is_ascii_digit())
+                            })
+                        })
+                    })
+            })
+            .collect()
     }
 
     #[test]

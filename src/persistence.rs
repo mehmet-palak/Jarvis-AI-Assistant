@@ -41,13 +41,49 @@ pub struct SqliteStore {
     connection: Connection,
 }
 
+/// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
+/// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
+const CURRENT_SCHEMA_VERSION: i64 = 5;
+
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
+        Self::backup_if_schema_migration_pending(path);
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         let mut store = Self { connection };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// F3 "Memory migration/backup ... rollback": this project has no down-migrations (SQLite
+    /// `ALTER TABLE ADD COLUMN` isn't easily reversible, and a single-user local app doesn't
+    /// warrant that machinery). Instead, if `path` already exists and its on-disk schema is
+    /// older than this build's, the file is copied to a timestamped sibling *before* `migrate()`
+    /// touches it — "rollback" means restoring that file. A brand-new or already-current database
+    /// is never backed up here, so this doesn't add a backup on every normal startup. Best-effort:
+    /// any failure here (missing permissions, race) never blocks opening the real store.
+    fn backup_if_schema_migration_pending(path: &str) {
+        if !Path::new(path).is_file() {
+            return;
+        }
+        let Ok(probe) = Connection::open(path) else {
+            return;
+        };
+        let on_disk_version: i64 = probe
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if on_disk_version >= CURRENT_SCHEMA_VERSION {
+            return;
+        }
+        // Reuse the same safe, atomic `VACUUM INTO` primitive `backup_to` already uses instead
+        // of a raw file copy, which could race a mid-write journal/WAL file.
+        let probe_store = Self { connection: probe };
+        let backup_path = PathBuf::from(format!("{path}.pre-migration-backup-{}.db", now_epoch()));
+        let _ = probe_store.backup_to(&backup_path);
     }
 
     pub fn in_memory() -> SqlResult<Self> {

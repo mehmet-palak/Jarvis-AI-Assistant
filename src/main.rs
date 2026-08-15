@@ -13,11 +13,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    attachment_receipt_manifest, inspect_local_attachment, parse_data_sensitivity,
-    parse_memory_namespace, profile_manifest, propose_memory, propose_profile_field,
-    AttachmentReceipt, AttachmentRef, DataSensitivity, InputType, LlamaServerProvider,
-    LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, ProfileField, Request, Runtime,
-    SqliteStore, TaskState, VisionProvider,
+    attachment_receipt_manifest, inspect_local_attachment, memory_export, memory_import,
+    parse_data_sensitivity, parse_memory_namespace, profile_manifest, propose_memory,
+    propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity, InputType,
+    LlamaServerProvider, LlamaVisionServerProvider, MemoryNamespace, MemoryProposal, ProfileField,
+    Request, Runtime, SqliteStore, TaskState, VisionProvider,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -1057,6 +1057,64 @@ fn submit(
         app.running = false;
         return;
     }
+    if let Some(path) = input
+        .strip_prefix("/memory export ")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let records = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_memory();
+        match records
+            .and_then(|records| memory_export(&records))
+            .and_then(|manifest| {
+                std::fs::write(path, manifest)
+                    .map_err(|error| format!("memory export write failed: {error}"))
+            }) {
+            Ok(()) => app.push_system(
+                "Tüm bellek dışa aktarıldı (tüm namespace'ler); ham memory_id/source içermez.",
+            ),
+            Err(error) => app.push_system(format!("Bellek dışa aktarılamadı: {error}")),
+        }
+        return;
+    }
+    if let Some(path) = input
+        .strip_prefix("/memory import ")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        match std::fs::read_to_string(path) {
+            Ok(json) => match memory_import("tui-memory-import", &json) {
+                Ok((proposals, skipped)) => {
+                    let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+                    let mut imported = 0usize;
+                    let mut failed = Vec::new();
+                    for proposal in &proposals {
+                        match runtime_guard.commit_memory_proposal(proposal, true) {
+                            Ok(_) => imported += 1,
+                            Err(error) => failed.push(format!("{}: {error}", proposal.record.key)),
+                        }
+                    }
+                    let mut message =
+                        format!("{imported}/{} kayıt içe aktarıldı.", proposals.len());
+                    if !skipped.is_empty() {
+                        message.push_str(&format!(
+                            "\nAtlanan (bozuk) satırlar: {}",
+                            skipped.join("; ")
+                        ));
+                    }
+                    if !failed.is_empty() {
+                        message.push_str(&format!("\nKaydedilemeyenler: {}", failed.join("; ")));
+                    }
+                    app.push_system(message);
+                }
+                Err(error) => app.push_system(format!("İçe aktarma dosyası geçersiz: {error}")),
+            },
+            Err(error) => app.push_system(format!("Dosya okunamadı: {error}")),
+        }
+        return;
+    }
     match input.as_str() {
         "/clear" => {
             app.messages.clear();
@@ -1130,7 +1188,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2276,5 +2334,63 @@ mod tests {
             .list_memory()
             .expect("memory list");
         assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn memory_export_then_import_round_trips_through_the_tui_commands() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        for command in ["/remember ad = Mehmet", "/remember approve"] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-memory-export-test-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        app.input = format!("/memory export {}", path.display());
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Tüm bellek dışa aktarıldı"));
+
+        // Start from an empty store so the import is what actually brings the record back.
+        app.input = "/forget namespace profil".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_memory()
+            .expect("memory list")
+            .is_empty());
+
+        app.input = format!("/memory import {}", path.display());
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("1/1 kayıt içe aktarıldı"));
+
+        let restored = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_memory()
+            .expect("memory list");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].key, "ad");
+        assert_eq!(restored[0].value, "Mehmet");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

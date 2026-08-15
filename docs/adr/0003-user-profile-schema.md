@@ -86,6 +86,29 @@ replikalara yaymak) burada karşılığı yok.
 **Yedek etkisi (dokümante edilmesi istenen nokta):** Bir silme işlemi yalnız **canlı** `jarvis.db`
 dosyasını etkiler. Kullanıcının daha önce aldığı herhangi bir dosya-seviyeli yedek (örn. bu projede
 zaten bir örneği olan `jarvis.db.audit-race-backup-*.db` gibi) silinen veriyi **hâlâ içerir** —
-silme işlemi geçmişe dönük yedekleri temizlemez. Bu, F3'ün henüz kapsamadığı "Memory migration/backup"
-maddesinin (F3'ün sıradaki maddelerinden biri) doğal bir sınırıdır; burada yalnız mevcut davranış
-olduğu gibi not edilmiştir.
+silme işlemi geçmişe dönük yedekleri temizlemez.
+
+## Ek — Rollback, export/import ve şifreleme kararı (15 Ağustos 2026, F3 madde 8)
+
+**Rollback:** `SqliteStore::open`, açtığı dosyanın üzerindeki `schema_migrations` sürümü bu build'in
+bildiği en yüksek sürümden (şu an 5) düşükse, `migrate()` dokunmadan **önce** `VACUUM INTO` ile
+(`backup_to` — zaten var, test'liydi, kullanılmayan bir fonksiyondu) dosyayı `<yol>.pre-migration-
+backup-<epoch>.db` olarak yedekler. Zaten güncel veya yepyeni bir veritabanı hiç yedeklenmez — her
+normal açılışta gereksiz yedek birikmesin diye. "Rollback" burada programatik bir geri alma değil,
+**bu dosyayı geri yükleme** prosedürüdür — tek kullanıcılı, senkronizasyonsuz yerel bir uygulama için
+programatik down-migration makinesi orantısız olurdu.
+
+**Export/Import:** `memory_export`/`memory_import` (TUI: `/memory export <dosya-yolu>`, `/memory
+import <dosya-yolu>`) tüm namespace'leri kapsayan, taşınabilir bir JSON yedeği sağlar —
+`backup_to`'nun aksine (ki o tüm veritabanını, task/audit dahil, ham SQLite dosyası olarak yedekler)
+bu yalnız bellek kayıtlarını, insan-okunur biçimde taşır. `memory_id`/`source` dışa aktarılmaz;
+içe aktarma her zaman `propose_memory` üzerinden **yeni** bir teklif üretir, hiçbir zaman doğrudan
+yazmaz — model gibi, içe aktarma da yalnız açık `/memory import` komutuyla erişilebilir, kalıcı
+yazma onay adımından (aynı `commit_memory_proposal`) geçer.
+
+**Şifreleme kararı:** Hassas (`Sensitive`) olarak işaretlenmiş kayıtlar için ayrı bir şifreli
+depolama **eklenmedi**. Gerekçe: JARVIS tek kullanıcılı, tek cihazlı, ağa kapalı yerel bir uygulama;
+gerçek güvenlik sınırı işletim sisteminin dosya izinleridir — bu, ADR-0002'nin ekler için zaten kabul
+ettiği aynı sınırdır. `sensitivity` alanı bir sınıflandırma/organizasyon etiketi olarak kalır, şifreleme
+anahtarı yönetimi gibi ek karmaşıklık getirmez. **Bu karar, çok kullanıcılı, senkronize/bulut yedekli
+bir gelecek senaryosunda yeniden gözden geçirilmelidir** — o zaman gerçek bir tehdit modeli değişir.
