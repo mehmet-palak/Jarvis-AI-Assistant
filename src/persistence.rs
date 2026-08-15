@@ -970,6 +970,90 @@ impl SqliteStore {
             })
     }
 
+    /// F3 post-close "`/rag status`" (GPT önerisi 5/7): total indexed chunk count, independent of
+    /// any embedding model — this is the FTS-side size, always meaningful even with no embedding
+    /// provider attached at all.
+    pub fn workspace_chunk_count(&self) -> SqlResult<i64> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM workspace_chunks", [], |row| {
+                row.get(0)
+            })
+    }
+
+    /// How many chunks currently have a stored embedding from `embedding_model_id` specifically —
+    /// compared against `workspace_chunk_count()`, this is the hybrid coverage `/rag status`
+    /// shows ("kaç chunk'ın anlamsal arama karşılığı var").
+    pub fn workspace_chunk_embedding_count_for_model(
+        &self,
+        embedding_model_id: &str,
+    ) -> SqlResult<i64> {
+        self.connection.query_row(
+            "SELECT COUNT(*) FROM workspace_chunk_embeddings WHERE embedding_model_id=?1",
+            [embedding_model_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// F3 post-close "`/rag verify`" (GPT önerisi 5/7): stored vectors whose chunk no longer
+    /// exists in `workspace_chunks` — should never happen (re-indexing deletes a document's
+    /// embeddings alongside its chunks), so a non-zero count here is a real integrity finding,
+    /// not an expected/steady-state condition.
+    pub fn workspace_orphaned_embedding_count(&self) -> SqlResult<i64> {
+        self.connection.query_row(
+            "SELECT COUNT(*) FROM workspace_chunk_embeddings
+             WHERE chunk_id NOT IN (SELECT chunk_id FROM workspace_chunks)",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// F3 post-close "`/rag rebuild`" (GPT önerisi 5/7): deletes every stored embedding for
+    /// `provider`'s model, then re-embeds every currently-indexed chunk from scratch — the
+    /// embedding cache is explicitly a *derived* cache (ADR-0004), so this is always safe: the
+    /// source of truth (`workspace_chunks`' text) is untouched, only the derived vectors are
+    /// recomputed. Batched per document via `embed_and_store_chunks_batch`, not per chunk.
+    /// Returns the number of chunks re-embedded.
+    pub fn rebuild_embeddings_for_model(
+        &self,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<usize, String> {
+        let model_id = provider.embedding_model_id();
+        self.connection
+            .execute(
+                "DELETE FROM workspace_chunk_embeddings WHERE embedding_model_id=?1",
+                [model_id],
+            )
+            .map_err(|error| format!("clearing existing embeddings failed: {error}"))?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT document_id, chunk_id, content FROM workspace_chunks ORDER BY document_id",
+            )
+            .map_err(|error| format!("rebuild query setup failed: {error}"))?;
+        let rows: Vec<(String, String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|error| format!("rebuild query failed: {error}"))?
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| format!("rebuild row failed: {error}"))?;
+        drop(statement);
+        let total = rows.len();
+        // Grouped by document (not one call for the whole workspace) so `embed_and_store_chunks_batch`
+        // still tags each embedding with the right `document_id`, same as normal indexing does —
+        // still one batched model call per document, not one per chunk.
+        let mut by_document: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for (document_id, chunk_id, content) in rows {
+            by_document
+                .entry(document_id)
+                .or_default()
+                .push((chunk_id, content));
+        }
+        for (document_id, chunks) in &by_document {
+            self.embed_and_store_chunks_batch(provider, document_id, chunks);
+        }
+        Ok(total)
+    }
+
     /// User-requested (2026-08-16): conversation history no longer has to live only in RAM.
     /// `role` is always `"user"` or `"assistant"` (`Runtime::append_chat_turn`'s own two call
     /// sites); nothing else ever calls this. Best-effort by design at the call site — a failed

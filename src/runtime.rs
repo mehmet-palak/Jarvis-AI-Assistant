@@ -36,6 +36,11 @@ pub struct Runtime {
     /// "kaynağı aç": the complete chunk text, not only its short excerpt. Overwritten every turn
     /// (empty when that turn used none); never persisted, this is in-memory display state only.
     last_workspace_citations: Vec<WorkspaceCitation>,
+    /// F3 post-close "gözlemlenebilirlik" (GPT önerisi 4/7), surfaced via `rag_status`. Session-
+    /// only counters (never persisted) — how many retrieval calls this session actually used the
+    /// embedding signal vs. degraded to plain FTS.
+    hybrid_queries_this_session: usize,
+    fts_only_queries_this_session: usize,
 }
 
 impl Default for Runtime {
@@ -53,6 +58,8 @@ impl Default for Runtime {
             chat_history: Vec::new(),
             embedding_provider: None,
             last_workspace_citations: Vec::new(),
+            hybrid_queries_this_session: 0,
+            fts_only_queries_this_session: 0,
         }
     }
 }
@@ -425,6 +432,85 @@ impl Runtime {
             .map(|provider| provider.embedding_model_id())
     }
 
+    /// F3 post-close "`/rag status`" (GPT önerisi 4+5/7). A snapshot, not a subscription — cheap
+    /// enough to compute on every call (a handful of `COUNT(*)` queries), so there is no separate
+    /// metrics store to keep in sync or go stale.
+    pub fn rag_status(&self) -> Result<RagStatus, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "RAG status requires an attached local store".to_string())?;
+        let embedding_model = self.embedding_status().map(str::to_owned);
+        let embedded_chunk_count = match &embedding_model {
+            Some(model_id) => store
+                .workspace_chunk_embedding_count_for_model(model_id)
+                .map_err(|error| error.to_string())?,
+            None => 0,
+        };
+        Ok(RagStatus {
+            document_count: store
+                .workspace_document_count()
+                .map_err(|error| error.to_string())?,
+            chunk_count: store
+                .workspace_chunk_count()
+                .map_err(|error| error.to_string())?,
+            embedded_chunk_count,
+            embedding_model,
+            hybrid_queries_this_session: self.hybrid_queries_this_session,
+            fts_only_queries_this_session: self.fts_only_queries_this_session,
+        })
+    }
+
+    /// F3 post-close "`/rag rebuild`" (GPT önerisi 5/7): recomputes every stored embedding for
+    /// the currently-attached model from scratch. Requires an embedding provider — there is
+    /// nothing to rebuild in FTS-only mode (`search_workspace` has no derived cache at all).
+    pub fn rebuild_rag_index(&mut self) -> Result<usize, String> {
+        let provider = self
+            .embedding_provider
+            .as_deref()
+            .ok_or_else(|| "rebuild requires an attached embedding provider".to_string())?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "RAG rebuild requires an attached local store".to_string())?;
+        let rebuilt = store.rebuild_embeddings_for_model(provider)?;
+        self.record_audit(AuditEvent::pending(
+            "workspace-rag",
+            format!("workspace.rag.rebuilt:{rebuilt}"),
+        ));
+        Ok(rebuilt)
+    }
+
+    /// F3 post-close "`/rag verify`" (GPT önerisi 5/7): an integrity check the user can run
+    /// on demand, and the concrete thing `/rag rebuild` fixes if this comes back unhealthy.
+    pub fn verify_rag_index(&self) -> Result<RagVerifyReport, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "RAG verify requires an attached local store".to_string())?;
+        let chunk_count = store
+            .workspace_chunk_count()
+            .map_err(|error| error.to_string())?;
+        let embedding_model = self.embedding_status();
+        let embedded_chunk_count = match embedding_model {
+            Some(model_id) => store
+                .workspace_chunk_embedding_count_for_model(model_id)
+                .map_err(|error| error.to_string())?,
+            None => 0,
+        };
+        Ok(RagVerifyReport {
+            document_count: store
+                .workspace_document_count()
+                .map_err(|error| error.to_string())?,
+            chunk_count,
+            embedded_chunk_count,
+            orphaned_embedding_count: store
+                .workspace_orphaned_embedding_count()
+                .map_err(|error| error.to_string())?,
+            chunks_missing_embedding: embedding_model.map(|_| chunk_count - embedded_chunk_count),
+        })
+    }
+
     /// F3 "Citation UX: ... kaynağı aç davranışı". The citations that grounded the most recent
     /// conversational reply, in ranked order — a caller reads this to let the user open/expand a
     /// specific one (by 1-based position) without needing to re-run retrieval or touch the store.
@@ -456,7 +542,7 @@ impl Runtime {
         Ok(report)
     }
 
-    fn approved_workspace_context(&self, query: &str) -> Vec<WorkspaceCitation> {
+    fn approved_workspace_context(&mut self, query: &str) -> Vec<WorkspaceCitation> {
         let Some(store) = self.store.as_ref() else {
             return Vec::new();
         };
@@ -469,6 +555,13 @@ impl Runtime {
                 .ok()
                 .map(|vector| (provider.embedding_model_id().to_owned(), vector))
         });
+        // F3 post-close "gözlemlenebilirlik" (GPT önerisi 4/7): the one signal worth tracking
+        // cheaply — did this turn actually use the semantic signal, or fall back to plain FTS.
+        if query_embedding.is_some() {
+            self.hybrid_queries_this_session += 1;
+        } else {
+            self.fts_only_queries_this_session += 1;
+        }
         let query_embedding_ref = query_embedding
             .as_ref()
             .map(|(model_id, vector)| (model_id.as_str(), vector.as_slice()));

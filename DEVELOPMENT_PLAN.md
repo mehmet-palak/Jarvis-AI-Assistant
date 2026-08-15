@@ -398,6 +398,12 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
   - Markdown olmayan her şey (düz metin, kod, PDF'ten çıkarılmış metin) hiç değişmeden eski kör bölmeyi kullanmaya devam ediyor.
   - **Bilinçli olarak kapsam dışı bırakıldı**: kod fonksiyon/sınıf bazlı bölme (dil başına ayrı bir parser gerektirir — gerçek, büyük ayrı bir mühendislik işi) ve PDF paragraf bazlı bölme. ADR-0004'te "hâlâ ertelenen" olarak not edildi.
   - Kanıt: 3 yeni test (`chunk_workspace_text_for_markdown_keeps_a_heading_with_its_section`, `chunk_workspace_text_for_markdown_still_splits_an_oversized_section`, `chunk_workspace_text_for_non_markdown_uses_blind_splitting_unchanged`) — biri gerçek bir biçimlendirme hatası (bölüm arası boş satırın önceki bölüme sızması) bulup düzeltti. Tam paket: `cargo fmt`, `cargo test --offline` (159 lib + 35 main + 7 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
+- [x] **GPT önerisi 4+5/7 — Gözlemlenebilirlik + `/rag status`/`/rag rebuild`/`/rag verify`**: kişisel araç için orantılı kalacak şekilde birleşik ve daraltılmış uygulama — ayrı bir metrik deposu/gecikme histogramı yok, yalnız istendiğinde hesaplanan bir anlık görüntü.
+  - `Runtime::rag_status`: belge/chunk/embed edilmiş chunk sayısı, aktif model, ve bu oturumun hibrit-vs-yalnız-FTS sorgu sayaçları (`approved_workspace_context`'e eklendi — gerçek sohbet turlarında artıyor, dekoratif sabit değil).
+  - `Runtime::rebuild_rag_index`: aktif model için tüm embedding'leri siler ve `SqliteStore::rebuild_embeddings_for_model` ile sıfırdan yeniden hesaplar (batch embedding kullanır, belge başına tek çağrı). Sağlayıcı bağlı değilse net bir hatayla reddeder.
+  - `Runtime::verify_rag_index`: sahipsiz embedding kaydı (chunk'ı silinmiş ama vektörü kalmış) ve aktif model için eksik embedding sayımı; `RagVerifyReport::is_healthy()`.
+  - TUI: `/rag status`, `/rag rebuild`, `/rag verify`.
+  - Kanıt: 3 yeni Runtime testi (`rag_status_reports_real_counts_and_session_retrieval_counters`, `rag_rebuild_recomputes_every_embedding_and_requires_a_provider`, `rag_verify_flags_missing_embeddings_as_unhealthy` — sonuncusu gerçek bir "henüz backfill edilmemiş" boşluğu FTS-only indeksleme + sonradan sağlayıcı bağlama ile üretip yakalıyor) + 3 uçtan uca TUI testi. Tam paket: `cargo fmt`, `cargo test --offline` (162 lib + 38 main + 7 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 

@@ -56,8 +56,9 @@ pub(crate) use workspace::{
     validate_workspace_document_path,
 };
 pub use workspace::{
-    preview_workspace_index, WorkspaceCitation, WorkspaceFolderIndexReport, WorkspaceIndexPreview,
-    WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MAX_WORKSPACE_CHUNK_CHARS,
+    preview_workspace_index, RagStatus, RagVerifyReport, WorkspaceCitation,
+    WorkspaceFolderIndexReport, WorkspaceIndexPreview, WorkspaceIngestionReport,
+    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MAX_WORKSPACE_CHUNK_CHARS,
     MAX_WORKSPACE_DOCUMENT_BYTES, MIN_RELEVANT_SIMILARITY, WORKSPACE_CONTEXT_CHAR_BUDGET,
     WORKSPACE_RETRIEVAL_RESULT_LIMIT,
 };
@@ -3807,6 +3808,110 @@ mod tests {
 
         runtime.set_embedding_provider(None);
         assert_eq!(runtime.embedding_status(), None);
+    }
+
+    /// F3 post-close "`/rag status`" (GPT önerisi 4+5/7): counts must reflect reality, and the
+    /// session counters must actually move when a real conversation turn uses the embedding
+    /// signal — not just be present-but-always-zero decoration.
+    #[test]
+    fn rag_status_reports_real_counts_and_session_retrieval_counters() {
+        let root = temporary_workspace("rag-status");
+        fs::write(root.join("a.md"), "elma-firtinasi hakkında bir not").expect("fixture a");
+        fs::write(root.join("b.md"), "elma-firtinasi hakkında ayrı bir not").expect("fixture b");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime.set_embedding_provider(Some(Box::new(FixedEmbeddingProvider::new(
+            "test-model",
+            "MARKER",
+        ))));
+        runtime
+            .index_workspace_document(&root, Path::new("a.md"), true)
+            .expect("a indexes");
+        runtime
+            .index_workspace_document(&root, Path::new("b.md"), true)
+            .expect("b indexes");
+
+        let status = runtime.rag_status().expect("status succeeds");
+        assert_eq!(status.document_count, 2);
+        assert_eq!(status.chunk_count, 2);
+        assert_eq!(status.embedded_chunk_count, 2);
+        assert_eq!(status.embedding_model.as_deref(), Some("test-model"));
+        assert_eq!(status.hybrid_queries_this_session, 0);
+
+        let provider = ContextCapturingProvider::default();
+        runtime.handle_with_provider(request("rag-status-1", "elma-firtinasi nedir"), &provider);
+        let status_after = runtime.rag_status().expect("status succeeds again");
+        assert_eq!(status_after.hybrid_queries_this_session, 1);
+        assert_eq!(status_after.fts_only_queries_this_session, 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 post-close "`/rag rebuild`" (GPT önerisi 5/7): rebuild must actually recompute every
+    /// embedding (real model calls, not a no-op), and must fail clearly with no embedding
+    /// provider attached rather than silently doing nothing.
+    #[test]
+    fn rag_rebuild_recomputes_every_embedding_and_requires_a_provider() {
+        let root = temporary_workspace("rag-rebuild");
+        fs::write(root.join("notes.md"), "benzersiz-icerik-firuze").expect("fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        assert!(runtime
+            .rebuild_rag_index()
+            .unwrap_err()
+            .contains("embedding provider"));
+
+        let provider = FixedEmbeddingProvider::new("test-model", "MARKER");
+        runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("fixture indexes");
+        assert_eq!(runtime.rag_status().unwrap().embedded_chunk_count, 0);
+
+        runtime.set_embedding_provider(Some(Box::new(provider)));
+        let rebuilt = runtime.rebuild_rag_index().expect("rebuild succeeds");
+        assert_eq!(rebuilt, 1);
+        assert_eq!(runtime.rag_status().unwrap().embedded_chunk_count, 1);
+        assert!(runtime
+            .audit
+            .iter()
+            .any(|event| event.event.starts_with("workspace.rag.rebuilt:")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// F3 post-close "`/rag verify`" (GPT önerisi 5/7): a freshly-embedded workspace is healthy;
+    /// a document that has not been backfilled yet for the currently-attached model is correctly
+    /// flagged as unhealthy, not silently reported as fine.
+    #[test]
+    fn rag_verify_flags_missing_embeddings_as_unhealthy() {
+        let root = temporary_workspace("rag-verify");
+        fs::write(root.join("notes.md"), "dogrulama-icerik-menekse").expect("fixture");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        // Indexed FTS-only first — no provider attached yet, so nothing has been embedded.
+        runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("fixture indexes FTS-only");
+
+        runtime.set_embedding_provider(Some(Box::new(FixedEmbeddingProvider::new(
+            "test-model",
+            "MARKER",
+        ))));
+        // No re-index/backfill yet — the gap `/rag verify` exists to catch.
+        let report = runtime.verify_rag_index().expect("verify succeeds");
+        assert_eq!(report.chunks_missing_embedding, Some(1));
+        assert!(!report.is_healthy());
+
+        runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("re-index triggers backfill");
+        let healthy_report = runtime.verify_rag_index().expect("verify succeeds again");
+        assert_eq!(healthy_report.chunks_missing_embedding, Some(0));
+        assert_eq!(healthy_report.orphaned_embedding_count, 0);
+        assert!(healthy_report.is_healthy());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// F3 madde 13, uçtan uca: bir gerçek sohbet turunda `approved_workspace_context` hybrid

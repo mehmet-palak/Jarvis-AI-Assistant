@@ -82,10 +82,14 @@ maddeler:
    (varsayılan: `embed`'i döngüyle çağırır; `LlamaEmbeddingProvider` gerçek toplu HTTP isteğiyle
    override eder), `SqliteStore::embed_and_store_chunks_batch` — bir belgenin tüm chunk'ları tek
    bir model çağrısında embed ediliyor (içerik-hash tekilleştirmesi batch içinde de geçerli).
-4. **Gözlemlenebilirlik metrikleri** (FTS/semantic hit sayısı, gecikme, cache hit oranı) — şu an
-   yalnız audit log sinyali var; kişisel araç için orantısız görüldü.
-5. **Açık `rag status`/`rag rebuild`/`rag verify` komutları** — cache zaten kavramsal olarak
-   yeniden inşa edilebilir (silinip yeniden indekslenebilir) ama tek bir komut yok.
+4. ~~**Gözlemlenebilirlik metrikleri**~~ ve 5. ~~**`rag status`/`rag rebuild`/`rag verify`
+   komutları**~~ — 16 Ağustos 2026'da birlikte uygulandı, orantılı kalacak şekilde daraltılmış
+   biçimde: `Runtime::rag_status` (belge/chunk/embed edilmiş chunk sayısı + bu oturumun hibrit vs.
+   yalnız-FTS sorgu sayacı — kalıcı bir metrik deposu yok, her çağrıda hesaplanan bir anlık
+   görüntü), `Runtime::rebuild_rag_index` (aktif model için tüm embedding'leri sıfırdan yeniden
+   hesaplar, `SqliteStore::rebuild_embeddings_for_model` batch embedding'i kullanır),
+   `Runtime::verify_rag_index` (sahipsiz embedding + eksik embedding sayımı, `is_healthy()`). TUI:
+   `/rag status`, `/rag rebuild`, `/rag verify`.
 6. **Configurable RRF sabitleri** — şu an sabit (`RRF_K=60`, aday havuzu `limit*4`); gerçek bir
    değerlendirme seti (F3 madde 18) olmadan ayarlamak tahmin olurdu.
 7. **Opsiyonel reranker aşaması** — yalnız bir kıyaslama "RRF yetmiyor" derse eklenecek, şimdiden

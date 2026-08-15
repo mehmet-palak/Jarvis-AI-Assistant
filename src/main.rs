@@ -1397,7 +1397,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>, /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...], /source <numara> (son yanıtın kaynağının tamamını aç). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>, /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -1432,6 +1432,83 @@ fn submit(
                 model_label(&app.model_state),
                 app.status
             ));
+            return;
+        }
+        "/rag status" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .rag_status()
+            {
+                Ok(status) => {
+                    let mode = status
+                        .embedding_model
+                        .as_deref()
+                        .map(|model_id| format!("hybrid (FTS + {model_id})"))
+                        .unwrap_or_else(|| "FTS-only".into());
+                    let coverage = if status.embedding_model.is_some() {
+                        format!(
+                            ", embed edilmiş: {}/{}",
+                            status.embedded_chunk_count, status.chunk_count
+                        )
+                    } else {
+                        String::new()
+                    };
+                    app.push_system(format!(
+                        "RAG: {mode} • {} belge, {} chunk{coverage} • bu oturum: {} hibrit, {} yalnız-FTS sorgu",
+                        status.document_count,
+                        status.chunk_count,
+                        status.hybrid_queries_this_session,
+                        status.fts_only_queries_this_session
+                    ));
+                }
+                Err(error) => app.push_system(format!("RAG durumu okunamadı: {error}")),
+            }
+            return;
+        }
+        "/rag rebuild" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .rebuild_rag_index()
+            {
+                Ok(count) => app.push_system(format!(
+                    "{count} chunk için embedding sıfırdan yeniden hesaplandı."
+                )),
+                Err(error) => app.push_system(format!("Yeniden inşa edilemedi: {error}")),
+            }
+            return;
+        }
+        "/rag verify" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .verify_rag_index()
+            {
+                Ok(report) if report.is_healthy() => app.push_system(format!(
+                    "RAG indeksi sağlıklı • {} belge, {} chunk, {} embedding.",
+                    report.document_count, report.chunk_count, report.embedded_chunk_count
+                )),
+                Ok(report) => {
+                    let mut problems = Vec::new();
+                    if report.orphaned_embedding_count > 0 {
+                        problems.push(format!(
+                            "{} sahipsiz embedding kaydı",
+                            report.orphaned_embedding_count
+                        ));
+                    }
+                    if let Some(missing) = report.chunks_missing_embedding {
+                        if missing > 0 {
+                            problems.push(format!("{missing} chunk'ta embedding eksik"));
+                        }
+                    }
+                    app.push_system(format!(
+                        "RAG indeksinde sorun var: {}. Düzeltmek için /rag rebuild dene.",
+                        problems.join(", ")
+                    ));
+                }
+                Err(error) => app.push_system(format!("Doğrulanamadı: {error}")),
+            }
             return;
         }
         _ => {}
@@ -2452,6 +2529,55 @@ mod tests {
             .unwrap()
             .content
             .contains("diskteki kayıt silindi"));
+    }
+
+    /// F3 post-close "`/rag status`" (GPT önerisi 4+5/7): the TUI wiring must actually call
+    /// `Runtime::rag_status` and show real counts, not a static placeholder.
+    #[test]
+    fn rag_status_command_reports_document_and_chunk_counts() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/index Cargo.toml".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        app.input = "/rag status".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let shown = &app.messages.last().unwrap().content;
+        assert!(shown.contains("FTS-only"));
+        assert!(shown.contains("1 belge"));
+    }
+
+    /// `/rag rebuild` must fail with a clear message when no embedding provider is attached —
+    /// never silently pretend to do something in FTS-only mode.
+    #[test]
+    fn rag_rebuild_command_fails_clearly_without_an_embedding_provider() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/rag rebuild".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Yeniden inşa edilemedi"));
+    }
+
+    /// `/rag verify` must report a healthy index in plain FTS-only mode (no embedding provider
+    /// means "eksik embedding" does not even apply).
+    #[test]
+    fn rag_verify_command_reports_healthy_in_fts_only_mode() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/index Cargo.toml".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        app.input = "/rag verify".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("sağlıklı"));
     }
 
     #[test]

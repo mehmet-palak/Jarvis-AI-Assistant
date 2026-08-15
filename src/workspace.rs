@@ -67,6 +67,43 @@ pub struct WorkspaceFolderIndexReport {
     pub failed: Vec<(PathBuf, String)>,
 }
 
+/// F3 post-close "`/rag status`" (GPT önerisi 4+5/7 birleşik): a snapshot of the workspace RAG
+/// index plus this session's lightweight retrieval counters — the "gözlemlenebilirlik" GPT
+/// önerdi, kişisel bir araç için orantılı kalacak şekilde daraltıldı (gecikme histogramı yok,
+/// kalıcı bir metrik deposu yok — yalnız `/rag status` sorulduğunda hesaplanan bir anlık görüntü).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RagStatus {
+    pub document_count: i64,
+    pub chunk_count: i64,
+    pub embedded_chunk_count: i64,
+    pub embedding_model: Option<String>,
+    pub hybrid_queries_this_session: usize,
+    pub fts_only_queries_this_session: usize,
+}
+
+/// F3 post-close "`/rag verify`" (GPT önerisi 5/7): an integrity check over the workspace index —
+/// not a health *metric*, a pass/fail-shaped finding a user can act on (`/rag rebuild` if
+/// anything here looks wrong).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RagVerifyReport {
+    pub document_count: i64,
+    pub chunk_count: i64,
+    pub embedded_chunk_count: i64,
+    /// Stored vectors whose chunk no longer exists — should always be `0`.
+    pub orphaned_embedding_count: i64,
+    /// `chunk_count - embedded_chunk_count` for the currently-attached model; `None` when no
+    /// embedding provider is attached at all (the question does not apply to FTS-only mode).
+    pub chunks_missing_embedding: Option<i64>,
+}
+
+impl RagVerifyReport {
+    /// `true` only when every check this report tracks came back clean.
+    pub fn is_healthy(&self) -> bool {
+        self.orphaned_embedding_count == 0
+            && self.chunks_missing_embedding.is_none_or(|count| count == 0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCitation {
     pub document_id: String,
