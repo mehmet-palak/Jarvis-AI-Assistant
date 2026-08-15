@@ -2021,7 +2021,7 @@ mod tests {
         let example = verified_teacher_example("example-1");
         store.append_teacher_example(&example, &registry).unwrap();
         assert_eq!(store.teacher_example_count().unwrap(), 1);
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(store.schema_version().unwrap(), 8);
     }
 
     #[test]
@@ -4138,7 +4138,7 @@ mod tests {
         let store = runtime.store.as_ref().expect("store attached");
         assert_eq!(store.task_count().unwrap(), 1);
         assert_eq!(store.audit_count().unwrap(), 5);
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert_eq!(store.schema_version().unwrap(), 8);
         assert!(store.audit_chain_is_valid().unwrap());
     }
 
@@ -4165,6 +4165,98 @@ mod tests {
         assert_eq!(second_event.previous_hash, first_event.event_hash);
         assert!(second.audit_chain_is_valid().unwrap());
         fs::remove_file(path).expect("test database cleanup");
+    }
+
+    /// User-requested (2026-08-16): "her şeyi baştan oluşturmak istemem" — conversation history
+    /// must survive an actual restart (a new `Runtime` over the same on-disk database), not just
+    /// last for the lifetime of one process.
+    #[test]
+    fn conversation_history_survives_a_real_restart_across_store_instances() {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-chat-history-restart-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let path_str = path.to_str().expect("utf-8 test path").to_string();
+
+        {
+            let mut runtime = Runtime::with_store(SqliteStore::open(&path_str).unwrap());
+            let provider = FixedModelProvider("balon-firtinasi hakkında bilgim var.");
+            runtime.handle_with_provider(request("restart-1", "balon-firtinasi nedir"), &provider);
+            // `Runtime` drops here — an ordinary process exit, not an explicit save step.
+        }
+
+        let restarted = Runtime::with_store(SqliteStore::open(&path_str).unwrap());
+        assert!(
+            restarted.conversation_context().contains("balon-firtinasi"),
+            "a new Runtime over the same database must pick up the previous session's history"
+        );
+
+        fs::remove_file(&path_str).expect("test database cleanup");
+    }
+
+    /// `/clear`'s new contract: it must not just look empty in the TUI while the model (and disk)
+    /// quietly keep the old context — a real reset removes it everywhere, and a restart after
+    /// clearing must not resurrect it.
+    #[test]
+    fn clear_chat_history_removes_it_from_memory_disk_and_a_later_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-chat-history-clear-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let path_str = path.to_str().expect("utf-8 test path").to_string();
+
+        {
+            let mut runtime = Runtime::with_store(SqliteStore::open(&path_str).unwrap());
+            let provider = FixedModelProvider("gece-yildizi hakkında bilgim var.");
+            runtime.handle_with_provider(request("clear-1", "gece-yildizi nedir"), &provider);
+            assert!(!runtime.chat_history.is_empty());
+            let removed = runtime.clear_chat_history().expect("clear succeeds");
+            assert!(removed > 0);
+            assert!(runtime.chat_history.is_empty());
+            assert!(!runtime.conversation_context().contains("gece-yildizi"));
+        }
+
+        let restarted = Runtime::with_store(SqliteStore::open(&path_str).unwrap());
+        assert!(
+            !restarted.conversation_context().contains("gece-yildizi"),
+            "a cleared history must not come back after a restart"
+        );
+
+        fs::remove_file(&path_str).expect("test database cleanup");
+    }
+
+    /// On-disk chat history must stay bounded exactly like the in-memory cap
+    /// (`MAX_COMPLETED_CHAT_HISTORY_TURNS`) — persistence must never let the table grow without
+    /// limit just because many turns happened in one session.
+    #[test]
+    fn persisted_chat_history_is_pruned_to_the_same_cap_as_in_memory_history() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let provider = FixedModelProvider("cevap");
+        for turn in 0..10 {
+            runtime.handle_with_provider(
+                request(&format!("prune-{turn}"), &format!("soru {turn}")),
+                &provider,
+            );
+        }
+        let stored_count = runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .chat_message_count()
+            .unwrap();
+        assert!(
+            stored_count <= MAX_COMPLETED_CHAT_HISTORY_TURNS as i64,
+            "persisted history ({stored_count} rows) must never exceed the in-memory cap"
+        );
     }
 
     #[test]

@@ -1315,7 +1315,19 @@ fn submit(
     match input.as_str() {
         "/clear" => {
             app.messages.clear();
-            app.push_system("Sohbet görünümü temizlendi. Local session context güvenlik için RAM'de kalır; yeni oturum için JARVIS'i yeniden başlatabilirsin.");
+            // Konuşma geçmişi artık diske de yazılıyor (2026-08-16), bu yüzden /clear yalnız
+            // görünen listeyi değil modelin gerçek bağlamını ve diskteki kopyayı da siliyor —
+            // aksi halde ekran boş görünürken model eski geçmişi sessizce tutmaya devam ederdi.
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .clear_chat_history()
+            {
+                Ok(_) => app.push_system(
+                    "Sohbet temizlendi — hem görünen liste hem modele giden bağlam hem diskteki kayıt silindi.",
+                ),
+                Err(error) => app.push_system(format!("Sohbet görünümü temizlendi ama disk kaydı silinemedi: {error}")),
+            }
             return;
         }
         "/attachments clear" => {
@@ -2414,6 +2426,32 @@ mod tests {
             parse_memory_intent("adım Ali, bu tarif bana uygun mu?"),
             None
         );
+    }
+
+    /// `/clear`'s new contract (2026-08-16, conversation history now persists to disk): it must
+    /// call `Runtime::clear_chat_history` — a real reset, not only a cosmetic one — and say so.
+    #[test]
+    fn clear_command_resets_conversation_and_reports_a_real_reset() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.messages.push(Message {
+            role: MessageRole::User,
+            content: "merhaba".into(),
+        });
+
+        app.input = "/clear".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert_eq!(
+            app.messages.len(),
+            1,
+            "only the confirmation system message should remain"
+        );
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("diskteki kayıt silindi"));
     }
 
     #[test]

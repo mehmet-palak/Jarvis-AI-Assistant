@@ -47,7 +47,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -169,6 +169,12 @@ impl SqliteStore {
                 content_sha256 TEXT NOT NULL,
                 embedding_model_id TEXT NOT NULL,
                 embedding BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -214,6 +220,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (7, 'workspace chunk embeddings for hybrid RAG')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (8, 'persistent chat history')",
             [],
         )?;
         Ok(())
@@ -919,6 +929,56 @@ impl SqliteStore {
             .query_row("SELECT COUNT(*) FROM workspace_documents", [], |row| {
                 row.get(0)
             })
+    }
+
+    /// User-requested (2026-08-16): conversation history no longer has to live only in RAM.
+    /// `role` is always `"user"` or `"assistant"` (`Runtime::append_chat_turn`'s own two call
+    /// sites); nothing else ever calls this. Best-effort by design at the call site — a failed
+    /// write here must never fail the actual conversation turn.
+    pub fn append_chat_message(&self, role: &str, content: &str) -> SqlResult<()> {
+        self.connection.execute(
+            "INSERT INTO chat_messages(role, content, created_at) VALUES (?1, ?2, ?3)",
+            params![role, content, now_epoch() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The most recent `limit` messages, oldest-first — ready to load straight into
+    /// `Runtime.chat_history` on startup so a new session picks up where the last one left off.
+    pub fn recent_chat_messages(&self, limit: usize) -> SqlResult<Vec<(String, String)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT role, content FROM chat_messages ORDER BY id DESC LIMIT ?1")?;
+        let mut rows: Vec<(String, String)> = statement
+            .query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// Deletes every row except the most recent `keep` — keeps on-disk storage bounded exactly
+    /// the same way `Runtime.chat_history`'s in-memory cap already is, so persistence can never
+    /// grow the table without limit.
+    pub fn prune_chat_messages_to(&self, keep: usize) -> SqlResult<()> {
+        self.connection.execute(
+            "DELETE FROM chat_messages WHERE id NOT IN (
+                SELECT id FROM chat_messages ORDER BY id DESC LIMIT ?1
+             )",
+            [keep as i64],
+        )?;
+        Ok(())
+    }
+
+    /// A real, hard delete of every persisted chat message — what `/clear` now does in addition
+    /// to clearing the TUI's visible list and `Runtime.chat_history`, so "clear" is an actual
+    /// reset rather than only a cosmetic one now that history survives a restart.
+    pub fn clear_chat_messages(&self) -> SqlResult<usize> {
+        self.connection.execute("DELETE FROM chat_messages", [])
+    }
+
+    pub fn chat_message_count(&self) -> SqlResult<i64> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM chat_messages", [], |row| row.get(0))
     }
 
     /// Returns records that are still valid and explicitly opted into model context. This is a

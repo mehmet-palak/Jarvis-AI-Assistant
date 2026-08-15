@@ -77,11 +77,34 @@ impl Runtime {
         );
         let (audit_sequence, audit_hash) =
             store.audit_tail().expect("audit tail query must succeed");
+        // User-requested (2026-08-16): a new session picks up conversation history from the last
+        // one instead of starting empty — `Runtime::new()` (no store) still starts empty, since
+        // there is nowhere to have persisted anything.
+        let chat_history = store
+            .recent_chat_messages(MAX_COMPLETED_CHAT_HISTORY_TURNS)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(role, content)| {
+                // `ConversationMessage.role` is `&'static str`, not an owned `String` — map the
+                // persisted role back onto the same two literals `append_chat_turn` ever writes.
+                // An unrecognized role (foreign/corrupted data) is dropped, never guessed at.
+                let static_role = match role.as_str() {
+                    "user" => "user",
+                    "assistant" => "assistant",
+                    _ => return None,
+                };
+                Some(ConversationMessage {
+                    role: static_role,
+                    content,
+                })
+            })
+            .collect();
         Self {
             store: Some(store),
             registry: CapabilityRegistry::baseline(),
             audit_sequence,
             audit_hash,
+            chat_history,
             ..Self::default()
         }
     }
@@ -143,12 +166,35 @@ impl Runtime {
                 self.chat_history.drain(0..2);
             }
         }
+        // Best-effort persistence: a write/prune failure here must never fail the actual
+        // conversation turn — the in-memory copy (below) is still authoritative for this turn
+        // either way. Pruned to the same cap as the in-memory history on every append, so the
+        // on-disk table can never grow past what a session would ever load back anyway.
+        if let Some(store) = self.store.as_ref() {
+            let _ = store.append_chat_message(role, &content);
+            let _ = store.prune_chat_messages_to(MAX_COMPLETED_CHAT_HISTORY_TURNS);
+        }
         self.chat_history
             .push(ConversationMessage { role, content });
         if role == "assistant" {
             while self.chat_history.len() > MAX_COMPLETED_CHAT_HISTORY_TURNS {
                 self.chat_history.drain(0..2);
             }
+        }
+    }
+
+    /// User-requested (2026-08-16): clears conversation history for real — both the in-memory
+    /// copy the model sees and, if a store is attached, the persisted copy on disk. Before chat
+    /// persistence existed, `/clear` only ever reset the TUI's visible message list while the
+    /// model's own context quietly lived on; now that history survives a restart, "clear" has to
+    /// actually mean clear. Returns how many persisted rows were removed (`0` with no store).
+    pub fn clear_chat_history(&mut self) -> Result<usize, String> {
+        self.chat_history.clear();
+        match self.store.as_ref() {
+            Some(store) => store
+                .clear_chat_messages()
+                .map_err(|error| error.to_string()),
+            None => Ok(0),
         }
     }
 
