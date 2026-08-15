@@ -2286,7 +2286,7 @@ mod tests {
             .commit_memory_proposal(&proposal, true)
             .expect("approved memory persists");
         let provider = ContextCapturingProvider::default();
-        let (task, _, _) =
+        let (task, result, _) =
             runtime.handle_with_provider(request("memory-chat-3", "selam"), &provider);
         let messages = provider.messages.lock().expect("test lock").clone();
         let memory_message = messages
@@ -2298,6 +2298,13 @@ mod tests {
         assert!(runtime.audit.iter().any(|event| {
             event.task_id == task.task_id && event.event.starts_with("memory.retrieved:")
         }));
+        // F3 "Memory retrieval policy ... 'neden kullanıldı' ve görünür attribution": the
+        // namespace/key (never the value) must also show up as visible evidence, the same way
+        // workspace citations already do — not only in the audit log.
+        assert!(result
+            .evidence
+            .iter()
+            .any(|evidence| evidence == "memory.used:USER_PROFILE:nickname"));
     }
 
     /// F3 "Profile injection boundary": a profile field is user-approved data (unlike an

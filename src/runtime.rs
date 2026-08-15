@@ -509,6 +509,15 @@ impl Runtime {
             self.append_chat_turn("assistant", result.output.clone());
         }
         for memory in memories {
+            // Workspace citations already surface as visible evidence ("why was this used");
+            // memory context only ever reached the audit log, invisible during normal use. This
+            // gives it the same visible attribution — the key/namespace, not the value, so the
+            // source line never duplicates a long or sensitive value inline.
+            result.evidence.push(format!(
+                "memory.used:{}:{}",
+                memory.namespace.as_str(),
+                memory.key
+            ));
             self.record_audit(AuditEvent::pending(
                 task.task_id.clone(),
                 format!("memory.retrieved:{}", memory.memory_id),

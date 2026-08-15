@@ -541,7 +541,7 @@ fn pending_memory_preview(proposal: &MemoryProposal) -> String {
         None => "kalıcı".into(),
     };
     format!(
-        "Bellek teklifi (henüz kaydedilmedi): {} = {}\nNamespace: {} • sensitivity: {} • süre: {} • model context: {}\nDeğiştir: /remember sensitivity <public|internal|sensitive> • /remember ttl <saat|none>\nOnay: /remember approve • Vazgeç: /remember reject",
+        "Bellek teklifi (henüz kaydedilmedi): {} = {}\nNamespace: {} • sensitivity: {} • süre: {} • model context: {}\nDeğiştir: /remember sensitivity <public|internal|sensitive> • /remember ttl <saat|none> • /remember model-context <evet|hayır>\nOnay: /remember approve • Vazgeç: /remember reject",
         proposal.record.key,
         proposal.record.value,
         proposal.record.namespace.as_str(),
@@ -617,6 +617,41 @@ fn adjust_pending_memory_ttl(app: &mut App, word: &str) {
         record.source,
         record.include_in_model_context,
         expires_at,
+    ) {
+        Ok(updated) => {
+            app.push_system(pending_memory_preview(&updated));
+            app.pending_memory = Some(updated);
+        }
+        Err(error) => app.push_system(format!("Güncellenemedi: {error}")),
+    }
+}
+
+/// Re-proposes the pending memory record with `include_in_model_context` toggled explicitly by
+/// the user, instead of every record silently always being included. `retrieve_memory` already
+/// excludes `include_in_model_context=0` rows at read time; this is what actually lets the user
+/// exercise that control, which previously had no command attached to it.
+fn adjust_pending_memory_model_context(app: &mut App, word: &str) {
+    let Some(proposal) = app.pending_memory.as_ref() else {
+        app.push_system("Önce /remember anahtar = değer ile bir teklif oluştur.");
+        return;
+    };
+    let include_in_model_context = match word.to_ascii_lowercase().as_str() {
+        "evet" | "yes" | "true" => true,
+        "hayır" | "hayir" | "no" | "false" => false,
+        _ => {
+            app.push_system("Kullanım: /remember model-context <evet|hayır>");
+            return;
+        }
+    };
+    let record = proposal.record.clone();
+    match propose_memory(
+        record.namespace,
+        record.key,
+        record.value,
+        record.sensitivity,
+        record.source,
+        include_in_model_context,
+        record.expires_at,
     ) {
         Ok(updated) => {
             app.push_system(pending_memory_preview(&updated));
@@ -793,6 +828,10 @@ fn submit(
         }
         if let Some(word) = specification.strip_prefix("ttl ").map(str::trim) {
             adjust_pending_memory_ttl(app, word);
+            return;
+        }
+        if let Some(word) = specification.strip_prefix("model-context ").map(str::trim) {
+            adjust_pending_memory_model_context(app, word);
             return;
         }
         let Some((key, value)) = specification
@@ -1070,7 +1109,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember approve|reject, /memory, /forget <id>|all. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember anahtar = değer, /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all. Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -1194,6 +1233,15 @@ fn submit(
                             .strip_prefix("vision.analysis:")
                             .filter(|attachment_id| *attachment_id != "unavailable")
                             .map(|attachment_id| format!("• Local vision analizi: {attachment_id}"))
+                    })
+                    .or_else(|| {
+                        // "Neden kullanıldı" görünürlüğü: hangi kayıtlı bilgi (profil/proje/vb.)
+                        // bu yanıt için modele verildiğini gösterir. Değeri değil, yalnız
+                        // namespace:anahtar'ı — kaynak satırı uzun/hassas bir değeri tekrar
+                        // etmesin diye.
+                        evidence
+                            .strip_prefix("memory.used:")
+                            .map(|reference| format!("• Kayıtlı bilgi kullanıldı: {reference}"))
                     })
             })
             .collect::<Vec<_>>();
@@ -2141,5 +2189,35 @@ mod tests {
             .content
             .contains("Önce /remember anahtar"));
         assert!(app.pending_memory.is_none());
+    }
+
+    #[test]
+    fn remember_model_context_toggle_is_actually_respected_at_retrieval() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/remember proje = jarvis".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        app.input = "/remember model-context hayır".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("model context: hayır"));
+        app.input = "/remember approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        let saved = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .list_memory()
+            .expect("memory list");
+        let record = saved
+            .iter()
+            .find(|record| record.key == "proje")
+            .expect("saved record");
+        assert!(!record.include_in_model_context);
     }
 }

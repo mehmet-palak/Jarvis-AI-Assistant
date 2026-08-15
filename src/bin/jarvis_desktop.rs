@@ -157,6 +157,10 @@ struct JarvisDesktop {
     /// alanı düzenlerken (henüz "Kaydet"e basmadan) pencere yeniden çizildiğinde taslağı
     /// kaybolmasın. Pencere açılışında mevcut profil değerleriyle doldurulur.
     profile_drafts: HashMap<ProfileField, String>,
+    /// Per-field "modele dahil et" toggle shown next to the profile draft. Defaults to `true`
+    /// (matching the field's already-saved value on window open, or `true` for a field with no
+    /// saved value yet) but the user can turn it off before clicking "Kaydet".
+    profile_include_in_context: HashMap<ProfileField, bool>,
     /// `Some` while a background model health check is in flight. Prevents overlapping checks
     /// and lets `refresh_model_state` drain the result without ever blocking the UI thread.
     model_health_receiver: Option<mpsc::Receiver<ModelHealthUpdate>>,
@@ -201,10 +205,13 @@ impl JarvisDesktop {
             .into_iter()
             .map(|approval| approval.task_id.clone())
             .collect();
-        let profile_drafts = runtime
+        let profile_snapshot_at_open = runtime
             .lock()
             .expect("JARVIS runtime lock poisoned")
             .profile_snapshot()
+            .ok();
+        let profile_drafts = profile_snapshot_at_open
+            .as_ref()
             .map(|snapshot| {
                 ProfileField::ALL
                     .into_iter()
@@ -218,6 +225,17 @@ impl JarvisDesktop {
                     .collect()
             })
             .unwrap_or_default();
+        let profile_include_in_context = ProfileField::ALL
+            .into_iter()
+            .map(|field| {
+                let include = profile_snapshot_at_open
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.record_for(field))
+                    .map(|record| record.include_in_model_context)
+                    .unwrap_or(true);
+                (field, include)
+            })
+            .collect();
         Self {
             runtime,
             provider,
@@ -252,6 +270,7 @@ impl JarvisDesktop {
             stop_model_armed_at: None,
             composer_focus_claimed: false,
             profile_drafts,
+            profile_include_in_context,
             model_health_receiver: None,
         }
     }
@@ -611,6 +630,11 @@ impl JarvisDesktop {
                                     format!("• Local vision analizi: {attachment_id}")
                                 })
                         })
+                        .or_else(|| {
+                            evidence
+                                .strip_prefix("memory.used:")
+                                .map(|reference| format!("• Kayıtlı bilgi kullanıldı: {reference}"))
+                        })
                 })
                 .collect();
             let content = tool.error.clone().unwrap_or(tool.output);
@@ -865,16 +889,19 @@ impl JarvisDesktop {
             ui.horizontal(|ui| {
                 let draft = self.profile_drafts.entry(field).or_default();
                 ui.add(egui::TextEdit::singleline(draft).desired_width(140.0));
+                let value = draft.clone();
+                let include_in_context =
+                    self.profile_include_in_context.entry(field).or_insert(true);
+                ui.checkbox(include_in_context, "Modele dahil");
+                let include_in_context = *include_in_context;
                 if ui.small_button("Kaydet").clicked() {
-                    let value = draft.clone();
-                    match propose_profile_field(field, &value, "native-profile", true).and_then(
-                        |proposal| {
+                    match propose_profile_field(field, &value, "native-profile", include_in_context)
+                        .and_then(|proposal| {
                             self.runtime
                                 .lock()
                                 .expect("JARVIS runtime lock poisoned")
                                 .commit_memory_proposal(&proposal, true)
-                        },
-                    ) {
+                        }) {
                         Ok(record) => {
                             self.status = format!("{} kaydedildi.", field.label());
                             self.profile_drafts.insert(field, record.value);
