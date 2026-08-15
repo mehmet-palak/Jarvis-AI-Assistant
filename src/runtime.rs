@@ -237,6 +237,40 @@ impl Runtime {
         Ok(deleted)
     }
 
+    /// Deletes every record, in any namespace, whose key matches `key` (Turkish-fold-insensitive
+    /// — see `turkish_case_fold`). Convenience for natural-language "belleğimden X bilgisini
+    /// sil" (`MemoryIntent::ForgetKey`): the user names a concept, not an opaque `memory_id` or
+    /// which namespace it happened to be saved under. Built only from already-public primitives
+    /// (`list_memory`/`delete_memory`) — no new persistence-layer query.
+    pub fn delete_memory_by_key(&mut self, key: &str) -> Result<usize, String> {
+        let folded_key = turkish_case_fold(key.trim());
+        let matching_ids: Vec<String> = self
+            .list_memory()?
+            .into_iter()
+            .filter(|record| turkish_case_fold(&record.key) == folded_key)
+            .map(|record| record.memory_id)
+            .collect();
+        let mut deleted = 0;
+        for memory_id in matching_ids {
+            if self.delete_memory(&memory_id)? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// Deletes a known profile field's current record, if any (`Ok(false)` when the field was
+    /// never set). Shared by `/profile delete <field>` and natural-language "hafızandan X
+    /// bilgisini sil" (`MemoryIntent::ForgetProfileField`) — exactly one place resolves a
+    /// `ProfileField` to its current record and removes it.
+    pub fn delete_profile_field(&mut self, field: ProfileField) -> Result<bool, String> {
+        let snapshot = self.profile_snapshot()?;
+        match snapshot.record_for(field) {
+            Some(record) => self.delete_memory(&record.memory_id),
+            None => Ok(false),
+        }
+    }
+
     pub fn list_memory(&self) -> Result<Vec<MemoryRecord>, String> {
         self.store
             .as_ref()

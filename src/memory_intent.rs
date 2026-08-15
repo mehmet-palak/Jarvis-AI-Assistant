@@ -1,0 +1,381 @@
+//! Natural-language memory command recognition: lets the user say "hafızana yaz: ...",
+//! "belleğini güncelle: ..." or "belleğinden ... sil" directly in a normal chat message, instead
+//! of only through the `/remember`/`/forget` slash-command syntax.
+//!
+//! This is still a 100% explicit-user-command path — never model-initiated. The decision to
+//! write/update/delete is made by pattern-matching the *user's own raw input text* against a
+//! fixed set of trigger phrases, exactly the same way slash-command parsing already works; the
+//! model is never consulted about whether something should be remembered, and ordinary
+//! conversation that happens to mention a fact in passing (no trigger phrase) is never
+//! intercepted. A recognized trigger with an *unparseable* payload is reported back to the user
+//! explicitly — never silently ignored or guessed at, and never silently falls through to normal
+//! chat once a trigger phrase is clearly present.
+//!
+//! Deliberately a fixed phrase list, not general NLU: matches this project's existing style
+//! (`workspace.rs`'s exclude-pattern matching, `fts_query`'s tokenizer) of simple, predictable,
+//! explainable string checks over a bigger dependency. Extend the trigger/pattern lists here if a
+//! common phrasing is missing — that is a small, local change.
+
+use crate::{
+    propose_memory, propose_profile_field, turkish_case_fold, DataSensitivity, MemoryProposal,
+    ProfileField,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryIntent {
+    /// A fully-built, ready-to-commit proposal. The natural-language sentence itself *is* the
+    /// user's one explicit command — there is deliberately no second confirmation step here,
+    /// unlike `/remember ... approve`; saying "hafızana yaz: ..." is already unambiguous intent.
+    Remember(MemoryProposal),
+    /// A known profile field ("adım", "hitabım", "dilim", ...) to delete.
+    ForgetProfileField(ProfileField),
+    /// A free-form memory key (not a known profile field) to delete, across every namespace.
+    ForgetKey(String),
+    /// A trigger phrase was recognized but the payload after it could not be understood as
+    /// either a known fact pattern or an explicit `anahtar = değer` pair.
+    UnparseableRemember,
+    /// A forget-trigger was recognized but no target (field name or key) followed it.
+    UnparseableForget,
+}
+
+const REMEMBER_TRIGGERS: &[&str] = &[
+    "hafızana yaz",
+    "hafızanı güncelle",
+    "belleğine yaz",
+    "belleğini güncelle",
+    "hatırla ki",
+    "hatırla",
+    "unutma ki",
+];
+
+// Turkish is subject-object-verb: the target sits *between* the prefix and the verb ("hafızandan
+// isim bilgimi sil"), not right after a fixed "hafızandan sil" phrase — a single-prefix trigger
+// (like `REMEMBER_TRIGGERS` above) cannot express this, so forget needs a prefix+suffix pair.
+const FORGET_TRIGGER_PREFIXES: &[&str] = &[
+    "hafızandan ",
+    "hafızadan ",
+    "hafızamdan ",
+    "belleğinden ",
+    "belleğimden ",
+];
+const FORGET_TRIGGER_SUFFIXES: &[&str] = &[" sil", " çıkar", " unut"];
+
+/// If `input` (Turkish-fold-insensitively) starts with `trigger`, returns the remainder of the
+/// *original* string (original casing preserved) with a leading `:`/`,`/whitespace trimmed off.
+/// `turkish_case_fold` maps one input character to one output character for ordinary Turkish/
+/// Latin chat text, so counting characters in the folded prefix and reading that many characters
+/// back out of the original stays aligned.
+fn strip_trigger<'a>(input: &'a str, trigger: &str) -> Option<&'a str> {
+    let folded = turkish_case_fold(input);
+    if !folded.starts_with(trigger) {
+        return None;
+    }
+    let trigger_char_count = trigger.chars().count();
+    let byte_offset = input
+        .char_indices()
+        .nth(trigger_char_count)
+        .map(|(index, _)| index)
+        .unwrap_or(input.len());
+    Some(
+        input[byte_offset..]
+            .trim_start_matches([':', ',', ' '])
+            .trim(),
+    )
+}
+
+fn find_trigger<'a>(input: &'a str, triggers: &[&str]) -> Option<&'a str> {
+    triggers
+        .iter()
+        .find_map(|trigger| strip_trigger(input, trigger))
+}
+
+/// Finds a `(prefix, ... , suffix)` forget pattern and returns the target text strictly between
+/// them, original casing preserved. `None` if no prefix/suffix pair matches, or if it matches but
+/// leaves no actual target (e.g. "hafızandan sil" with nothing in between — prefix and suffix
+/// would overlap or leave an empty gap).
+fn extract_forget_target(input: &str) -> Option<String> {
+    let folded = turkish_case_fold(input.trim());
+    for prefix in FORGET_TRIGGER_PREFIXES {
+        let Some(after_prefix) = folded.strip_prefix(prefix) else {
+            continue;
+        };
+        for suffix in FORGET_TRIGGER_SUFFIXES {
+            let Some(target_folded) = after_prefix.strip_suffix(suffix) else {
+                continue;
+            };
+            if target_folded.trim().is_empty() {
+                continue; // matched trigger shape, but no target between prefix and suffix
+            }
+            let prefix_char_count = prefix.chars().count();
+            let target_char_count = target_folded.chars().count();
+            let target: String = input
+                .trim()
+                .chars()
+                .skip(prefix_char_count)
+                .take(target_char_count)
+                .collect();
+            return Some(target.trim().to_string()).filter(|value| !value.is_empty());
+        }
+    }
+    None
+}
+
+/// True if `input` (folded) at least *starts* the forget-trigger shape, even if no valid target
+/// followed — used only to distinguish "not a forget command at all" (fall through to normal
+/// chat) from "a forget command with nothing to forget" (`UnparseableForget`).
+fn looks_like_forget_trigger(input: &str) -> bool {
+    let folded = turkish_case_fold(input.trim());
+    FORGET_TRIGGER_PREFIXES
+        .iter()
+        .any(|prefix| folded.starts_with(prefix))
+        && FORGET_TRIGGER_SUFFIXES
+            .iter()
+            .any(|suffix| folded.ends_with(suffix))
+}
+
+/// A fixed set of common Turkish sentence shapes for the fields `/profile set` already knows —
+/// this is what lets "benim adım Ali" resolve directly to `ProfileField::DisplayName`, not just
+/// the already-supported `ad = Ali` short form.
+fn match_fact_pattern(payload: &str) -> Option<(ProfileField, String)> {
+    let folded = turkish_case_fold(payload);
+    for prefix in ["benim adım ", "adım "] {
+        if folded.starts_with(prefix) {
+            return Some((
+                ProfileField::DisplayName,
+                remainder_preserving_case(payload, prefix),
+            ));
+        }
+    }
+    for prefix in ["dilim ", "benim dilim "] {
+        if folded.starts_with(prefix) {
+            return Some((
+                ProfileField::Language,
+                remainder_preserving_case(payload, prefix),
+            ));
+        }
+    }
+    for prefix in ["rolüm ", "benim rolüm ", "tercihim "] {
+        if folded.starts_with(prefix) {
+            return Some((
+                ProfileField::RolePreference,
+                remainder_preserving_case(payload, prefix),
+            ));
+        }
+    }
+    for (prefix, suffix) in [("beni ", " diye çağır"), ("bana ", " diye hitap et")] {
+        if folded.starts_with(prefix) && folded.ends_with(suffix) {
+            let prefix_stripped = remainder_preserving_case(payload, prefix);
+            let keep_chars = prefix_stripped.chars().count() - suffix.chars().count();
+            let value: String = prefix_stripped.chars().take(keep_chars).collect();
+            if !value.trim().is_empty() {
+                return Some((ProfileField::PreferredAddress, value.trim().to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Same character-count-aligned trick as `strip_trigger`, for a fixed lowercase prefix instead
+/// of a trigger phrase list.
+fn remainder_preserving_case(original: &str, folded_prefix: &str) -> String {
+    let prefix_char_count = folded_prefix.chars().count();
+    original
+        .chars()
+        .skip(prefix_char_count)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Splits `payload` on the first `=` or `:` into (key, value), mirroring `/remember anahtar =
+/// değer`'s own parsing so natural language and the slash command accept the same explicit form.
+fn split_key_value(payload: &str) -> Option<(&str, &str)> {
+    payload
+        .split_once('=')
+        .or_else(|| payload.split_once(':'))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+}
+
+/// Parses `input` for a memory-management intent. Returns `None` when no trigger phrase is
+/// present at all — the caller must then treat `input` as ordinary conversation, unmodified.
+pub fn parse_memory_intent(input: &str) -> Option<MemoryIntent> {
+    let trimmed = input.trim();
+    if let Some(payload) = find_trigger(trimmed, REMEMBER_TRIGGERS) {
+        if payload.is_empty() {
+            return Some(MemoryIntent::UnparseableRemember);
+        }
+        if let Some((field, value)) = match_fact_pattern(payload) {
+            return Some(
+                propose_profile_field(field, &value, "chat-natural-language", true)
+                    .map(MemoryIntent::Remember)
+                    .unwrap_or(MemoryIntent::UnparseableRemember),
+            );
+        }
+        if let Some((key, value)) = split_key_value(payload) {
+            let intent = if let Some(field) = ProfileField::from_user_input(key) {
+                propose_profile_field(field, value, "chat-natural-language", true)
+            } else {
+                propose_memory(
+                    crate::MemoryNamespace::UserProfile,
+                    key,
+                    value,
+                    DataSensitivity::Internal,
+                    "chat-natural-language",
+                    true,
+                    None,
+                )
+            };
+            return Some(
+                intent
+                    .map(MemoryIntent::Remember)
+                    .unwrap_or(MemoryIntent::UnparseableRemember),
+            );
+        }
+        return Some(MemoryIntent::UnparseableRemember);
+    }
+    match extract_forget_target(trimmed) {
+        Some(target) => {
+            // "isim bilgimi sil" / "isim bilgini sil" — strip a trailing "bilgimi"/"bilgisini"/
+            // "bilgini"/"bilgisi" filler word before resolving the field/key, so that common
+            // phrasing resolves the same as the bare word ("isim sil").
+            let folded_target = turkish_case_fold(&target);
+            let resolved = ["bilgimi", "bilgisini", "bilgini", "bilgisi"]
+                .iter()
+                .find_map(|filler| {
+                    folded_target
+                        .strip_suffix(filler)
+                        .map(|_| remainder_dropping_suffix_words(&target, 1))
+                })
+                .unwrap_or(target);
+            if resolved.trim().is_empty() {
+                return Some(MemoryIntent::UnparseableForget);
+            }
+            Some(match ProfileField::from_user_input(resolved.trim()) {
+                Some(field) => MemoryIntent::ForgetProfileField(field),
+                None => MemoryIntent::ForgetKey(resolved.trim().to_string()),
+            })
+        }
+        None if looks_like_forget_trigger(trimmed) => Some(MemoryIntent::UnparseableForget),
+        None => None,
+    }
+}
+
+/// Drops the last `word_count` whitespace-separated words from `text`.
+fn remainder_dropping_suffix_words(text: &str, word_count: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= word_count {
+        return String::new();
+    }
+    words[..words.len() - word_count].join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemoryNamespace;
+
+    #[test]
+    fn no_trigger_phrase_is_ordinary_conversation() {
+        assert_eq!(parse_memory_intent("bugün hava nasıl"), None);
+        assert_eq!(parse_memory_intent("adım Ali, bu tarif iyi mi?"), None);
+    }
+
+    #[test]
+    fn a_known_fact_pattern_resolves_to_the_matching_profile_field() {
+        let Some(MemoryIntent::Remember(proposal)) =
+            parse_memory_intent("hafızana yaz: benim adım Ali")
+        else {
+            panic!("expected a ready Remember proposal");
+        };
+        assert_eq!(proposal.record.namespace, MemoryNamespace::UserProfile);
+        assert_eq!(proposal.record.key, "display_name");
+        assert_eq!(proposal.record.value, "Ali");
+    }
+
+    #[test]
+    fn bare_adim_pattern_without_benim_also_resolves() {
+        let Some(MemoryIntent::Remember(proposal)) = parse_memory_intent("hatırla ki adım Zeynep")
+        else {
+            panic!("expected a ready Remember proposal");
+        };
+        assert_eq!(proposal.record.key, "display_name");
+        assert_eq!(proposal.record.value, "Zeynep");
+    }
+
+    #[test]
+    fn preferred_address_pattern_extracts_the_middle_value() {
+        let Some(MemoryIntent::Remember(proposal)) =
+            parse_memory_intent("belleğini güncelle: beni Reis diye çağır")
+        else {
+            panic!("expected a ready Remember proposal");
+        };
+        assert_eq!(proposal.record.key, "preferred_address");
+        assert_eq!(proposal.record.value, "Reis");
+    }
+
+    #[test]
+    fn explicit_key_value_form_is_accepted_after_a_trigger() {
+        let Some(MemoryIntent::Remember(proposal)) =
+            parse_memory_intent("hafızana yaz: favori_renk = turkuaz")
+        else {
+            panic!("expected a ready Remember proposal");
+        };
+        assert_eq!(proposal.record.key, "favori_renk");
+        assert_eq!(proposal.record.value, "turkuaz");
+    }
+
+    #[test]
+    fn explicit_key_value_form_still_routes_a_known_field_alias_to_the_profile_path() {
+        let Some(MemoryIntent::Remember(proposal)) = parse_memory_intent("hafızana yaz: dil = tr")
+        else {
+            panic!("expected a ready Remember proposal");
+        };
+        assert_eq!(
+            proposal.record.key, "language",
+            "the 'dil' alias must resolve to the canonical profile key, not a raw 'dil' key"
+        );
+    }
+
+    #[test]
+    fn a_trigger_with_no_understandable_payload_is_reported_not_silently_dropped() {
+        assert_eq!(
+            parse_memory_intent("hafızana yaz"),
+            Some(MemoryIntent::UnparseableRemember)
+        );
+        assert_eq!(
+            parse_memory_intent("hafızana yaz: bugün hava çok güzel"),
+            Some(MemoryIntent::UnparseableRemember)
+        );
+    }
+
+    #[test]
+    fn forget_resolves_a_known_field_name_and_a_free_form_key_differently() {
+        assert_eq!(
+            parse_memory_intent("hafızandan isim bilgimi sil"),
+            Some(MemoryIntent::ForgetProfileField(ProfileField::DisplayName))
+        );
+        assert_eq!(
+            parse_memory_intent("belleğinden favori_renk sil"),
+            Some(MemoryIntent::ForgetKey("favori_renk".into()))
+        );
+    }
+
+    #[test]
+    fn forget_with_no_target_is_reported_not_silently_dropped() {
+        assert_eq!(
+            parse_memory_intent("hafızandan sil"),
+            Some(MemoryIntent::UnparseableForget)
+        );
+    }
+
+    #[test]
+    fn trigger_matching_is_case_and_turkish_i_insensitive() {
+        let Some(MemoryIntent::Remember(proposal)) =
+            parse_memory_intent("HAFIZANA YAZ: benim adım Işık")
+        else {
+            panic!("expected a ready Remember proposal even with uppercase Turkish 'I'");
+        };
+        assert_eq!(proposal.record.value, "Işık");
+    }
+}

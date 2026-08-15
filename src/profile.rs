@@ -63,20 +63,21 @@ impl ProfileField {
             .find(|field| field.memory_key() == key)
     }
 
-    /// Kısa Türkçe takma ad (`ad`, `hitap`, `dil`, `rol`). Komut satırında `memory_key`'in tam
-    /// İngilizce hâlini yazmak zorunda kalmasın diye.
-    fn short_alias(self) -> &'static str {
+    /// Kısa Türkçe takma adlar. Komut satırında/doğal dilde `memory_key`'in tam İngilizce hâlini
+    /// yazmak zorunda kalmasın diye — birden fazla eş anlamlı kabul edilir (örn. "ad" ve "isim"
+    /// ikisi de `DisplayName`), ilki (`ad`) hâlâ kullanıcıya gösterilen kanonik kısa ad.
+    fn short_aliases(self) -> &'static [&'static str] {
         match self {
-            Self::DisplayName => "ad",
-            Self::PreferredAddress => "hitap",
-            Self::Language => "dil",
-            Self::RolePreference => "rol",
+            Self::DisplayName => &["ad", "isim"],
+            Self::PreferredAddress => &["hitap"],
+            Self::Language => &["dil"],
+            Self::RolePreference => &["rol", "tercih"],
         }
     }
 
     /// Kullanıcının komut satırında yazdığı serbest metni bilinen bir alana çözer; hem tam
-    /// bellek anahtarını (`display_name`) hem kısa takma adı (`ad`) kabul eder, büyük/küçük harf
-    /// duyarsız.
+    /// bellek anahtarını (`display_name`) hem kısa takma adlardan birini (`ad`, `isim`, ...)
+    /// kabul eder, büyük/küçük harf duyarsız.
     pub fn from_user_input(input: &str) -> Option<Self> {
         let trimmed = input.trim();
         // English memory keys (e.g. "DISPLAY_NAME") and Turkish aliases (e.g. "DİL") need
@@ -84,10 +85,10 @@ impl ProfileField {
         // and falling back to the Turkish-aware fold covers both without guessing the language.
         // See `parse_data_sensitivity` in lib.rs for the same issue and a longer explanation.
         for normalized in [trimmed.to_lowercase(), turkish_case_fold(trimmed)] {
-            if let Some(field) = Self::ALL
-                .into_iter()
-                .find(|field| field.memory_key() == normalized || field.short_alias() == normalized)
-            {
+            if let Some(field) = Self::ALL.into_iter().find(|field| {
+                field.memory_key() == normalized
+                    || field.short_aliases().contains(&normalized.as_str())
+            }) {
                 return Some(field);
             }
         }
@@ -141,9 +142,10 @@ pub fn validate_profile_value(field: ProfileField, value: &str) -> Result<(), St
 }
 
 /// Genel bellek kayıtları arasından bilinen profil alanlarının **en güncel** değerini seçer.
-/// Aynı alan birden çok kez `/remember` ile yazılmışsa (bellek sistemi bunu engellemiyor — her
-/// onay yeni bir kayıt oluşturur), en son güncellenen kazanır; daha eskiler yalnız `/memory`
-/// üzerinden görünür ve elle silinebilir.
+/// Normalde her alan için tek kayıt olur — `memory_id` artık `(namespace, key)`'den türetildiği
+/// için aynı alanı tekrar `/remember`/`propose_profile_field` ile yazmak eskisinin üzerine yazar,
+/// ikinci bir satır eklemez (bkz. `propose_memory`). "En güncel kazanır" mantığı yalnız savunma
+/// amaçlı bir yedek — örn. eski (şema öncesi) dışa aktarılmış bir yedek geri içe aktarılırsa.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileSnapshot {
     pub display_name: Option<MemoryRecord>,
@@ -346,6 +348,24 @@ mod tests {
             Some(ProfileField::DisplayName)
         );
         assert_eq!(ProfileField::from_user_input("bilinmeyen"), None);
+    }
+
+    /// Doğal dilde daha yaygın eş anlamlılar da (`isim`, `tercih`) kısa takma ad kadar çalışmalı —
+    /// yalnız kanonik `ad`/`rol` değil.
+    #[test]
+    fn from_user_input_also_accepts_natural_synonyms() {
+        assert_eq!(
+            ProfileField::from_user_input("isim"),
+            Some(ProfileField::DisplayName)
+        );
+        assert_eq!(
+            ProfileField::from_user_input("İSİM"),
+            Some(ProfileField::DisplayName)
+        );
+        assert_eq!(
+            ProfileField::from_user_input("tercih"),
+            Some(ProfileField::RolePreference)
+        );
     }
 
     #[test]

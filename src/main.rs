@@ -14,11 +14,11 @@ use crossterm::{
 };
 use jarvis_core::{
     attachment_receipt_manifest, inspect_local_attachment, memory_export, memory_import,
-    parse_data_sensitivity, parse_memory_namespace, preview_workspace_index, profile_manifest,
-    propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef, DataSensitivity,
-    InputType, LlamaEmbeddingProvider, LlamaServerProvider, LlamaVisionServerProvider,
-    MemoryNamespace, MemoryProposal, ProfileField, Request, Runtime, SqliteStore, TaskState,
-    VisionProvider, WorkspaceCitation,
+    parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
+    profile_manifest, propose_memory, propose_profile_field, AttachmentReceipt, AttachmentRef,
+    DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
+    LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal, ProfileField,
+    Request, Runtime, SqliteStore, TaskState, VisionProvider, WorkspaceCitation,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -698,6 +698,70 @@ fn submit(
     if input.is_empty() {
         return;
     }
+    // Natural-language memory commands ("hafızana yaz: ...", "belleğinden ... sil") are
+    // recognized here, before any slash-command parsing — a plain sentence, not a "/"-prefixed
+    // command, but still a single, unambiguous, explicit user instruction (`memory_intent.rs`).
+    // No slash command starts with these trigger phrases, so this can never shadow an existing
+    // command; anything without a recognized trigger phrase falls straight through untouched.
+    match parse_memory_intent(&input) {
+        Some(MemoryIntent::Remember(proposal)) => {
+            let key = proposal.record.key.clone();
+            let value = proposal.record.value.clone();
+            let namespace = proposal.record.namespace.as_str();
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .commit_memory_proposal(&proposal, true)
+            {
+                Ok(_) => app.push_system(format!(
+                    "Not aldım: {key} = {value} • namespace={namespace}"
+                )),
+                Err(error) => app.push_system(format!("Kaydedemedim: {error}")),
+            }
+            return;
+        }
+        Some(MemoryIntent::ForgetProfileField(field)) => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .delete_profile_field(field)
+            {
+                Ok(true) => {
+                    app.push_system(format!("{} bilgisini bellekten sildim.", field.label()))
+                }
+                Ok(false) => app.push_system(format!("{} zaten kayıtlı değildi.", field.label())),
+                Err(error) => app.push_system(format!("Silemedim: {error}")),
+            }
+            return;
+        }
+        Some(MemoryIntent::ForgetKey(key)) => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .delete_memory_by_key(&key)
+            {
+                Ok(0) => {
+                    app.push_system(format!("'{key}' anahtarıyla kayıtlı bir bellek bulamadım."))
+                }
+                Ok(count) => app.push_system(format!("'{key}' ile eşleşen {count} kayıt silindi.")),
+                Err(error) => app.push_system(format!("Silemedim: {error}")),
+            }
+            return;
+        }
+        Some(MemoryIntent::UnparseableRemember) => {
+            app.push_system(
+                "Ne kaydetmemi istediğini anlayamadım. Örnek: 'hafızana yaz: adım Ali' ya da 'hafızana yaz: anahtar = değer'.",
+            );
+            return;
+        }
+        Some(MemoryIntent::UnparseableForget) => {
+            app.push_system(
+                "Neyi silmemi istediğini anlayamadım. Örnek: 'hafızandan isim bilgimi sil'.",
+            );
+            return;
+        }
+        None => {} // trigger phrase yok — normal sohbet, aşağıda değişmeden devam eder
+    }
     if let Some(task_id) = input
         .strip_prefix("/approve ")
         .or_else(|| input.strip_prefix("approve "))
@@ -986,17 +1050,14 @@ fn submit(
             );
             return;
         };
-        let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
-        match runtime_guard.profile_snapshot() {
-            Ok(snapshot) => match snapshot.record_for(field) {
-                Some(record) => match runtime_guard.delete_memory(&record.memory_id) {
-                    Ok(true) => app.push_system(format!("{} silindi.", field.label())),
-                    Ok(false) => app.push_system("Bu alan zaten kayıtlı değildi.".to_string()),
-                    Err(error) => app.push_system(format!("Silinemedi: {error}")),
-                },
-                None => app.push_system(format!("{} zaten ayarlanmamış.", field.label())),
-            },
-            Err(error) => app.push_system(format!("Profil okunamadı: {error}")),
+        match runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .delete_profile_field(field)
+        {
+            Ok(true) => app.push_system(format!("{} silindi.", field.label())),
+            Ok(false) => app.push_system(format!("{} zaten ayarlanmamış.", field.label())),
+            Err(error) => app.push_system(format!("Silinemedi: {error}")),
         }
         return;
     }
@@ -1856,8 +1917,8 @@ mod tests {
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use jarvis_core::{
-        LlamaServerProvider, LlamaVisionServerProvider, Runtime, SqliteStore, TaskState,
-        WorkspaceCitation,
+        parse_memory_intent, LlamaServerProvider, LlamaVisionServerProvider, ProfileField, Runtime,
+        SqliteStore, TaskState, WorkspaceCitation,
     };
     use ratatui::{backend::TestBackend, Terminal};
     use std::sync::{mpsc, Arc, Mutex};
@@ -2244,6 +2305,115 @@ mod tests {
         let shown = &app.messages.last().unwrap().content;
         assert!(shown.contains("Ad: ayarlanmamış"));
         assert!(shown.contains("Dil: tr"));
+    }
+
+    /// User-requested UX: "hafızana yaz" must save in a single step, no separate
+    /// `/remember approve` — and saying the same fact again must *update*, not duplicate.
+    #[test]
+    fn natural_language_remember_saves_in_one_step_and_updates_on_repeat() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "hafızana yaz: benim adım Ali".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("Not aldım"));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .profile_snapshot()
+                .unwrap()
+                .record_for(ProfileField::DisplayName)
+                .unwrap()
+                .value,
+            "Ali"
+        );
+
+        app.input = "hafızanı güncelle: benim adım Mehmet".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let memories = runtime.lock().unwrap().list_memory().unwrap();
+        assert_eq!(
+            memories
+                .iter()
+                .filter(|record| record.key == "display_name")
+                .count(),
+            1,
+            "a second natural-language remember on the same fact must update, not duplicate"
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .profile_snapshot()
+                .unwrap()
+                .record_for(ProfileField::DisplayName)
+                .unwrap()
+                .value,
+            "Mehmet"
+        );
+    }
+
+    /// User-requested UX: "belleğinden ... sil" must delete in a single step — both the known
+    /// profile-field phrasing and a free-form key.
+    #[test]
+    fn natural_language_forget_deletes_a_profile_field_and_a_free_form_key() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        for command in ["/profile set ad = Ali", "/remember approve"] {
+            app.input = command.into();
+            submit(&mut app, &runtime, &provider, &vision, &sender);
+        }
+        app.input = "hafızana yaz: favori_renk = turkuaz".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        app.input = "hafızandan isim bilgimi sil".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("sildim"));
+        assert!(runtime
+            .lock()
+            .unwrap()
+            .profile_snapshot()
+            .unwrap()
+            .record_for(ProfileField::DisplayName)
+            .is_none());
+
+        app.input = "belleğinden favori_renk sil".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("silindi"));
+        assert!(runtime
+            .lock()
+            .unwrap()
+            .list_memory()
+            .unwrap()
+            .iter()
+            .all(|record| record.key != "favori_renk"));
+    }
+
+    /// A recognized trigger phrase with an unparseable payload must get a clear correction
+    /// message, never silently fall through to normal chat or silently do nothing.
+    #[test]
+    fn natural_language_memory_trigger_with_unparseable_payload_is_reported() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "hafızana yaz: bugün hava çok güzel".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("anlayamadım"));
+
+        app.input = "hafızandan sil".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("anlayamadım"));
+    }
+
+    /// A sentence that merely *mentions* a fact in passing, with no trigger phrase, must never
+    /// be intercepted as a memory command — it has to reach ordinary conversation handling.
+    #[test]
+    fn sentence_without_a_trigger_phrase_is_never_treated_as_a_memory_command() {
+        assert_eq!(
+            parse_memory_intent("adım Ali, bu tarif bana uygun mu?"),
+            None
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod attachments;
 mod capabilities;
 pub mod desktop_config;
 pub mod embedding;
+mod memory_intent;
 mod model;
 mod persistence;
 mod policy;
@@ -27,6 +28,7 @@ pub use embedding::{
     cosine_similarity, deserialize_embedding, serialize_embedding, EmbeddingProvider,
     LlamaEmbeddingProvider,
 };
+pub use memory_intent::{parse_memory_intent, MemoryIntent};
 pub use model::{
     normalize_llama_cli_output, route_with_provider, DeterministicModelProvider, IntentResolution,
     LlamaCliProvider, LlamaServerProvider, ModelProvider, ModelResponse, ModelRuntimeState,
