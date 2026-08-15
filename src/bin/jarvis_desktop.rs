@@ -13,10 +13,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
     attachment_receipt_manifest, default_desktop_preferences_path, inspect_local_attachment,
-    load_desktop_preferences, propose_profile_field, save_desktop_preferences,
+    load_desktop_preferences, parse_memory_intent, propose_profile_field, save_desktop_preferences,
     turkish_case_fold as turkish_search_fold, AttachmentReceipt, AttachmentRef, DesktopPreferences,
     InputType, LlamaEmbeddingProvider, LlamaServerProvider, LlamaVisionServerProvider,
-    ProfileField, Request, Runtime, SqliteStore, TaskState, ThemePreference, VisionProvider,
+    MemoryIntent, ProfileField, Request, Runtime, SqliteStore, TaskState, ThemePreference,
+    VisionProvider,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,6 +506,22 @@ impl JarvisDesktop {
             return;
         }
         self.draft.clear();
+        // Natural-language memory commands ("hafızana yaz: ...", "belleğinden ... sil") —
+        // mirrors the TUI (`src/main.rs`), same `memory_intent.rs` parser, same single-step
+        // (no second confirmation) behavior. The desktop app has no slash-command surface at
+        // all, but this isn't a slash command — it's the user's own plain sentence, so it
+        // applies here exactly the same way.
+        if let Some(reply) = handle_natural_language_memory_command(&self.runtime, &content) {
+            self.messages.push(Message {
+                role: MessageRole::User,
+                content: content.clone(),
+            });
+            self.messages.push(Message {
+                role: MessageRole::System,
+                content: reply,
+            });
+            return;
+        }
         if is_explicit_model_exit(&content) {
             self.queued_attachments.clear();
             self.previews.clear();
@@ -1434,6 +1451,65 @@ fn is_explicit_model_exit(input: &str) -> bool {
     matches!(input.trim(), "exit" | "/exit")
 }
 
+/// Free function (not an `impl JarvisDesktop` method) so it is testable without constructing a
+/// full `JarvisDesktop` — which needs a live `egui::Context` — mirroring the equivalent TUI logic
+/// in `src/main.rs`'s `submit`. `None` means `content` had no recognized memory-command trigger
+/// phrase at all — the caller must treat it as ordinary chat, unmodified. `Some(reply)` means it
+/// was fully handled here (saved/updated/deleted, or a clear "I didn't understand" correction)
+/// and the caller should show `reply` as the response, never also send `content` to the model.
+fn handle_natural_language_memory_command(
+    runtime: &Arc<Mutex<Runtime>>,
+    content: &str,
+) -> Option<String> {
+    match parse_memory_intent(content) {
+        Some(MemoryIntent::Remember(proposal)) => {
+            let key = proposal.record.key.clone();
+            let value = proposal.record.value.clone();
+            let namespace = proposal.record.namespace.as_str();
+            Some(
+                match runtime
+                    .lock()
+                    .expect("JARVIS runtime lock poisoned")
+                    .commit_memory_proposal(&proposal, true)
+                {
+                    Ok(_) => format!("Not aldım: {key} = {value} • namespace={namespace}"),
+                    Err(error) => format!("Kaydedemedim: {error}"),
+                },
+            )
+        }
+        Some(MemoryIntent::ForgetProfileField(field)) => Some(
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .delete_profile_field(field)
+            {
+                Ok(true) => format!("{} bilgisini bellekten sildim.", field.label()),
+                Ok(false) => format!("{} zaten kayıtlı değildi.", field.label()),
+                Err(error) => format!("Silemedim: {error}"),
+            },
+        ),
+        Some(MemoryIntent::ForgetKey(key)) => Some(
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .delete_memory_by_key(&key)
+            {
+                Ok(0) => format!("'{key}' anahtarıyla kayıtlı bir bellek bulamadım."),
+                Ok(count) => format!("'{key}' ile eşleşen {count} kayıt silindi."),
+                Err(error) => format!("Silemedim: {error}"),
+            },
+        ),
+        Some(MemoryIntent::UnparseableRemember) => Some(
+            "Ne kaydetmemi istediğini anlayamadım. Örnek: 'hafızana yaz: adım Ali' ya da 'hafızana yaz: anahtar = değer'."
+                .into(),
+        ),
+        Some(MemoryIntent::UnparseableForget) => Some(
+            "Neyi silmemi istediğini anlayamadım. Örnek: 'hafızandan isim bilgimi sil'.".into(),
+        ),
+        None => None,
+    }
+}
+
 fn message_matches_filter(
     message: &Message,
     search: &str,
@@ -1686,14 +1762,15 @@ fn main() -> eframe::Result<()> {
 mod tests {
     use super::{
         acquire_desktop_instance_lock, desktop_notification, focus_jarvis_window_with,
-        is_explicit_model_exit, message_matches_filter, model_unavailable_notification,
-        notification_requests_jarvis_focus, send_notification_with, stop_model_button_is_armed,
-        turkish_search_fold, Message, MessageRole, NOTIFICATION_FOCUS_ACTION,
-        STOP_MODEL_CONFIRM_WINDOW,
+        handle_natural_language_memory_command, is_explicit_model_exit, message_matches_filter,
+        model_unavailable_notification, notification_requests_jarvis_focus, send_notification_with,
+        stop_model_button_is_armed, turkish_search_fold, Message, MessageRole,
+        NOTIFICATION_FOCUS_ACTION, STOP_MODEL_CONFIRM_WINDOW,
     };
-    use jarvis_core::TaskState;
+    use jarvis_core::{ProfileField, Runtime, SqliteStore, TaskState};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temporary_lock_path() -> PathBuf {
@@ -1736,6 +1813,47 @@ mod tests {
         assert!(is_explicit_model_exit(" /exit "));
         assert!(!is_explicit_model_exit("/quit"));
         assert!(!is_explicit_model_exit("çıkış"));
+    }
+
+    /// Native desktop mirrors the TUI's natural-language memory commands — same single-step
+    /// (no second confirmation) behavior, same "isim" alias, same update-not-duplicate fix.
+    #[test]
+    fn desktop_natural_language_memory_command_saves_updates_and_reports_unparseable() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let runtime = Arc::new(Mutex::new(Runtime::with_store(store)));
+
+        let reply = handle_natural_language_memory_command(&runtime, "hafızana yaz: adım Ali")
+            .expect("a remember trigger must be handled, not fall through");
+        assert!(reply.contains("Not aldım"));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .profile_snapshot()
+                .unwrap()
+                .record_for(ProfileField::DisplayName)
+                .unwrap()
+                .value,
+            "Ali"
+        );
+
+        handle_natural_language_memory_command(&runtime, "hafızanı güncelle: adım Mehmet");
+        assert_eq!(
+            runtime.lock().unwrap().list_memory().unwrap().len(),
+            1,
+            "remembering the same field again must update, not duplicate"
+        );
+
+        let unparseable =
+            handle_natural_language_memory_command(&runtime, "hafızana yaz: bugün hava güzel")
+                .expect("a trigger with no understandable payload must still be handled");
+        assert!(unparseable.contains("anlayamadım"));
+
+        assert_eq!(
+            handle_natural_language_memory_command(&runtime, "bugün hava nasıl"),
+            None,
+            "ordinary conversation with no trigger phrase must fall through untouched"
+        );
     }
 
     #[test]
