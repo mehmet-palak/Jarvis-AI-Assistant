@@ -15,6 +15,14 @@ use crate::{ContentProvenance, ContentRef};
 pub const MAX_WORKSPACE_DOCUMENT_BYTES: u64 = 512 * 1024;
 pub const MAX_WORKSPACE_CHUNK_CHARS: usize = 1_200;
 
+/// F3 "Metadata/FTS index: ... indeks sürümü". The chunking/extraction algorithm's own version,
+/// persisted per document (`workspace_documents.index_schema_version`) — distinct from the
+/// SQLite column-migration version (`persistence::CURRENT_SCHEMA_VERSION`). If a future JARVIS
+/// build changes how documents get chunked, bumping this forces every existing document to be
+/// treated as needing re-indexing even when its raw content hash has not changed, because the
+/// *derived* chunks would otherwise be stale relative to the new algorithm.
+pub const CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION: u16 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceIngestionReport {
     pub schema_version: u16,

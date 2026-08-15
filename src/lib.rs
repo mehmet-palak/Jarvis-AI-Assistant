@@ -49,7 +49,8 @@ pub(crate) use workspace::{
 };
 pub use workspace::{
     preview_workspace_index, WorkspaceCitation, WorkspaceFolderIndexReport, WorkspaceIndexPreview,
-    WorkspaceIngestionReport, MAX_WORKSPACE_CHUNK_CHARS, MAX_WORKSPACE_DOCUMENT_BYTES,
+    WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MAX_WORKSPACE_CHUNK_CHARS,
+    MAX_WORKSPACE_DOCUMENT_BYTES,
 };
 
 use std::ffi::CString;
@@ -1923,7 +1924,7 @@ mod tests {
         let example = verified_teacher_example("example-1");
         store.append_teacher_example(&example, &registry).unwrap();
         assert_eq!(store.teacher_example_count().unwrap(), 1);
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 6);
     }
 
     #[test]
@@ -2842,6 +2843,45 @@ mod tests {
         fs::remove_dir_all(root).expect("workspace fixture should be removed");
     }
 
+    /// F3 "Metadata/FTS index: ... indeks sürümü". A stale `index_schema_version` on disk (as if
+    /// this document had been indexed by an older JARVIS build) must force a real re-index even
+    /// when the raw content hash is unchanged, because a future chunking-algorithm change could
+    /// make the *derived* chunks stale in a way content hashing alone would never catch.
+    #[test]
+    fn a_stale_index_schema_version_forces_reindexing_even_with_identical_content() {
+        let root = temporary_workspace("index-version");
+        fs::write(root.join("notes.md"), "sabit içerik değişmiyor").expect("fixture write");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        let first = runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("first index");
+        assert!(first.content_changed);
+
+        // Simulate an old index by rolling back the stored schema version, content untouched.
+        runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .raw_connection()
+            .execute(
+                "UPDATE workspace_documents SET index_schema_version = 0 WHERE document_id = ?1",
+                [&first.document_id],
+            )
+            .expect("simulate an old index version");
+
+        let reindexed = runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("reindex after a version bump");
+        assert!(
+            reindexed.content_changed,
+            "a stale index_schema_version must force re-indexing despite identical content"
+        );
+
+        fs::remove_dir_all(root).expect("workspace fixture should be removed");
+    }
+
     #[test]
     fn retrieved_workspace_data_cannot_activate_a_model_proposed_capability() {
         let root = temporary_workspace("rag-intent");
@@ -3060,7 +3100,7 @@ mod tests {
         let store = runtime.store.as_ref().expect("store attached");
         assert_eq!(store.task_count().unwrap(), 1);
         assert_eq!(store.audit_count().unwrap(), 5);
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert_eq!(store.schema_version().unwrap(), 6);
         assert!(store.audit_chain_is_valid().unwrap());
     }
 

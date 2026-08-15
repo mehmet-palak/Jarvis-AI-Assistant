@@ -19,7 +19,7 @@ use crate::{
     validate_memory_record, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample, WorkspaceCitation,
-    WorkspaceIngestionReport,
+    WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -44,7 +44,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -166,6 +166,11 @@ impl SqliteStore {
         self.ensure_audit_column("event_sequence", "INTEGER NOT NULL DEFAULT 0")?;
         self.ensure_audit_column("previous_hash", "TEXT NOT NULL DEFAULT ''")?;
         self.ensure_audit_column("event_hash", "TEXT NOT NULL DEFAULT ''")?;
+        self.ensure_column(
+            "workspace_documents",
+            "index_schema_version",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
         self.backfill_legacy_audit_chain()?;
         if self.repair_concurrent_audit_chain()? {
             self.append_audit_chain(
@@ -191,6 +196,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (5, 'workspace FTS document index')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (6, 'workspace document index schema version tracking')",
             [],
         )?;
         Ok(())
@@ -540,16 +549,23 @@ impl SqliteStore {
         // Incremental re-index: if this exact path is already indexed with byte-for-byte
         // identical extracted content, skip the chunk delete/re-insert churn entirely and report
         // the existing state as unchanged, rather than redoing work indexing didn't need to redo.
-        let existing_state: Option<(String, i64)> = self
+        let existing_state: Option<(String, i64, i64)> = self
             .connection
             .query_row(
-                "SELECT content_sha256, indexed_at FROM workspace_documents WHERE canonical_path=?1",
+                "SELECT content_sha256, indexed_at, index_schema_version FROM workspace_documents WHERE canonical_path=?1",
                 [&canonical_path_text],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .ok();
-        if let Some((existing_sha256, existing_indexed_at)) = &existing_state {
-            if existing_sha256 == &content_sha256 {
+        if let Some((existing_sha256, existing_indexed_at, existing_index_schema_version)) =
+            &existing_state
+        {
+            // A version bump forces re-indexing even for byte-identical content: the *derived*
+            // chunks could be stale relative to a changed chunking/extraction algorithm.
+            if existing_sha256 == &content_sha256
+                && *existing_index_schema_version
+                    >= i64::from(CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION)
+            {
                 return Ok(WorkspaceIngestionReport {
                     schema_version: 1,
                     document_id,
@@ -565,17 +581,19 @@ impl SqliteStore {
         let indexed_at = now_epoch();
         self.connection
             .execute(
-                "INSERT INTO workspace_documents(document_id, canonical_path, content_sha256, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO workspace_documents(document_id, canonical_path, content_sha256, indexed_at, index_schema_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(canonical_path) DO UPDATE SET
                     document_id=excluded.document_id,
                     content_sha256=excluded.content_sha256,
-                    indexed_at=excluded.indexed_at",
+                    indexed_at=excluded.indexed_at,
+                    index_schema_version=excluded.index_schema_version",
                 params![
                     document_id,
                     canonical_path_text,
                     content_sha256,
-                    indexed_at as i64
+                    indexed_at as i64,
+                    i64::from(CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION)
                 ],
             )
             .map_err(|error| format!("workspace document persistence failed: {error}"))?;
