@@ -536,6 +536,32 @@ impl SqliteStore {
         let canonical_path_text = canonical_path.to_string_lossy().into_owned();
         let document_id = format!("document-{}", &sha256_hex(&canonical_path_text)[..16]);
         let content_sha256 = sha256_hex(&content);
+
+        // Incremental re-index: if this exact path is already indexed with byte-for-byte
+        // identical extracted content, skip the chunk delete/re-insert churn entirely and report
+        // the existing state as unchanged, rather than redoing work indexing didn't need to redo.
+        let existing_state: Option<(String, i64)> = self
+            .connection
+            .query_row(
+                "SELECT content_sha256, indexed_at FROM workspace_documents WHERE canonical_path=?1",
+                [&canonical_path_text],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        if let Some((existing_sha256, existing_indexed_at)) = &existing_state {
+            if existing_sha256 == &content_sha256 {
+                return Ok(WorkspaceIngestionReport {
+                    schema_version: 1,
+                    document_id,
+                    canonical_path,
+                    content_sha256,
+                    chunk_count: chunks.len(),
+                    indexed_at: *existing_indexed_at as u64,
+                    content_changed: false,
+                });
+            }
+        }
+
         let indexed_at = now_epoch();
         self.connection
             .execute(
@@ -576,6 +602,7 @@ impl SqliteStore {
             content_sha256,
             chunk_count: chunks.len(),
             indexed_at,
+            content_changed: true,
         })
     }
 

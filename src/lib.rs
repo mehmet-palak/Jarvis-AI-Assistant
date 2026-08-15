@@ -2792,6 +2792,56 @@ mod tests {
         fs::remove_dir_all(root).expect("workspace fixture should be removed");
     }
 
+    /// F3 "Ingestion pipeline: ... dosya değişiklik algısı ve incremental re-index": re-indexing
+    /// an unchanged file must not redo the chunk delete/re-insert work, and must say so; a real
+    /// content change must actually replace the old chunks, not just add to them.
+    #[test]
+    fn reindexing_skips_unchanged_content_but_replaces_chunks_when_content_changes() {
+        let root = temporary_workspace("incremental");
+        let path = root.join("notes.md");
+        fs::write(&path, "İlk sürüm: proje kodu deniz-firtinasi").expect("initial write");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+
+        let first = runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("first index");
+        assert!(first.content_changed);
+        let first_indexed_at = first.indexed_at;
+
+        let again = runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("second index of unchanged file");
+        assert!(!again.content_changed);
+        assert_eq!(again.content_sha256, first.content_sha256);
+        assert_eq!(
+            again.indexed_at, first_indexed_at,
+            "an unchanged file must not get a new indexed_at timestamp"
+        );
+
+        fs::write(&path, "İkinci sürüm: proje kodu artık gece-yildizi").expect("content change");
+        let updated = runtime
+            .index_workspace_document(&root, Path::new("notes.md"), true)
+            .expect("third index after a real change");
+        assert!(updated.content_changed);
+        assert_ne!(updated.content_sha256, first.content_sha256);
+
+        // The old content must actually be gone, not just appended to — search must find only
+        // the new marker, never the stale one.
+        let store_ref = runtime.store.as_ref().unwrap();
+        assert!(store_ref
+            .search_workspace("gece-yildizi", 4)
+            .expect("search succeeds")
+            .iter()
+            .any(|citation| citation.content.contains("gece-yildizi")));
+        assert!(store_ref
+            .search_workspace("deniz-firtinasi", 4)
+            .expect("search succeeds")
+            .is_empty());
+
+        fs::remove_dir_all(root).expect("workspace fixture should be removed");
+    }
+
     #[test]
     fn retrieved_workspace_data_cannot_activate_a_model_proposed_capability() {
         let root = temporary_workspace("rag-intent");

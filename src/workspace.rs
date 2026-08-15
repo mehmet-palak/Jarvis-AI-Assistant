@@ -23,6 +23,11 @@ pub struct WorkspaceIngestionReport {
     pub content_sha256: String,
     pub chunk_count: usize,
     pub indexed_at: u64,
+    /// F3 "Ingestion pipeline: ... dosya değişiklik algısı ve incremental re-index". `false`
+    /// means this path's content hash matched what was already indexed, so the (potentially
+    /// expensive) chunk delete/re-insert was skipped entirely; `indexed_at` is the *previous*
+    /// indexing time in that case, not "now".
+    pub content_changed: bool,
 }
 
 /// Result of indexing every file `preview_workspace_index` reported as `included`. A per-file

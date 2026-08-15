@@ -1088,7 +1088,15 @@ fn submit(
             .index_workspace_folder(&target, &exclude_patterns, true)
         {
             Ok(report) => {
-                let mut message = format!("{} dosya indekslendi.", report.indexed.len());
+                let changed = report
+                    .indexed
+                    .iter()
+                    .filter(|ingestion| ingestion.content_changed)
+                    .count();
+                let unchanged = report.indexed.len() - changed;
+                let mut message = format!(
+                    "{changed} dosya indekslendi, {unchanged} dosya zaten güncel (değişmemiş, atlandı)."
+                );
                 if !report.failed.is_empty() {
                     let failures = report
                         .failed
@@ -1111,11 +1119,16 @@ fn submit(
             .expect("JARVIS runtime lock poisoned")
             .index_workspace_document(&root, std::path::Path::new(relative_path), true)
         {
-            Ok(report) => app.push_system(format!(
+            Ok(report) if report.content_changed => app.push_system(format!(
                 "Dosya indekslendi: {} • {} parça • SHA-256:{}…\nBu klasöre ait metin artık yalnız ilgili sorularda kaynaklı data olarak kullanılabilir.",
                 report.canonical_path.display(),
                 report.chunk_count,
                 &report.content_sha256[..12]
+            )),
+            Ok(report) => app.push_system(format!(
+                "Dosya değişmemiş, zaten güncel: {} • {} parça (yeniden işlenmedi).",
+                report.canonical_path.display(),
+                report.chunk_count
             )),
             Err(error) => app.push_system(format!("Dosya indekslenemedi: {error}")),
         }
