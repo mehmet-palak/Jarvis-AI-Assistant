@@ -16,6 +16,25 @@ Durumlar: `BEKLENİYOR` · `DEVAM EDİYOR` · `BLOCKED` · `TAMAMLANDI`
 
 ---
 
+## `src/lib.rs` core modülerleştirme (teknik borç, F9 kapsamında)
+
+Durum: DEVAM EDİYOR — başlangıç 15 Ağustos 2026
+
+`src/lib.rs` 5058 satıra ulaştı (contracts, model provider'lar, `CapabilityRegistry`, `SqliteStore`, `Runtime`, `policy_for`, ~1500 satır test tek dosyada). Davranış değişikliği yok; hedef aynı Policy→Task→Tool→Verifier zincirini koruyarak dosyayı ilgi alanına göre ayrı modüllere bölmek. Çalışma `refactor/split-lib-rs` branch'inde, en düşük riskten en yükseğe doğru, her adımdan sonra tam `cargo fmt` + `cargo test` (workspace) + `scripts/release_check.sh` yeşiliyle ilerliyor; branch bittiğinde `main`'e sağlıklı biçimde push edilecek.
+
+- [x] `model.rs` çıkarıldı: `ModelProvider` trait'i, `DeterministicModelProvider`/`LlamaCliProvider`/`LlamaServerProvider`, `ModelResponse`/`ModelRuntimeState`/`RouteSource`/`IntentResolution`, `JARVIS_SYSTEM_PROMPT`, `model_capability_intent`, `route_with_provider`, `normalize_llama_cli_output`. Public API `lib.rs` kökünden `pub use model::{...}` ile birebir korundu; içsel (`pub(crate)`) sabitler/fonksiyonlar sadece crate içinden erişilebilir.
+  - Kanıt: `cargo fmt` temiz; `cargo test` (workspace) 85 lib + 16 main + 5 desktop test PASS, 0 fail/warning; `cargo build --release` başarılı; `scripts/release_check.sh` → `JARVIS local release gate: PASS`. Baseline (bölme öncesi) da aynı 85+5 testle yeşildi, davranış regresyonu yok.
+- [ ] `CapabilityRegistry` + `capability_manifest()` ayrı modüle taşınacak
+- [ ] `SqliteStore` tablo bazlı (tasks/approvals/audit/teacher_examples/snapshots) ayrılacak — paylaşılan `Connection` sahipliğine dikkat
+- [ ] `Runtime` ayrı modüle taşınacak
+- [ ] `policy_for` ve `classify`/`validate_*` fonksiyonları `policy.rs`'e taşınacak — tek Policy Gate yolunun bozulmadığından emin olunacak, kullanıcı manuel onay/red senaryolarını test edecek
+- [ ] Kalan `#[cfg(test)] mod tests` (~1500 satır) yeni modül yapısına göre dağıtılacak veya `tests/` altına taşınacak — henüz karar verilmedi
+- [ ] Tüm adımlar bitince branch `main`'e merge/push edilecek
+
+Tamamlanma ölçütü: `lib.rs` yalnız üst düzey `mod`/`pub use` beyanları ve gerçekten paylaşılan az sayıda tipten oluşur; her modül tek bir ilgi alanına karşılık gelir; hiçbir davranış/test regresyonu yoktur.
+
+---
+
 ## Bugünkü Desktop MVP exit gate — PDF §31 ve §34
 
 Durum: TAMAMLANDI — 13 Ağustos 2026
