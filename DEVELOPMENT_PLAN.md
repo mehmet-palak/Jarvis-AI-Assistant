@@ -96,7 +96,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
-| F4 | Onaylı, izole coding ve yerel iş workbench'i | İLERLİYOR (10/15 madde `[x]`: plan→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor; genel tool framework/workflow runner hâlâ açık) | F2 + OS-isolated worker |
+| F4 | Onaylı, izole coding ve yerel iş workbench'i | İLERLİYOR (8/15 madde `[x]`: plan→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor; genel tool framework/workflow runner hâlâ açık) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
@@ -477,7 +477,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi, dördüncü turunda test/verifier runner'a gerçek bir taban çizgisi regresyon karşılaştırması eklenip eval seti 7 senaryoya çıkarıldı (10/15 madde `[x]`).
+Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi, dördüncü turunda test/verifier runner'a gerçek bir taban çizgisi regresyon karşılaştırması eklenip eval seti 7 senaryoya çıkarıldı (8/15 madde `[x]`).
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
