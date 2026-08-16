@@ -96,7 +96,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
-| F4 | Onaylı, izole coding ve yerel iş workbench'i | BEKLENİYOR — F2 exit gate | F2 + OS-isolated worker |
+| F4 | Onaylı, izole coding ve yerel iş workbench'i | BAŞLADI (read-only proje analisti) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
@@ -477,7 +477,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: BEKLENİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; F4 işi henüz başlamadı.
+Durum: BAŞLADI — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı.
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
@@ -487,7 +487,7 @@ Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız ona
 - [ ] Resource kontrolü: CPU/RAM/disk/PID/time quota, process group, watchdog, stdout/stderr limitleri ve güvenli cleanup.
 - [ ] Gerçek cancellation: task cancel → child process signal → grace period → kill → snapshot cleanup → audit/verifier sonucu.
 - [ ] Allowlist command runner: her komut için manifest, argüman schema, cwd scope, env allowlist, dry-run ve evidence capture.
-- [ ] Read-only project analyst: repo overview, dependency/test discovery, riskli dosya uyarısı ve hiçbir yazma yapmadan plan üretme.
+- [x] Read-only project analyst: repo overview, dependency/test discovery, riskli dosya uyarısı ve hiçbir yazma yapmadan plan üretme.
 - [ ] Coding plan UX: yapılacaklar, etkilenen dosyalar, varsayımlar, test planı, tahmini risk ve kullanıcı soruları.
 - [ ] Patch generator: unified diff, dosya/path containment, diff hash, maksimum değişiklik limiti ve binary/secret dosya reddi.
 - [ ] Patch preview/review: satır bazlı görünüm, seçilebilir dosya scope'u, kullanıcı değişiklik notu ve explicit approve/reject.
@@ -502,6 +502,13 @@ Bu turda kanıtlanan alt dilim:
 - [x] Worker threat-model ADR: [ADR-0001](docs/adr/0001-isolated-coding-worker.md) host fallback yasağını, ağ=kapalı worker kararını ve açık kalan quota/cancel sınırlarını tanımlar.
 - [x] Coding plan/patch contract: workspace-relative scope, network-denied limitler, unified-diff/path/hash doğrulaması, proposal-bound approval, snapshot, `git apply --check`, dosya SHA-256 verifier kanıtı, rollback ve audit bağı kuruldu.
 - [x] Release worker policy: Bubblewrap/network namespace kurulamazsa patch execution reddedilir; host shell fallback yoktur. Test harness'i container `CLONE_NEWNET` kısıtı nedeniyle yalnız semantic patch testini kontrollü geçici klasörde çalıştırır.
+- [x] **Read-only proje analisti (16 Ağustos 2026, F4'ün ilk fiilen tamamlanan maddesi)**: yeni `src/project_analyst.rs` — `analyze_repository(root) -> RepoOverview`. `workbench.rs`'in patch/apply mekanizmasından tamamen ayrı, tek bir yazma işlemi yok.
+  - Zaten var olan `preview_workspace_index` taraması üzerine kuruldu (aynı `.git`/`target`/`node_modules`/`.venv` hariç tutma, aynı gizli-bilgi/boyut filtresi — F3'ün "Workspace izin UX'i" ile aynı güvenlik sınırı, ikinci bir tarama mantığı icat edilmedi).
+  - Kök dizindeki bilinen manifest dosyalarından (Cargo.toml/package.json/pyproject.toml/requirements.txt/go.mod/pom.xml/build.gradle(.kts)) dil ve önerilen test komutu tespit ediyor; birden fazla dil tespit edilebiliyor (ör. Rust + Node).
+  - Riskli durumlar bilgilendirici not olarak dönüyor, hiçbir işlemi engellemiyor: bilinen manifest yok, çok büyük repo (>2000 dosya), gizli-bilgi benzeri/boyut limiti üstü dosyalar (zaten `preview_workspace_index`'in kendi filtresinden).
+  - **Bilinçli kapsam sınırı**: yalnız kök dizindeki manifest'lere bakıyor (monorepo alt paketlerini taramıyor); "bu isteğe göre hangi dosyalar etkilenir" gibi isteğe özgü bir karar vermiyor — bu, henüz yapılmamış "Coding plan UX" maddesinin (model akıl yürütmesi gerektiren) işi.
+  - TUI: `/analyze [proje-içi-göreli-klasör]` (klasör verilmezse proje kökü) — gerçek bu repo'nun kendisi üzerinde çalıştırılıp Rust/Cargo.toml/`cargo test`'in doğru tespit edildiği kanıtlandı.
+  - Kanıt: 5 `project_analyst` testi (Rust tespiti, çoklu dil + Python tekilleştirme, bilinmeyen manifest risk notu, gizli-bilgi dosyası risk notu, geçersiz kök reddi) + 1 uçtan uca TUI testi (`analyze_command_detects_this_repos_own_rust_manifest_and_reports_unknown_subfolders` — bu repo'nun kendi `Cargo.toml`'unu gerçekten tespit ediyor). Tam paket: `cargo fmt`, `cargo test --offline` (205 lib + 45 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
 
 Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı onayı olmadan yazmaz; onay sonrası yalnız scope içindeki patch'i uygular ve test kanıtını döndürür.
 

@@ -13,10 +13,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    attachment_receipt_manifest, default_profile_files_dir, ensure_profile_files_exist,
-    inspect_local_attachment, memory_export, memory_import, parse_data_sensitivity,
-    parse_memory_intent, parse_memory_namespace, preview_workspace_index, profile_manifest,
-    propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
+    analyze_repository, attachment_receipt_manifest, default_profile_files_dir,
+    ensure_profile_files_exist, inspect_local_attachment, memory_export, memory_import,
+    parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
+    profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
     propose_unrecognized_remember_intent_with_provider, AttachmentReceipt, AttachmentRef,
     DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
     LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
@@ -1318,6 +1318,63 @@ fn submit(
         }
         return;
     }
+    if input == "/analyze" || input.starts_with("/analyze ") {
+        let rest = input.strip_prefix("/analyze").unwrap_or("").trim();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let target = if rest.is_empty() {
+            root
+        } else {
+            root.join(rest)
+        };
+        match analyze_repository(&target) {
+            Ok(overview) => {
+                let languages = if overview.detected_languages.is_empty() {
+                    "tespit edilemedi".to_string()
+                } else {
+                    overview.detected_languages.join(", ")
+                };
+                let manifests = overview
+                    .dependency_manifests
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let test_commands = overview.suggested_test_commands.join(" • ");
+                let risks = if overview.risk_notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\nNotlar:\n{}",
+                        overview
+                            .risk_notes
+                            .iter()
+                            .map(|note| format!("  • {note}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                app.push_system(format!(
+                    "Repo analizi (salt-okunur, hiçbir dosyaya dokunmadı): {}\nDiller: {}\nManifest(ler): {}\nÖnerilen test komutu: {}\n{} dosya (~{} KiB){risks}",
+                    overview.root.display(),
+                    languages,
+                    if manifests.is_empty() {
+                        "yok".to_string()
+                    } else {
+                        manifests
+                    },
+                    if test_commands.is_empty() {
+                        "önerilemedi".to_string()
+                    } else {
+                        test_commands
+                    },
+                    overview.file_count,
+                    overview.total_bytes.div_ceil(1024),
+                ));
+            }
+            Err(error) => app.push_system(format!("Analiz edilemedi: {error}")),
+        }
+        return;
+    }
     if let Some(rest) = input.strip_prefix("/index-preview ").map(str::trim) {
         let mut parts = rest.split_whitespace();
         let Some(folder) = parts.next() else {
@@ -1620,7 +1677,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2857,6 +2914,31 @@ mod tests {
         assert!(
             status.document_count >= 2,
             "both the single-file and folder index must have actually indexed something"
+        );
+    }
+
+    /// F4 "Read-only proje analisti"nin ilk TUI komutu — gerçek proje kökü üzerinde (bu repo'nun
+    /// kendisi) çalıştırılıp Rust/Cargo.toml'un doğru tespit edildiğini, ve manifest'i olmayan
+    /// bir alt klasörün "tespit edilemedi" notunu doğru verdiğini kanıtlar.
+    #[test]
+    fn analyze_command_detects_this_repos_own_rust_manifest_and_reports_unknown_subfolders() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/analyze".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let reply = app.messages.last().unwrap().content.clone();
+        assert!(reply.contains("Rust"), "reply was: {reply}");
+        assert!(reply.contains("Cargo.toml"), "reply was: {reply}");
+        assert!(reply.contains("cargo test"), "reply was: {reply}");
+        assert!(reply.contains("salt-okunur"), "reply was: {reply}");
+
+        app.input = "/analyze docs/adr".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let reply = app.messages.last().unwrap().content.clone();
+        assert!(
+            reply.contains("tespit edilemedi"),
+            "a manifest-less subfolder must report unknown, not guess: {reply}"
         );
     }
 
