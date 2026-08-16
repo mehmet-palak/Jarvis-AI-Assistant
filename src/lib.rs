@@ -66,8 +66,8 @@ pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{
     apply_approved_patch, approve_patch, create_patch_proposal, create_read_only_coding_plan,
     discard_patch_snapshot, generate_unified_diff_for_file, new_cancel_flag,
-    restore_patch_snapshot, ApprovedPatch, CancelFlag, CodingPlan, PatchApplication, PatchProposal,
-    PatchSnapshot, WorkerLimits, WorkerNetwork, WorkerStopReason,
+    restore_patch_snapshot, scope_patch_proposal_to_files, ApprovedPatch, CancelFlag, CodingPlan,
+    PatchApplication, PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork, WorkerStopReason,
 };
 pub(crate) use workspace::{
     chunk_workspace_text, configured_retrieval_candidate_multiplier, configured_rrf_k,

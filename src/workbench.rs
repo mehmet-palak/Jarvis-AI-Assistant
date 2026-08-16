@@ -517,6 +517,64 @@ fn diff_header_files(diff: &str) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
+/// F4 "Patch preview/review": splits a validated multi-file unified diff into its per-file
+/// blocks, in the same order `diff_header_files` reports them. This is what makes a "seçilebilir
+/// dosya scope'u" (selectable file scope) possible — a caller can show each file's diff on its
+/// own and let the user approve a subset via `scope_patch_proposal_to_files`, rather than only
+/// ever all-or-nothing.
+pub(crate) fn split_diff_by_file(diff: &str) -> Result<Vec<(PathBuf, String)>, String> {
+    let files = diff_header_files(diff)?;
+    let mut blocks = Vec::with_capacity(files.len());
+    let mut current_block = String::new();
+    let mut current_index: Option<usize> = None;
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            if let Some(index) = current_index {
+                blocks.push((files[index].clone(), std::mem::take(&mut current_block)));
+            }
+            current_index = Some(blocks.len());
+        }
+        current_block.push_str(line);
+    }
+    if let Some(index) = current_index {
+        blocks.push((files[index].clone(), current_block));
+    }
+    Ok(blocks)
+}
+
+/// Rebuilds a new, independently-validated `PatchProposal` scoped to only `selected_files` — the
+/// user approving a subset of a multi-file patch, not the whole thing. `selected_files` must each
+/// already be part of `proposal.affected_files`; this never lets a caller expand scope, only
+/// narrow it. The new proposal gets its own diff hash (derived from the narrower diff content),
+/// so an old approval for the full proposal can never be replayed against the narrower one.
+pub fn scope_patch_proposal_to_files(
+    plan: &CodingPlan,
+    proposal: &PatchProposal,
+    selected_files: &[PathBuf],
+) -> Result<PatchProposal, String> {
+    if selected_files.is_empty() {
+        return Err("at least one file must be selected".into());
+    }
+    for file in selected_files {
+        if !proposal.affected_files.contains(file) {
+            return Err(format!(
+                "{} is not part of the reviewed patch proposal",
+                file.display()
+            ));
+        }
+    }
+    let blocks = split_diff_by_file(&proposal.unified_diff)?;
+    let mut scoped_diff = String::new();
+    let mut scoped_files = Vec::new();
+    for (path, block) in &blocks {
+        if selected_files.contains(path) {
+            scoped_diff.push_str(block);
+            scoped_files.push(path.clone());
+        }
+    }
+    create_patch_proposal(plan, scoped_diff, scoped_files)
+}
+
 fn snapshot_files(plan: &CodingPlan, files: &[PathBuf]) -> Result<PatchSnapshot, String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1129,5 +1187,73 @@ mod tests {
         assert!(validate_patch_proposal(&proposal)
             .unwrap_err()
             .contains("hash"));
+    }
+
+    fn two_file_plan_and_proposal() -> (CodingPlan, PatchProposal) {
+        let plan = create_read_only_coding_plan(
+            std::env::current_dir().expect("workspace cwd"),
+            "İki dosyayı değiştir.",
+            vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/model.rs")],
+            vec![],
+        )
+        .expect("valid plan");
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n\
+diff --git a/src/model.rs b/src/model.rs\n--- a/src/model.rs\n+++ b/src/model.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let proposal = create_patch_proposal(
+            &plan,
+            diff,
+            vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/model.rs")],
+        )
+        .expect("valid two-file proposal");
+        (plan, proposal)
+    }
+
+    /// F4 "Patch preview/review": bir çok-dosyalı diff, her dosyanın kendi bloğuna doğru şekilde
+    /// bölünmeli — parçalanan bloklar birleştirildiğinde orijinal diff'i tam olarak yeniden
+    /// üretmeli (kayıp/tekrar yok).
+    #[test]
+    fn a_multi_file_diff_splits_into_exactly_its_files_reassembling_losslessly() {
+        let (_plan, proposal) = two_file_plan_and_proposal();
+        let blocks = split_diff_by_file(&proposal.unified_diff).expect("splits cleanly");
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/model.rs")]
+        );
+        let reassembled: String = blocks.iter().map(|(_, block)| block.as_str()).collect();
+        assert_eq!(reassembled, proposal.unified_diff);
+    }
+
+    /// Kullanıcı çok-dosyalı bir patch'in yalnız bir alt kümesini onaylayabilmeli — sonuç kendi
+    /// başına geçerli, kendi hash'ine sahip bağımsız bir `PatchProposal` olmalı.
+    #[test]
+    fn a_user_can_scope_approval_to_a_subset_of_a_multi_file_patch() {
+        let (plan, proposal) = two_file_plan_and_proposal();
+        let scoped =
+            scope_patch_proposal_to_files(&plan, &proposal, &[PathBuf::from("src/lib.rs")])
+                .expect("scoping to one file succeeds");
+        assert_eq!(scoped.affected_files, vec![PathBuf::from("src/lib.rs")]);
+        assert!(scoped.unified_diff.contains("src/lib.rs"));
+        assert!(!scoped.unified_diff.contains("src/model.rs"));
+        assert_ne!(
+            scoped.diff_sha256, proposal.diff_sha256,
+            "a narrower proposal must never reuse the full proposal's hash"
+        );
+        validate_patch_proposal(&scoped).expect("scoped proposal is independently valid");
+    }
+
+    /// Bir dosya seçilmeye çalışılırsa ama orijinal proposal'ın parçası değilse (icat edilmiş bir
+    /// yol), scope daraltma reddedilmeli — genişletme asla mümkün olmamalı, yalnız daraltma.
+    #[test]
+    fn scoping_to_a_file_outside_the_original_proposal_is_rejected() {
+        let (plan, proposal) = two_file_plan_and_proposal();
+        assert!(scope_patch_proposal_to_files(
+            &plan,
+            &proposal,
+            &[PathBuf::from("src/does_not_exist.rs")]
+        )
+        .is_err());
     }
 }

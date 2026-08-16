@@ -96,7 +96,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
-| F4 | Onaylı, izole coding ve yerel iş workbench'i | İLERLİYOR (8/15 madde `[x]`: plan→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor; genel tool framework/workflow runner hâlâ açık) | F2 + OS-isolated worker |
+| F4 | Onaylı, izole coding ve yerel iş workbench'i | İLERLİYOR (9/15 madde `[x]`: plan→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti + seçilebilir dosya scope'lu patch preview dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor; genel tool framework/workflow runner hâlâ açık) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
@@ -477,7 +477,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi, dördüncü turunda test/verifier runner'a gerçek bir taban çizgisi regresyon karşılaştırması eklenip eval seti 7 senaryoya çıkarıldı, beşinci turunda coding plan'a model-üretimli varsayım/soru alanları eklendi (8/15 madde `[x]`, "tahmini risk" hâlâ eksik olduğu için "Coding plan UX" tam işaretlenmedi).
+Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi, dördüncü turunda test/verifier runner'a gerçek bir taban çizgisi regresyon karşılaştırması eklenip eval seti 7 senaryoya çıkarıldı, beşinci turunda coding plan'a model-üretimli varsayım/soru alanları eklendi, altıncı turunda patch preview'a seçilebilir dosya scope'u + kullanıcı notu eklendi (9/15 madde `[x]`, "tahmini risk" hâlâ eksik olduğu için "Coding plan UX" tam işaretlenmedi).
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
@@ -490,7 +490,7 @@ Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız ona
 - [x] Read-only project analyst: repo overview, dependency/test discovery, riskli dosya uyarısı ve hiçbir yazma yapmadan plan üretme.
 - [ ] Coding plan UX: yapılacaklar, etkilenen dosyalar, varsayımlar, test planı, tahmini risk ve kullanıcı soruları.
 - [x] Patch generator: unified diff, dosya/path containment, diff hash, maksimum değişiklik limiti ve binary/secret dosya reddi.
-- [ ] Patch preview/review: satır bazlı görünüm, seçilebilir dosya scope'u, kullanıcı değişiklik notu ve explicit approve/reject.
+- [x] Patch preview/review: satır bazlı görünüm, seçilebilir dosya scope'u, kullanıcı değişiklik notu ve explicit approve/reject.
 - [x] Patch apply transaction: approval'a bağlı diff hash, snapshot/backup, atomic write, başarısızlıkta rollback ve audit.
 - [x] Test/verifier runner: allowlisted test komutu, exit code/log özeti, değiştirilen dosya hash'i ve mevcut test regresyon raporu.
 - [x] Coding evaluation seti: küçük hata düzeltme, test ekleme, yanlış patch reddi, timeout/cancel, secret exposure ve mevcut-test regression senaryoları.
@@ -528,6 +528,13 @@ Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı on
 - Gerçek modelle canlı doğrulandı: hem ham yanıtın dört satırı da doğru üretebildiği, hem de belirsiz bir istekte ("kullanıcı profiline yeni bir alan ekle") modelin gerçekten anlamlı açık sorular ("Yeni alanın adı ne olmalı? Hangi veri tipinde olmalı?") ürettiği kanıtlandı.
 - **Hâlâ eksik**: "tahmini risk" hâlâ `create_read_only_coding_plan`'ın sabit boilerplate notları — isteğe özgü bir risk değerlendirmesi değil.
 - Kanıt: 4 yeni `project_analyst` testi (varsayım/soru ayrıştırma, ikisi de NONE ise boş liste, satırlar hiç üretilmezse geriye dönük uyumlu boş liste, noktalı virgülle ayrılmış FILES listesinin doğru ayrıştırılması). Tam paket: `cargo fmt`, `cargo test --offline` (246 lib + 53 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
+
+**"Patch preview/review" tamamlandı (16 Ağustos 2026, F4 tamamlama oturumu, altıncı tur — artık `[x]`):**
+- Yeni `workbench.rs::split_diff_by_file(diff) -> Vec<(PathBuf, String)>`: çok-dosyalı bir unified diff'i her dosyanın kendi bloğuna kayıpsız bölüyor (bloklar birleştirildiğinde orijinal diff'i birebir yeniden üretiyor).
+- Yeni `workbench.rs::scope_patch_proposal_to_files(plan, proposal, selected_files) -> PatchProposal`: kullanıcının seçtiği bir alt küme için bağımsız, kendi hash'ine sahip yeni bir `PatchProposal` üretiyor. Yalnız daraltma mümkün — `selected_files`'ın her biri zaten orijinal `proposal.affected_files`'ın bir üyesi olmalı, asla scope genişletilemez. Yeni proposal'ın hash'i eskisinden farklı, bu yüzden eski bir onay yeni (daraltılmış) proposal'a asla "replay" edilemez.
+- TUI'ye üç yeni komut: `/patch-files` (patch'i dosya dosya, her birinin kendi diff'iyle gösteriyor — "satır bazlı görünüm"ü tek bir kütlesel diff yerine dosya bazına indiriyor, ikinci bir bölme mantığı icat etmeden `scope_patch_proposal_to_files`'ı tek-dosyalık bir alt küme için yeniden kullanarak), `/patch-note <metin>` (onay öncesi serbest bir kullanıcı notu — hiçbir doğrulamayı etkilemiyor, yalnız onay sonrası mesaja ekleniyor; boş çağrılırsa temizler), ve `/approve-patch [dosya1 dosya2 ...]` genişletildi — dosya adı verilirse yalnız o alt küme onaylanıp uygulanıyor, diğer dosyalar hiç değişmiyor; hiçbiri verilmezse eskisi gibi tümü.
+- Kanıt: `workbench.rs`'te 3 yeni test (çok-dosyalı diff'in kayıpsız bölünmesi, bir alt kümeye onay daraltmanın bağımsız-geçerli ve farklı-hash'li bir proposal ürettiği, proposal dışı bir dosyaya daraltmanın reddedildiği) + `main.rs`'te 6 yeni test (`/patch-note`/`/patch-files` teklif yokken no-op ve teklif varken çalışıyor, **gerçek bir iki-dosyalı `/approve-patch <dosya>` çağrısının yalnız seçilen dosyayı değiştirip diğerine hiç dokunmadığı** — bu ortamda gerçek `bwrap` `CLONE_NEWNET` reddi yüzünden başlatılamayabileceği için test iki geçerli sonuçtan birini kabul edecek şekilde yazıldı, ama seçilmeyen dosyanın asla değişmediği kesin olarak doğrulanıyor —, proposal dışı bir dosya seçiminin reddedildiği).
+- Tam paket: `cargo fmt`, `cargo test --offline` (249 lib + 57 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
 
 **"OS izolasyonu"/"Resource kontrolü" maddelerinde kısmi ilerleme (16 Ağustos 2026, ikisi de hâlâ `[ ]` — tam bitmiş sayılmıyor):**
 ADR-0001'in "henüz tamamlanmamış" diye işaretlediği maddelerden ikisi kapatıldı, üçü hâlâ açık (bkz.
