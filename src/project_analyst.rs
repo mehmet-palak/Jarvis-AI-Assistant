@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::workspace::preview_workspace_index;
+use crate::{create_read_only_coding_plan, CodingPlan, ModelProvider};
 
 /// Kök dizindeki bilinen bir manifest dosyasının, tespit edilen dili ve önerilen test komutunu
 /// eşlediği sabit tablo. Sırayla kontrol edilir; `pyproject.toml` varsa `requirements.txt` ayrıca
@@ -51,6 +52,11 @@ pub struct RepoOverview {
     /// Kullanıcıya gösterilecek, hiçbir işlemi engellemeyen bilgilendirici notlar (büyük repo,
     /// hiç bilinen manifest bulunamadı, gizli-bilgi/boyut yüzünden atlanan dosya sayısı).
     pub risk_notes: Vec<String>,
+    /// Kök-göreli, taramaya dahil edilebilir gerçek dosya yolları (`preview_workspace_index`'in
+    /// `included` listesi, aynen). "Coding plan UX" (`draft_coding_plan_with_provider`) bunu
+    /// modelin önerdiği dosyaların **gerçekten var olup olmadığını** doğrulamak için kullanıyor —
+    /// model asla bir dosya yolu icat edip kabul ettiremez.
+    pub included_files: Vec<PathBuf>,
 }
 
 /// `root`'u salt-okunur olarak analiz eder — hiçbir dosyanın içeriğini açmaz, hiçbir şey yazmaz.
@@ -115,13 +121,124 @@ pub fn analyze_repository(root: &Path) -> Result<RepoOverview, String> {
         file_count: preview.included.len(),
         total_bytes: preview.estimated_total_bytes,
         risk_notes,
+        included_files: preview.included,
     })
+}
+
+/// Bir istekte modele önerilen dosya listesinin en fazla kaç tanesini gösterebileceğimiz —
+/// prompt boyutunu (ve gerçek latency'yi, 16 Ağustos 2026'da ölçüldüğü gibi CPU-only modelde
+/// prefill maliyeti gerçek) sınırlı tutmak için. Bundan fazla dosya varsa yalnız bir not
+/// düşülüyor, tüm liste zorlanmıyor.
+const MAX_CANDIDATE_FILES_IN_PROMPT: usize = 150;
+
+/// F4 "Coding plan UX": kullanıcının doğal dille yazdığı bir değişiklik isteğini ve zaten
+/// hesaplanmış bir `RepoOverview`'i alıp modele "bu istekle hangi dosyalar ilgili, test planı ne
+/// olmalı" sorusunu sorar — hiçbir dosya açılmaz/yazılmaz, yalnız bir `CodingPlan` üretilir.
+///
+/// Modelin önerdiği dosya listesi **güvenilmez çıktıdır**: yalnız `overview.included_files`'ta
+/// gerçekten var olan, birebir eşleşen yollar kabul edilir — aynı router'ın yalnız
+/// `CapabilityRegistry`'deki tam bir üyeyi kabul etmesi ilkesiyle (model asla bir dosya yolu icat
+/// edip kabul ettiremez). Model hiçbir dosya öneremezse ya da hiçbiri gerçek çıkmazsa, boş bir
+/// `affected_files` ile dönen bir plan üretilir — bu bir hata değil, "kullanıcıya açıklayıcı soru
+/// sorulmalı" durumunun kendisi (henüz ayrı bir soru-sorma UX'i yok, bu bilinçli bir sonraki adım).
+pub fn draft_coding_plan_with_provider(
+    overview: &RepoOverview,
+    request_summary: &str,
+    provider: &dyn ModelProvider,
+) -> Result<CodingPlan, String> {
+    let truncated = overview.included_files.len() > MAX_CANDIDATE_FILES_IN_PROMPT;
+    let file_list = overview
+        .included_files
+        .iter()
+        .take(MAX_CANDIDATE_FILES_IN_PROMPT)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let truncated_note = if truncated {
+        format!(
+            "\n... ve {} dosya daha listede yok.",
+            overview.included_files.len() - MAX_CANDIDATE_FILES_IN_PROMPT
+        )
+    } else {
+        String::new()
+    };
+    let languages = if overview.detected_languages.is_empty() {
+        "bilinmiyor".to_string()
+    } else {
+        overview.detected_languages.join(", ")
+    };
+    let prompt = format!(
+        "/no_think You are a read-only coding planning assistant for a local repository. You never write files or run commands — you only propose a plan. \
+Given the repository's file list and a change request, output exactly two lines. \
+First line: FILES: followed by a comma-separated list of ONLY the files from the list below that are actually relevant to the request, copied exactly as they appear in the list — never invent a path that is not in the list. If none of the listed files seem relevant, or you are not confident, write exactly: FILES: NONE. \
+Second line: TESTS: a short, concrete description of how to verify the change (a command if you can infer one, or a short description otherwise). \
+Repository languages: {languages}. \
+Repository files:\n{file_list}{truncated_note}\n\n\
+Change request: {request_summary}"
+    );
+    let response = provider
+        .complete(&prompt)
+        .map_err(|error| format!("coding plan draft failed: {error}"))?;
+
+    let mut affected_files: Vec<PathBuf> = Vec::new();
+    let mut test_plan: Vec<String> = Vec::new();
+    for line in response.text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("FILES:") {
+            let rest = rest.trim();
+            if rest != "NONE" && !rest.is_empty() {
+                for candidate in rest.split(',') {
+                    let candidate_path = PathBuf::from(candidate.trim());
+                    if overview.included_files.contains(&candidate_path)
+                        && !affected_files.contains(&candidate_path)
+                    {
+                        affected_files.push(candidate_path);
+                    }
+                    if affected_files.len() >= 12 {
+                        break; // `WorkerLimits::default().max_changed_files` ile aynı üst sınır
+                    }
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("TESTS:") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                test_plan.push(rest.to_string());
+            }
+        }
+    }
+    if test_plan.is_empty() {
+        test_plan = overview.suggested_test_commands.clone();
+    }
+
+    create_read_only_coding_plan(&overview.root, request_summary, affected_files, test_plan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ModelResponse;
     use std::fs;
+
+    #[derive(Debug)]
+    struct FixedReplyProvider(&'static str);
+
+    impl ModelProvider for FixedReplyProvider {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "fixed-reply"
+        }
+        fn complete(&self, _prompt: &str) -> Result<ModelResponse, String> {
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: self.0.into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+    }
 
     fn temporary_repo(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -215,5 +332,82 @@ mod tests {
     fn a_missing_or_non_directory_root_is_rejected() {
         let missing = std::env::temp_dir().join("jarvis-project-analyst-does-not-exist-at-all");
         assert!(analyze_repository(&missing).is_err());
+    }
+
+    fn fixture_overview(name: &str, files: &[&str]) -> (PathBuf, RepoOverview) {
+        let root = temporary_repo(name);
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        for file in files {
+            let path = root.join(file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, "// içerik\n").unwrap();
+        }
+        let overview = analyze_repository(&root).expect("analysis succeeds");
+        (root, overview)
+    }
+
+    /// Model'in önerdiği dosya listesi güvenilmez çıktıdır — yalnız gerçekten var olan, listeyle
+    /// birebir eşleşen yollar kabul edilir. Burada model iki gerçek dosya + bir hayali dosya
+    /// öneriyor; yalnız gerçek ikisi plana giriyor.
+    #[test]
+    fn only_files_that_actually_exist_in_the_scan_are_accepted_hallucinated_paths_are_dropped() {
+        let (root, overview) = fixture_overview("plan-real", &["src/lib.rs", "src/model.rs"]);
+        let provider = FixedReplyProvider(
+            "FILES: src/lib.rs, src/model.rs, src/hayali_dosya_yok.rs\nTESTS: cargo test route",
+        );
+
+        let plan = draft_coding_plan_with_provider(&overview, "router'ı düzelt", &provider)
+            .expect("plan is produced");
+        assert_eq!(
+            plan.affected_files,
+            vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/model.rs")]
+        );
+        assert_eq!(plan.test_plan, vec!["cargo test route".to_string()]);
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// Model "FILES: NONE" derse (isteği hangi dosyalarla ilgili olduğunu çıkaramazsa), hata değil
+    /// — boş bir `affected_files` ile geçerli bir plan üretilir.
+    #[test]
+    fn the_model_saying_none_produces_an_empty_but_valid_plan_not_an_error() {
+        let (root, overview) = fixture_overview("plan-none", &["src/lib.rs"]);
+        let provider = FixedReplyProvider("FILES: NONE\nTESTS: belirsiz, önce netleştirilmeli");
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey yap", &provider)
+            .expect("an empty-scope plan is still a valid plan, not an error");
+        assert!(plan.affected_files.is_empty());
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// Model bir TESTS satırı vermezse, `RepoOverview`'in zaten tespit ettiği önerilen test
+    /// komutuna (ör. `cargo test`) düşülüyor — plan asla boş bir test planıyla kalmıyor.
+    #[test]
+    fn a_missing_tests_line_falls_back_to_the_detected_test_command() {
+        let (root, overview) = fixture_overview("plan-fallback", &["src/lib.rs"]);
+        let provider = FixedReplyProvider("FILES: src/lib.rs");
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert_eq!(plan.test_plan, vec!["cargo test".to_string()]);
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// Model aynı dosyayı iki kez önerirse (ya da yanıtı fazladan boşluk/çoklu virgül içerirse),
+    /// plana yalnız bir kez giriyor.
+    #[test]
+    fn a_duplicated_file_in_the_model_reply_is_only_counted_once() {
+        let (root, overview) = fixture_overview("plan-dup", &["src/lib.rs"]);
+        let provider = FixedReplyProvider("FILES: src/lib.rs, src/lib.rs\nTESTS: cargo test");
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert_eq!(plan.affected_files, vec![PathBuf::from("src/lib.rs")]);
+
+        fs::remove_dir_all(&root).expect("test cleanup");
     }
 }

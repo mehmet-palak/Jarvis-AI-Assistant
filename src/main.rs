@@ -14,9 +14,10 @@ use crossterm::{
 };
 use jarvis_core::{
     analyze_repository, attachment_receipt_manifest, default_profile_files_dir,
-    ensure_profile_files_exist, inspect_local_attachment, memory_export, memory_import,
-    parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
-    profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
+    draft_coding_plan_with_provider, ensure_profile_files_exist, inspect_local_attachment,
+    memory_export, memory_import, parse_data_sensitivity, parse_memory_intent,
+    parse_memory_namespace, preview_workspace_index, profile_manifest, propose_memory,
+    propose_memory_with_trust_and_scope, propose_profile_field,
     propose_unrecognized_remember_intent_with_provider, AttachmentReceipt, AttachmentRef,
     DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
     LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
@@ -1375,6 +1376,81 @@ fn submit(
         }
         return;
     }
+    if input == "/plan" || input.starts_with("/plan ") {
+        let rest = input.strip_prefix("/plan").unwrap_or("").trim();
+        if rest.is_empty() {
+            app.push_system("Kullanım: /plan <değişiklik isteği>");
+            return;
+        }
+        // F4 "Coding plan UX": modele bir istek verilip hangi dosyaların ilgili olduğunu ve bir
+        // test planını önermesi isteniyor — hiçbir dosya açılmıyor/yazılmıyor, yalnız bir
+        // `CodingPlan` üretiliyor. Model çağrısı gerektirdiği için (analiz kendisi hızlı/yerel
+        // olsa da) genel sohbet worker'ıyla aynı arka plan iş parçacığı deseni kullanılıyor.
+        let request_summary = rest.to_string();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let message_index = app.messages.len();
+        app.messages.push(Message {
+            role: MessageRole::Jarvis,
+            content: "Plan hazırlanıyor (salt-okunur, hiçbir dosyaya dokunulmuyor)…".into(),
+        });
+        app.pending = true;
+        app.status = "Coding plan taslağı hazırlanıyor…".into();
+        let provider = provider.clone();
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let content = match analyze_repository(&root) {
+                Ok(overview) => {
+                    match draft_coding_plan_with_provider(&overview, &request_summary, &provider) {
+                        Ok(plan) => {
+                            let files = if plan.affected_files.is_empty() {
+                                "  (hiçbiri — model isteği belirli dosyalarla ilişkilendiremedi; isteği daha somut yaz)".to_string()
+                            } else {
+                                plan.affected_files
+                                    .iter()
+                                    .map(|path| format!("  • {}", path.display()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            };
+                            let tests = if plan.test_plan.is_empty() {
+                                "  (önerilemedi)".to_string()
+                            } else {
+                                plan.test_plan
+                                    .iter()
+                                    .map(|test| format!("  • {test}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            };
+                            let risks = plan
+                                .risk_notes
+                                .iter()
+                                .map(|note| format!("  • {note}"))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            format!(
+                                "Coding plan (salt-okunur, hiçbir dosyaya dokunulmadı):\nİstek: {}\nEtkilenebilecek dosyalar:\n{files}\nTest planı:\n{tests}\nNotlar:\n{risks}",
+                                plan.request_summary,
+                            )
+                        }
+                        Err(error) => format!("Plan üretilemedi: {error}"),
+                    }
+                }
+                Err(error) => format!("Repo analiz edilemedi: {error}"),
+            };
+            let _ = sender.send(WorkerReply {
+                message_index,
+                content,
+                status: "Plan hazır (salt-okunur, hiçbir onay gerektirmez).".into(),
+                task_id: String::new(),
+                approval_pending: false,
+                notification: None,
+                sources: vec![],
+                citations: vec![],
+                attachment_receipts: vec![],
+                memory_proposal: None,
+            });
+        });
+        return;
+    }
     if let Some(rest) = input.strip_prefix("/index-preview ").map(str::trim) {
         let mut parts = rest.split_whitespace();
         let Some(folder) = parts.next() else {
@@ -1677,7 +1753,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2939,6 +3015,28 @@ mod tests {
         assert!(
             reply.contains("tespit edilemedi"),
             "a manifest-less subfolder must report unknown, not guess: {reply}"
+        );
+    }
+
+    /// `/plan`'ın model-bağımlı asıl davranışı (`draft_coding_plan_with_provider`) zaten
+    /// `project_analyst.rs`'de sahte bir sağlayıcıyla ağsız test ediliyor — burada yalnız argüman
+    /// doğrulaması (model çağrısına hiç girmeyen, tamamen senkron yol) test ediliyor, `submit()`'in
+    /// gerçek `LlamaServerProvider`'a bağlı olması yüzünden.
+    #[test]
+    fn plan_command_without_a_request_shows_usage_and_never_touches_the_model() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/plan".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(
+            app.messages.last().unwrap().content.contains("Kullanım:"),
+            "content was: {}",
+            app.messages.last().unwrap().content
+        );
+        assert!(
+            !app.pending,
+            "an empty /plan must return synchronously, never spawn a worker"
         );
     }
 

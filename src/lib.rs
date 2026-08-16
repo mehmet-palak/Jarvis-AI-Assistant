@@ -51,7 +51,7 @@ pub use profile_files::{
     default_profile_files_dir, ensure_profile_files_exist, isolate_profile_file_as_data,
     read_profile_file, ABOUT_JARVIS_FILE_NAME, ABOUT_USER_FILE_NAME, MAX_PROFILE_FILE_CHARS,
 };
-pub use project_analyst::{analyze_repository, RepoOverview};
+pub use project_analyst::{analyze_repository, draft_coding_plan_with_provider, RepoOverview};
 pub use runtime::Runtime;
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
