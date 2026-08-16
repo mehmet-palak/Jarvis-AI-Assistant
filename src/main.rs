@@ -16,8 +16,9 @@ use jarvis_core::{
     attachment_receipt_manifest, default_profile_files_dir, ensure_profile_files_exist,
     inspect_local_attachment, memory_export, memory_import, parse_data_sensitivity,
     parse_memory_intent, parse_memory_namespace, preview_workspace_index, profile_manifest,
-    propose_memory, propose_memory_with_trust_and_scope, propose_profile_field, AttachmentReceipt,
-    AttachmentRef, DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
+    propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
+    propose_unrecognized_remember_intent_with_provider, AttachmentReceipt, AttachmentRef,
+    DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
     LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
     OpenMeteoWeatherProvider, ProfileField, Request, Runtime, SqliteStore, TaskState, TrustLevel,
     VisionProvider, WorkspaceCitation,
@@ -62,6 +63,11 @@ struct WorkerReply {
     /// the display strings in `sources`) so `/source <n>` can show the complete chunk text.
     citations: Vec<WorkspaceCitation>,
     attachment_receipts: Vec<AttachmentReceipt>,
+    /// 16 Ağustos 2026: model-destekli doğal dil bellek yedek yolunun sonucu — `Some` olduğunda
+    /// `content` zaten önizleme metnidir ve normal `handle_with_provider_and_vision` hiç
+    /// çağrılmamıştır; alıcı taraf bunu `app.pending_memory`'ye koyup normal onay akışını
+    /// başlatmalı, asla doğrudan yazmamalı.
+    memory_proposal: Option<MemoryProposal>,
 }
 
 struct TuiNotification {
@@ -384,6 +390,9 @@ fn event_loop(
             app.status = reply.status;
             app.pending = false;
             app.record_attachment_receipts(reply.attachment_receipts);
+            if let Some(proposal) = reply.memory_proposal {
+                app.pending_memory = Some(proposal);
+            }
             if let Some(notification) = reply.notification {
                 notify_desktop(notification.title, &notification.content);
             }
@@ -1774,6 +1783,34 @@ fn submit(
     let vision = vision.clone();
     let sender = sender.clone();
     std::thread::spawn(move || {
+        // Model-assisted fallback for a natural-language memory request that no fixed trigger
+        // phrase covers (16 Ağustos 2026, kullanıcı bulgusu: "aklında tut" gibi eş anlamlılar
+        // listeye eklendi ama hepsini önceden tahmin etmek mümkün değil). Yalnız düz metin
+        // turlarında denenir — bir ek varsa hiç çalışmaz, güvenilmeyen bağlam bu karara hiç
+        // karışmaz. Ucuz bir ipucu eşleşmezse (`might_express_an_unrecognized_remember_intent`,
+        // fonksiyonun kendi içinde) model hiç çağrılmaz; sıradan hiçbir mesaj ek maliyet ödemez.
+        // Fixed-trigger yolunun aksine asla doğrudan yazmaz — yalnız bir öneri üretir, normal
+        // önizleme/onay akışına (`pending_memory`) girer, tıpkı `/remember anahtar = değer` gibi.
+        if attachments.is_empty() {
+            if let Some(proposal) =
+                propose_unrecognized_remember_intent_with_provider(&input, &provider)
+            {
+                let preview = pending_memory_preview(&proposal);
+                let _ = sender.send(WorkerReply {
+                    message_index,
+                    content: preview,
+                    status: "Önerilen bir bellek kaydı var • /remember approve|reject".into(),
+                    task_id: String::new(),
+                    approval_pending: false,
+                    notification: None,
+                    sources: vec![],
+                    citations: vec![],
+                    attachment_receipts: vec![],
+                    memory_proposal: Some(proposal),
+                });
+                return;
+            }
+        }
         let vision_available = if needs_vision {
             ensure_local_vision_server(&vision).is_ok()
         } else {
@@ -1861,6 +1898,7 @@ fn submit(
             sources,
             citations,
             attachment_receipts,
+            memory_proposal: None,
         });
     });
 }

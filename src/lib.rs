@@ -30,7 +30,9 @@ pub use embedding::{
     cosine_similarity, deserialize_embedding, serialize_embedding, EmbeddingProvider,
     LlamaEmbeddingProvider,
 };
-pub use memory_intent::{parse_memory_intent, MemoryIntent};
+pub use memory_intent::{
+    parse_memory_intent, propose_unrecognized_remember_intent_with_provider, MemoryIntent,
+};
 pub use model::{
     normalize_llama_cli_output, route_with_provider, DeterministicModelProvider, IntentResolution,
     LlamaCliProvider, LlamaServerProvider, ModelProvider, ModelResponse, ModelRuntimeState,

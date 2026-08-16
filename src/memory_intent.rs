@@ -15,10 +15,19 @@
 //! (`workspace.rs`'s exclude-pattern matching, `fts_query`'s tokenizer) of simple, predictable,
 //! explainable string checks over a bigger dependency. Extend the trigger/pattern lists here if a
 //! common phrasing is missing — that is a small, local change.
+//!
+//! 16 Ağustos 2026: kullanıcı haklı bir soru sordu — "gerçek bir yapay zeka 'aklında tut' ile
+//! 'hafızana yaz'ı ilişkilendiremiyorsa bu ne çeşit bir yapay zeka olur?". Cevap iki parçalı:
+//! (1) yaygın eş anlamlılar doğrudan sabit listeye eklendi (yukarıdaki/aşağıdaki listeler); (2)
+//! listede olmayan daha nadir ifadeler için model-destekli bir **yedek** yol eklendi
+//! (`classify_unrecognized_remember_intent_with_provider`) — ama bu yol, fixed-trigger yolunun
+//! aksine **asla doğrudan yazmaz**. Model'in kararı router'da ölçüldüğü gibi bazen yanlış
+//! olabilir; bu yüzden sonucu her zaman normal `/remember`-tarzı önizleme/onay adımından geçer,
+//! tek adımda otomatik kaydetmez.
 
 use crate::{
     propose_memory, propose_profile_field, turkish_case_fold, DataSensitivity, MemoryProposal,
-    ProfileField,
+    ModelProvider, ProfileField,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +63,20 @@ const REMEMBER_TRIGGERS: &[&str] = &[
     "hatırla ki",
     "hatırla",
     "unutma ki",
+    // 16 Ağustos 2026'da kullanıcı "aklında tut" gibi anlamca aynı ama listede olmayan bir
+    // kalıp kullandı ve haklı olarak "gerçek bir yapay zeka bunu anlamalı" dedi. Bu ek maddeler
+    // gerçekten yaygın eş anlamlıları kapatıyor — hâlâ sabit bir liste (model devreye girmiyor,
+    // risk sıfır), yalnız daha geniş. Listede olmayan daha nadir ifadeler için model-destekli
+    // yedek yol aşağıda (bkz. `classify_unrecognized_remember_intent_with_provider`).
+    "aklında tut ki",
+    "aklında tut",
+    "aklında olsun ki",
+    "aklında olsun",
+    "aklında bulunsun",
+    "kayıtlara geç",
+    "remember that",
+    "keep in mind that",
+    "keep in mind",
 ];
 
 /// Ayrı ve öncelikli bir tetikleyici kümesi — kimlik bilgisi gibi bir değeri sıradan
@@ -78,6 +101,7 @@ const FORGET_TRIGGER_PREFIXES: &[&str] = &[
     "hafızamdan ",
     "belleğinden ",
     "belleğimden ",
+    "aklından ",
 ];
 const FORGET_TRIGGER_SUFFIXES: &[&str] = &[" sil", " çıkar", " unut"];
 
@@ -196,6 +220,92 @@ fn match_fact_pattern(payload: &str) -> Option<(ProfileField, String)> {
     None
 }
 
+/// Resolves a natural-language `(key, value)` pair to a memory proposal the same way regardless
+/// of which path found it (fixed trigger's explicit `anahtar = değer` payload, or the
+/// model-assisted fallback below): a known profile field alias routes through the profile path,
+/// anything else becomes a generic `UserProfile` memory record. One shared place, so the two
+/// paths can never quietly diverge on this decision.
+fn propose_natural_language_memory(key: &str, value: &str, source: &str) -> Option<MemoryProposal> {
+    let proposal = if let Some(field) = ProfileField::from_user_input(key) {
+        propose_profile_field(field, value, source, true)
+    } else {
+        propose_memory(
+            crate::MemoryNamespace::UserProfile,
+            key,
+            value,
+            DataSensitivity::Internal,
+            source,
+            true,
+            None,
+        )
+    };
+    proposal.ok()
+}
+
+/// Loose, cheap pre-check — no model involved — used only to decide whether it's worth paying
+/// for a model call at all. Deliberately broad substrings, not exact triggers: a false positive
+/// here only costs one extra (short) model call that resolves to `None`; a false negative just
+/// means an unusual phrasing falls through to ordinary conversation, exactly as it always has.
+pub fn might_express_an_unrecognized_remember_intent(input: &str) -> bool {
+    let folded = turkish_case_fold(input);
+    [
+        "hafıza",
+        "hatırla",
+        "aklı",
+        "kayıtlara geç",
+        "keep in mind",
+        "remember",
+    ]
+    .iter()
+    .any(|hint| folded.contains(hint))
+}
+
+/// Model-assisted fallback for a remember-style request that no fixed trigger phrase covers.
+/// Only ever worth calling after `parse_memory_intent` returned `None` *and*
+/// `might_express_an_unrecognized_remember_intent` found a loose hint — ordinary messages never
+/// pay for this. Unlike the fixed-trigger path, this never produces a ready-to-commit result: the
+/// model's judgment can be wrong (the same class of risk measured and fixed for the capability
+/// router, 16 Ağustos 2026), so the caller must always route the `(key, value)` result through
+/// `propose_natural_language_memory` and the normal preview/approve step — never commit directly.
+pub fn classify_unrecognized_remember_intent_with_provider(
+    input: &str,
+    provider: &dyn ModelProvider,
+) -> Option<(String, String)> {
+    let prompt = format!(
+        "/no_think Decide whether the user's message explicitly asks you to remember or save a specific piece of information about them for later, in natural language rather than a fixed command phrase. \
+A question merely asking whether something is or was remembered (for example \"mı/mi/mu/mü\", \"hatırlar mısın\", \"did you remember\") is not itself a remember request — output NONE for those. \
+If the message clearly asks you to save/keep in mind a fact, output exactly one line: REMEMBER <key> = <value> — a short lowercase key (Turkish or English) naming what is being remembered, and the value taken only from what the user actually said, never invented. \
+Otherwise (a question, a passing remark, ordinary conversation, or too vague to extract a concrete fact) output exactly: NONE. \
+User message: {}",
+        input.trim()
+    );
+    let response = provider.complete(&prompt).ok()?;
+    let text = response.text.trim();
+    let rest = text.strip_prefix("REMEMBER ")?;
+    let (key, value) = rest.split_once('=')?;
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), value.to_string()))
+}
+
+/// Combines the two steps callers need for the fallback path: classify with the model, then
+/// resolve the result into a ready-for-preview `MemoryProposal` the same way the fixed-trigger
+/// path does. Returns `None` if the pre-check hint is absent, the model says `NONE`, or the
+/// extracted `(key, value)` fails proposal validation (e.g. an empty/too-long value).
+pub fn propose_unrecognized_remember_intent_with_provider(
+    input: &str,
+    provider: &dyn ModelProvider,
+) -> Option<MemoryProposal> {
+    if !might_express_an_unrecognized_remember_intent(input) {
+        return None;
+    }
+    let (key, value) = classify_unrecognized_remember_intent_with_provider(input, provider)?;
+    propose_natural_language_memory(&key, &value, "chat-natural-language-model-assisted")
+}
+
 /// Same character-count-aligned trick as `strip_trigger`, for a fixed lowercase prefix instead
 /// of a trigger phrase list.
 fn remainder_preserving_case(original: &str, folded_prefix: &str) -> String {
@@ -243,21 +353,8 @@ pub fn parse_memory_intent(input: &str) -> Option<MemoryIntent> {
             );
         }
         if let Some((key, value)) = split_key_value(payload) {
-            let intent = if let Some(field) = ProfileField::from_user_input(key) {
-                propose_profile_field(field, value, "chat-natural-language", true)
-            } else {
-                propose_memory(
-                    crate::MemoryNamespace::UserProfile,
-                    key,
-                    value,
-                    DataSensitivity::Internal,
-                    "chat-natural-language",
-                    true,
-                    None,
-                )
-            };
             return Some(
-                intent
+                propose_natural_language_memory(key, value, "chat-natural-language")
                     .map(MemoryIntent::Remember)
                     .unwrap_or(MemoryIntent::UnparseableRemember),
             );
@@ -303,12 +400,56 @@ fn remainder_dropping_suffix_words(text: &str, word_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MemoryNamespace;
+    use crate::{MemoryNamespace, ModelResponse};
+
+    #[derive(Debug)]
+    struct FixedRouteReplyProvider(&'static str);
+
+    impl ModelProvider for FixedRouteReplyProvider {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "fixed-reply"
+        }
+        fn complete(&self, _prompt: &str) -> Result<ModelResponse, String> {
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: self.0.into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+    }
 
     #[test]
     fn no_trigger_phrase_is_ordinary_conversation() {
         assert_eq!(parse_memory_intent("bugün hava nasıl"), None);
         assert_eq!(parse_memory_intent("adım Ali, bu tarif iyi mi?"), None);
+    }
+
+    /// Kullanıcının 16 Ağustos 2026'da bulduğu gerçek eksiklik: "aklında tut" gibi anlamca
+    /// "hafızana yaz" ile aynı olan yaygın eş anlamlılar listede yoktu. Bu genişletme hâlâ sabit
+    /// bir liste (model devreye girmiyor) — yalnız daha kapsamlı.
+    #[test]
+    fn newly_added_remember_synonyms_are_recognized_the_same_as_the_original_triggers() {
+        for phrase in [
+            "aklında tut: adım Mehmet",
+            "aklında tut ki: adım Mehmet",
+            "aklında olsun: adım Mehmet",
+            "aklında bulunsun: adım Mehmet",
+            "kayıtlara geç: adım Mehmet",
+            "remember that: adım Mehmet",
+            "keep in mind: adım Mehmet",
+            "keep in mind that: adım Mehmet",
+        ] {
+            let intent = parse_memory_intent(phrase);
+            assert!(
+                matches!(intent, Some(MemoryIntent::Remember(_))),
+                "expected {phrase:?} to resolve to Remember, got {intent:?}"
+            );
+        }
     }
 
     /// Kullanıcının "secret'ları doğrudan hafızaya yazmıyoruz, Secret Manager referansı
@@ -445,5 +586,82 @@ mod tests {
             panic!("expected a ready Remember proposal even with uppercase Turkish 'I'");
         };
         assert_eq!(proposal.record.value, "Işık");
+    }
+
+    /// Sıfır maliyet: hint yoksa (hafıza/hatırla/aklı/... geçmeyen sıradan bir cümle) model hiç
+    /// çağrılmıyor — sayaçlı bir sağlayıcıyla kanıtlanıyor.
+    #[test]
+    fn unrecognized_remember_fallback_never_calls_the_model_without_a_loose_hint() {
+        #[derive(Debug, Default)]
+        struct PanicIfCalledProvider;
+        impl ModelProvider for PanicIfCalledProvider {
+            fn provider_id(&self) -> &str {
+                "test"
+            }
+            fn model_id(&self) -> &str {
+                "panic-if-called"
+            }
+            fn complete(&self, _prompt: &str) -> Result<ModelResponse, String> {
+                panic!("must never be called when no loose hint is present");
+            }
+        }
+        assert_eq!(
+            propose_unrecognized_remember_intent_with_provider(
+                "bugün hava çok güzeldi",
+                &PanicIfCalledProvider,
+            ),
+            None
+        );
+    }
+
+    /// Hint varsa ve model gerçek bir kayıt öneriyorsa (`REMEMBER key = value`), bu doğrudan
+    /// yazılmıyor — önizlenebilir bir `MemoryProposal`'a çözülüyor (çağıran taraf onu normal
+    /// onay akışına sokmalı).
+    #[test]
+    fn unrecognized_remember_fallback_resolves_a_model_reply_into_a_previewable_proposal() {
+        let provider = FixedRouteReplyProvider("REMEMBER favori_renk = mavi");
+        let proposal = propose_unrecognized_remember_intent_with_provider(
+            "aklında kalsın, favori rengim mavi",
+            &provider,
+        )
+        .expect("a hinted message with a REMEMBER reply must resolve to a proposal");
+        assert_eq!(proposal.record.key, "favori_renk");
+        assert_eq!(proposal.record.value, "mavi");
+        assert_eq!(
+            proposal.record.source,
+            "chat-natural-language-model-assisted"
+        );
+    }
+
+    /// Model "NONE" derse (soru/sıradan sohbet), hiçbir öneri üretilmiyor.
+    #[test]
+    fn unrecognized_remember_fallback_produces_nothing_when_the_model_says_none() {
+        let provider = FixedRouteReplyProvider("NONE");
+        assert_eq!(
+            propose_unrecognized_remember_intent_with_provider(
+                "bunu hatırlar mısın acaba",
+                &provider,
+            ),
+            None
+        );
+    }
+
+    /// Bilinen bir profil alanı adı (`isim`/`ad` vb.) modelin döndürdüğü anahtarla eşleşirse,
+    /// aynı fixed-trigger yolunun kullandığı profil yoluna gitmeli — iki path'in davranışı
+    /// çelişmemeli.
+    #[test]
+    fn unrecognized_remember_fallback_routes_a_known_field_alias_to_the_profile_path() {
+        let provider = FixedRouteReplyProvider("REMEMBER isim = Ayşe");
+        // Deliberately doesn't start with any exact `REMEMBER_TRIGGERS` phrase (so
+        // `parse_memory_intent` alone would return `None`) but still contains the loose "hafıza"
+        // hint — this exercises the fallback path specifically, not the fixed-trigger one.
+        let proposal = propose_unrecognized_remember_intent_with_provider(
+            "bu bilgiyi hafızanda tutmanı istiyorum, ismim Ayşe",
+            &provider,
+        )
+        .expect("a known field alias must still resolve");
+        assert_eq!(proposal.record.namespace, MemoryNamespace::UserProfile);
+        assert_eq!(proposal.record.key, "display_name");
+        assert_eq!(proposal.record.value, "Ayşe");
     }
 }
