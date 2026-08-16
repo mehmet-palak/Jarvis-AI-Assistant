@@ -477,7 +477,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi, dördüncü turunda test/verifier runner'a gerçek bir taban çizgisi regresyon karşılaştırması eklenip eval seti 7 senaryoya çıkarıldı (8/15 madde `[x]`).
+Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi, dördüncü turunda test/verifier runner'a gerçek bir taban çizgisi regresyon karşılaştırması eklenip eval seti 7 senaryoya çıkarıldı, beşinci turunda coding plan'a model-üretimli varsayım/soru alanları eklendi (8/15 madde `[x]`, "tahmini risk" hâlâ eksik olduğu için "Coding plan UX" tam işaretlenmedi).
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
@@ -519,6 +519,15 @@ Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı on
   - TUI: `/plan <değişiklik isteği>` — model çağrısı gerektirdiği için arka plan worker thread'inde çalışıyor.
 - **Hâlâ eksik**: "varsayımlar" ve "kullanıcı soruları" ayrı alanlar olarak üretilmiyor (model belirsizse yalnız `FILES: NONE` diyor, açıklayıcı bir soru sormuyor); "tahmini risk" hâlâ `create_read_only_coding_plan`'ın sabit boilerplate notları (isteğe özgü bir risk değerlendirmesi değil).
 - Kanıt: 4 yeni `project_analyst` testi (gerçek dosyalar kabul/hayali dosya reddi, model "NONE" derse hata değil boş plan, TESTS satırı yoksa tespit edilen komuta düşme, tekrar eden dosyanın bir kez sayılması) + 1 main.rs testi (`/plan` argümansız çağrıldığında modele hiç dokunmadan kullanım mesajı gösteriyor). Tam paket: `cargo fmt`, `cargo test --offline` (211 lib + 46 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
+
+**"Coding plan UX" devamı — varsayımlar + kullanıcı soruları (16 Ağustos 2026, F4 tamamlama oturumu, beşinci tur — hâlâ `[ ]`, "tahmini risk" eksik kaldığı için tam bitmiş sayılmıyor):**
+- `CodingPlan` yeni `assumptions: Vec<String>` ve `open_questions: Vec<String>` alanları (varsayılan boş — salt-okunur temel kurucu `create_read_only_coding_plan` hâlâ isteğe özgü yorum yapmıyor, yalnız `draft_coding_plan_with_provider` bunları modelden dolduruyor).
+- Prompt iki satırdan dört satıra çıkarıldı: `FILES:`/`TESTS:` yanına `ASSUMPTIONS:` (isteğin belirtmediği, modelin sessizce varsaydığı noktalar) ve `QUESTIONS:` (kullanıcıya sorulması gereken netleştirici sorular) eklendi — ikisi de "NONE" diyebiliyor, hayali bir varsayım/soru icat etmiyor. Token bütçesi 300'den 400'e çıkarıldı (dört satır için).
+- TUI: `/plan` çıktısı artık varsa "Varsayımlar:"/"Açık sorular:" bloklarını da gösteriyor.
+- **Bu turda bulunan, ilgisiz bir gerçek düzeltme**: gerçek modelle canlı test edilirken model'in `FILES:` listesini bazen virgül yerine noktalı virgülle ayırdığı gözlemlendi (önceden yazılmış bir prompt/parser'da, bu turun konusu değil ama karşılaşıldığı an düzeltildi) — ayrıştırıcı artık her ikisini de kabul ediyor.
+- Gerçek modelle canlı doğrulandı: hem ham yanıtın dört satırı da doğru üretebildiği, hem de belirsiz bir istekte ("kullanıcı profiline yeni bir alan ekle") modelin gerçekten anlamlı açık sorular ("Yeni alanın adı ne olmalı? Hangi veri tipinde olmalı?") ürettiği kanıtlandı.
+- **Hâlâ eksik**: "tahmini risk" hâlâ `create_read_only_coding_plan`'ın sabit boilerplate notları — isteğe özgü bir risk değerlendirmesi değil.
+- Kanıt: 4 yeni `project_analyst` testi (varsayım/soru ayrıştırma, ikisi de NONE ise boş liste, satırlar hiç üretilmezse geriye dönük uyumlu boş liste, noktalı virgülle ayrılmış FILES listesinin doğru ayrıştırılması). Tam paket: `cargo fmt`, `cargo test --offline` (246 lib + 53 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
 
 **"OS izolasyonu"/"Resource kontrolü" maddelerinde kısmi ilerleme (16 Ağustos 2026, ikisi de hâlâ `[ ]` — tam bitmiş sayılmıyor):**
 ADR-0001'in "henüz tamamlanmamış" diye işaretlediği maddelerden ikisi kapatıldı, üçü hâlâ açık (bkz.

@@ -169,28 +169,50 @@ pub fn draft_coding_plan_with_provider(
     };
     let prompt = format!(
         "/no_think You are a read-only coding planning assistant for a local repository. You never write files or run commands — you only propose a plan. \
-Given the repository's file list and a change request, output exactly two lines. \
-First line: FILES: followed by a comma-separated list of ONLY the files from the list below that are actually relevant to the request, copied exactly as they appear in the list — never invent a path that is not in the list. If none of the listed files seem relevant, or you are not confident, write exactly: FILES: NONE. \
-Second line: TESTS: a short, concrete description of how to verify the change (a command if you can infer one, or a short description otherwise). \
+Given the repository's file list and a change request, output exactly four lines, in this order. \
+FILES: a comma-separated list of ONLY the files from the list below that are actually relevant to the request, copied exactly as they appear in the list — never invent a path that is not in the list. If none of the listed files seem relevant, or you are not confident, write exactly: FILES: NONE. \
+TESTS: a short, concrete description of how to verify the change (a command if you can infer one, or a short description otherwise). \
+ASSUMPTIONS: a semicolon-separated list of anything you are silently assuming about the request because it was not stated (e.g. which language, which existing convention to follow). If you are not assuming anything beyond what was stated, write exactly: ASSUMPTIONS: NONE. \
+QUESTIONS: a semicolon-separated list of things you would need to ask the user to be confident in this plan, if any. If the request is clear enough as given, write exactly: QUESTIONS: NONE. \
 Repository languages: {languages}. \
 Repository files:\n{file_list}{truncated_note}\n\n\
 Change request: {request_summary}"
     );
-    // 300 tokens: comfortably covers a `FILES:` line naming up to 12 real paths plus a `TESTS:`
-    // sentence. `complete()`'s default 8-token budget (tuned for router/classification answers)
-    // used to silently truncate this — confirmed live against the real model, 16 Ağustos 2026.
+    // 400 tokens: FILES/TESTS/ASSUMPTIONS/QUESTIONS together. `complete()`'s default 8-token
+    // budget (tuned for router/classification answers) used to silently truncate even the
+    // original two-line form — confirmed live against the real model, 16 Ağustos 2026.
     let response = provider
-        .complete_with_budget(&prompt, 300)
+        .complete_with_budget(&prompt, 400)
         .map_err(|error| format!("coding plan draft failed: {error}"))?;
 
     let mut affected_files: Vec<PathBuf> = Vec::new();
     let mut test_plan: Vec<String> = Vec::new();
+    let mut assumptions: Vec<String> = Vec::new();
+    let mut open_questions: Vec<String> = Vec::new();
+    // Model yanıtındaki noktalı virgülle ayrılmış bir listeyi ayrıştırır; "NONE" ya da boş
+    // yanıtta boş bir liste döner — ASSUMPTIONS/QUESTIONS için ortak, aynı ilkeyi paylaşan
+    // (güvenilmez model çıktısını doğrulamadan asla kabul etme) küçük bir yardımcı.
+    let parse_semicolon_list = |rest: &str| -> Vec<String> {
+        let rest = rest.trim();
+        if rest.is_empty() || rest.eq_ignore_ascii_case("NONE") {
+            return Vec::new();
+        }
+        rest.split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .take(8) // güvenilmez model çıktısı: sınırsız büyümesin
+            .map(str::to_owned)
+            .collect()
+    };
     for line in response.text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("FILES:") {
             let rest = rest.trim();
             if rest != "NONE" && !rest.is_empty() {
-                for candidate in rest.split(',') {
+                // Model her zaman virgülle ayırmıyor — canlı testte noktalı virgül kullandığı da
+                // gözlemlendi (16 Ağustos 2026). İkisini de kabul etmek zararsız: gerçek dosya
+                // yollarında ne virgül ne noktalı virgül geçerli bir karakterdir.
+                for candidate in rest.split([',', ';']) {
                     let candidate_path = PathBuf::from(candidate.trim());
                     if overview.included_files.contains(&candidate_path)
                         && !affected_files.contains(&candidate_path)
@@ -207,13 +229,21 @@ Change request: {request_summary}"
             if !rest.is_empty() {
                 test_plan.push(rest.to_string());
             }
+        } else if let Some(rest) = line.strip_prefix("ASSUMPTIONS:") {
+            assumptions = parse_semicolon_list(rest);
+        } else if let Some(rest) = line.strip_prefix("QUESTIONS:") {
+            open_questions = parse_semicolon_list(rest);
         }
     }
     if test_plan.is_empty() {
         test_plan = overview.suggested_test_commands.clone();
     }
 
-    create_read_only_coding_plan(&overview.root, request_summary, affected_files, test_plan)
+    let mut plan =
+        create_read_only_coding_plan(&overview.root, request_summary, affected_files, test_plan)?;
+    plan.assumptions = assumptions;
+    plan.open_questions = open_questions;
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -372,6 +402,23 @@ mod tests {
         fs::remove_dir_all(&root).expect("test cleanup");
     }
 
+    /// Canlı testte gözlemlendi (16 Ağustos 2026): model FILES listesini her zaman virgülle
+    /// ayırmıyor, bazen noktalı virgül kullanıyor. İkisi de kabul edilmeli.
+    #[test]
+    fn files_separated_by_semicolons_are_parsed_the_same_as_commas() {
+        let (root, overview) = fixture_overview("plan-semicolon", &["src/lib.rs", "src/model.rs"]);
+        let provider = FixedReplyProvider("FILES: src/lib.rs;src/model.rs\nTESTS: cargo test");
+
+        let plan = draft_coding_plan_with_provider(&overview, "router'ı düzelt", &provider)
+            .expect("plan is produced");
+        assert_eq!(
+            plan.affected_files,
+            vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/model.rs")]
+        );
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
     /// Model "FILES: NONE" derse (isteği hangi dosyalarla ilgili olduğunu çıkaramazsa), hata değil
     /// — boş bir `affected_files` ile geçerli bir plan üretilir.
     #[test]
@@ -410,6 +457,65 @@ mod tests {
         let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
             .expect("plan is produced");
         assert_eq!(plan.affected_files, vec![PathBuf::from("src/lib.rs")]);
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// F4 "Coding plan UX": bir önceki turda dürüstçe belgelenmiş bilinen sınır — modelin
+    /// varsayımları/sorularını ayrı üretmemesi — kapatıldı. Model her ikisini de üretirse
+    /// noktalı virgülle ayrılmış listeler olarak ayrıştırılmalı.
+    #[test]
+    fn assumptions_and_questions_are_parsed_as_semicolon_separated_lists() {
+        let (root, overview) = fixture_overview("plan-assumptions", &["src/lib.rs"]);
+        let provider = FixedReplyProvider(
+            "FILES: src/lib.rs\nTESTS: cargo test\nASSUMPTIONS: Rust kullanılıyor; mevcut stil korunacak\nQUESTIONS: hangi fonksiyon hedefleniyor?",
+        );
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert_eq!(
+            plan.assumptions,
+            vec![
+                "Rust kullanılıyor".to_string(),
+                "mevcut stil korunacak".to_string()
+            ]
+        );
+        assert_eq!(
+            plan.open_questions,
+            vec!["hangi fonksiyon hedefleniyor?".to_string()]
+        );
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// Model her ikisi için de `NONE` derse (isteği yeterince net bulduysa), boş listeler —
+    /// hata değil, hayali bir varsayım/soru icat edilmiyor.
+    #[test]
+    fn none_assumptions_and_questions_produce_empty_lists_not_placeholders() {
+        let (root, overview) = fixture_overview("plan-no-assumptions", &["src/lib.rs"]);
+        let provider = FixedReplyProvider(
+            "FILES: src/lib.rs\nTESTS: cargo test\nASSUMPTIONS: NONE\nQUESTIONS: NONE",
+        );
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert!(plan.assumptions.is_empty());
+        assert!(plan.open_questions.is_empty());
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// Model'in ASSUMPTIONS/QUESTIONS satırlarını hiç üretmediği (ör. eski/kısa bir yanıt) bir
+    /// durum hataya değil boş listeye düşmeli — geriye dönük uyumluluk.
+    #[test]
+    fn missing_assumptions_and_questions_lines_default_to_empty_not_an_error() {
+        let (root, overview) = fixture_overview("plan-legacy-reply", &["src/lib.rs"]);
+        let provider = FixedReplyProvider("FILES: src/lib.rs\nTESTS: cargo test");
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert!(plan.assumptions.is_empty());
+        assert!(plan.open_questions.is_empty());
 
         fs::remove_dir_all(&root).expect("test cleanup");
     }

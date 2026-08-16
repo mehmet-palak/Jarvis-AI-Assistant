@@ -74,6 +74,14 @@ pub struct CodingPlan {
     pub test_plan: Vec<String>,
     pub risk_notes: Vec<String>,
     pub limits: WorkerLimits,
+    /// F4 "Coding plan UX": şeyler modelin isteği yorumlarken sessizce varsaydığı noktalar (ör.
+    /// "hangi dilde" gibi belirtilmemiş bir tercih). `create_read_only_coding_plan` bunu her zaman
+    /// boş bırakır (salt-okunur temel kurucu hâlâ isteğe özgü bir yorum yapmıyor) —
+    /// `draft_coding_plan_with_provider` modelin ürettiği varsayımları buraya dolduruyor.
+    pub assumptions: Vec<String>,
+    /// F4 "Coding plan UX": modelin isteği tam olarak çözemediği, kullanıcıya sorulması gereken
+    /// noktalar. Boşsa model isteği yeterince net bulmuş demektir.
+    pub open_questions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +162,8 @@ pub fn create_read_only_coding_plan(
             "Only workspace-relative source paths are eligible.".into(),
         ],
         limits,
+        assumptions: Vec::new(),
+        open_questions: Vec::new(),
     })
 }
 

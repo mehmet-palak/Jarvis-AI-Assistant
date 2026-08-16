@@ -1457,13 +1457,37 @@ fn submit(
                                 .map(|note| format!("  • {note}"))
                                 .collect::<Vec<_>>()
                                 .join("\n");
+                            let assumptions_block = if plan.assumptions.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    "\nVarsayımlar:\n{}",
+                                    plan.assumptions
+                                        .iter()
+                                        .map(|item| format!("  • {item}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                )
+                            };
+                            let questions_block = if plan.open_questions.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    "\nAçık sorular:\n{}",
+                                    plan.open_questions
+                                        .iter()
+                                        .map(|item| format!("  • {item}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                )
+                            };
                             let next_step = if plan.affected_files.is_empty() {
                                 String::new()
                             } else {
                                 "\nDevam etmek için: /patch (bu plana göre gerçek bir diff taslağı üretir, hiçbir dosyaya henüz dokunmaz)".to_string()
                             };
                             let content = format!(
-                                "Coding plan (salt-okunur, hiçbir dosyaya dokunulmadı):\nİstek: {}\nEtkilenebilecek dosyalar:\n{files}\nTest planı:\n{tests}\nNotlar:\n{risks}{next_step}",
+                                "Coding plan (salt-okunur, hiçbir dosyaya dokunulmadı):\nİstek: {}\nEtkilenebilecek dosyalar:\n{files}\nTest planı:\n{tests}{assumptions_block}{questions_block}\nNotlar:\n{risks}{next_step}",
                                 plan.request_summary,
                             );
                             (content, Some(plan))
