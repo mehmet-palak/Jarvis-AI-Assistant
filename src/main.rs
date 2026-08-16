@@ -189,8 +189,10 @@ fn refresh_model_state(app: &mut App, provider: &LlamaServerProvider) {
     }
     app.model_state = current;
     if app.model_state == "ready" {
-        app.push_system("Local model hazır; CPU/RAM üzerinde çalışıyor, VRAM kullanılmıyor.");
-        app.status = "Model RAM'de hazır • CPU-only • VRAM: 0".into();
+        app.push_system(
+            "Local model hazır; GPU'ya (Vulkan, 28/36 katman) offload edilmiş, kalanı CPU/RAM'de.",
+        );
+        app.status = "Model hazır • GPU offload (Vulkan, 28/36 katman)".into();
     } else {
         app.push_system("Local model sunucusuna şu an ulaşılamıyor.");
         app.status = "Model sunucusu erişilemiyor; gönderilmemiş mesajın korunur.".into();
@@ -255,7 +257,7 @@ fn run_native_desktop_client() -> io::Result<()> {
 
 fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
     if provider.runtime_state().as_str() == "ready" {
-        return "Model RAM'de hazır • CPU-only • VRAM: 0".into();
+        return "Model hazır • GPU offload (Vulkan, 28/36 katman)".into();
     }
     match Command::new("systemctl")
         .args(["--user", "start", "jarvis-llama.service"])
@@ -2421,7 +2423,7 @@ fn submit(
                 .map(|model_id| format!("hybrid (FTS + {model_id})"))
                 .unwrap_or_else(|| "FTS-only".into());
             app.push_system(format!(
-                "Model server: {} • CPU-only • VRAM layer: 0 • RAG: {rag_mode} • {}",
+                "Model server: {} • GPU offload (Vulkan, 28/36 katman) • RAG: {rag_mode} • {}",
                 model_label(&app.model_state),
                 app.status
             ));
@@ -3020,7 +3022,7 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
         ),
         Span::raw("  •  "),
         server_badge,
-        Span::raw(format!("  •  VRAM: 0  •  EK: {}", app.attachments.len())),
+        Span::raw(format!("  •  GPU: 28/36  •  EK: {}", app.attachments.len())),
     ]))
     .block(Block::default().borders(Borders::ALL).title(" Sohbet "));
     frame.render_widget(header, layout[0]);

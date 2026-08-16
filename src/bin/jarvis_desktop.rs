@@ -837,7 +837,7 @@ impl JarvisDesktop {
         };
         hud_status_row(ui, "CORE", "LOCAL-FIRST", COLOR_TEAL);
         hud_status_row(ui, "MODEL", &self.model_status, model_color);
-        hud_status_row(ui, "DONANIM", "CPU-ONLY / VRAM 0", COLOR_TEAL_DIM);
+        hud_status_row(ui, "DONANIM", "GPU (VULKAN) 28/36", COLOR_TEAL_DIM);
         hud_status_row(ui, "ERİŞİM", "LOOPBACK", COLOR_TEAL_DIM);
         ui.add_space(10.0);
 
@@ -1407,7 +1407,7 @@ impl eframe::App for JarvisDesktop {
                         COLOR_GOLD
                     };
                     ui.colored_label(model_color, RichText::new(&self.model_status).strong());
-                    ui.label(RichText::new("VRAM 0").size(12.0).color(COLOR_TEAL_DIM));
+                    ui.label(RichText::new("GPU 28/36").size(12.0).color(COLOR_TEAL_DIM));
                     ui.label(
                         RichText::new(format!("EK KUYRUĞU {}", self.queued_attachments.len()))
                             .size(12.0)
@@ -1566,7 +1566,7 @@ fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
     let mut health_provider = provider.clone();
     health_provider.timeout_seconds = 1;
     if health_provider.runtime_state() == jarvis_core::ModelRuntimeState::Ready {
-        return "Model RAM'de hazır • CPU-only • VRAM: 0".into();
+        return "Model hazır • GPU offload (Vulkan, 28/36 katman)".into();
     }
     match Command::new("systemctl")
         .args(["--user", "start", "jarvis-llama.service"])
