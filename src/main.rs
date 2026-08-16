@@ -13,13 +13,14 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    attachment_receipt_manifest, inspect_local_attachment, memory_export, memory_import,
-    parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
-    profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
-    AttachmentReceipt, AttachmentRef, DataSensitivity, InputType, LlamaEmbeddingProvider,
-    LlamaServerProvider, LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
-    ProfileField, Request, Runtime, SqliteStore, TaskState, TrustLevel, VisionProvider,
-    WorkspaceCitation,
+    attachment_receipt_manifest, default_profile_files_dir, ensure_profile_files_exist,
+    inspect_local_attachment, memory_export, memory_import, parse_data_sensitivity,
+    parse_memory_intent, parse_memory_namespace, preview_workspace_index, profile_manifest,
+    propose_memory, propose_memory_with_trust_and_scope, propose_profile_field, AttachmentReceipt,
+    AttachmentRef, DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
+    LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
+    OpenMeteoWeatherProvider, ProfileField, Request, Runtime, SqliteStore, TaskState, TrustLevel,
+    VisionProvider, WorkspaceCitation,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -174,6 +175,8 @@ fn main() -> io::Result<()> {
     .expect("JARVIS SQLite store açılamadı");
     let mut runtime = Runtime::with_store(store);
     attach_embedding_provider_if_reachable(&mut runtime);
+    attach_profile_files_dir(&mut runtime);
+    attach_weather_provider(&mut runtime);
     let runtime = Arc::new(Mutex::new(runtime));
     let provider = LlamaServerProvider::local_default();
     let vision = LlamaVisionServerProvider::local_default();
@@ -242,6 +245,31 @@ fn attach_embedding_provider_if_reachable(runtime: &mut Runtime) {
     if provider.is_reachable() {
         runtime.set_embedding_provider(Some(Box::new(provider)));
     }
+}
+
+/// Best-effort: creates (if missing, via `ensure_profile_files_exist`'s own never-overwrite
+/// contract) and attaches the user-editable profile files directory (`about_user.md`/
+/// `about_jarvis.md`, 16 Ağustos 2026) so they are re-read into every conversation turn. Never
+/// blocks startup — if no config home can be resolved, `Runtime` simply has no profile files
+/// directory, exactly as before this feature existed.
+fn attach_profile_files_dir(runtime: &mut Runtime) {
+    let Some(dir) = default_profile_files_dir() else {
+        return;
+    };
+    ensure_profile_files_exist(&dir);
+    runtime.set_profile_files_dir(Some(dir));
+}
+
+/// Attaches the Open-Meteo weather provider (İstanbul/Ümraniye, kullanıcı onayıyla 16 Ağustos
+/// 2026 seçildi — ücretsiz, API anahtarsız) so `Runtime::startup_briefing` can include today's
+/// weather. This is JARVIS's only network-dependent feature and is not routed through the
+/// governed capability pipeline — the model can never invoke it. Unlike
+/// `attach_embedding_provider_if_reachable`, reachability is not probed here: a failed fetch is
+/// handled gracefully by `startup_briefing` itself (the weather line is simply omitted).
+fn attach_weather_provider(runtime: &mut Runtime) {
+    runtime.set_weather_provider(Some(
+        Box::new(OpenMeteoWeatherProvider::istanbul_umraniye()),
+    ));
 }
 
 fn ensure_local_vision_server(provider: &LlamaVisionServerProvider) -> Result<(), String> {
@@ -316,6 +344,12 @@ fn run_tui(
     let model_state = provider.runtime_state().as_str();
     let mut app = App::new(model_state);
     app.status = startup_note;
+    app.push_system(
+        runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .startup_briefing(),
+    );
     let result = event_loop(&mut terminal, runtime, provider, vision, app);
     disable_raw_mode()?;
     execute!(

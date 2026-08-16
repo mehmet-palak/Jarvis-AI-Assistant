@@ -12,7 +12,7 @@
 use crate::*;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -41,6 +41,16 @@ pub struct Runtime {
     /// embedding signal vs. degraded to plain FTS.
     hybrid_queries_this_session: usize,
     fts_only_queries_this_session: usize,
+    /// Kullanıcının elle düzenlediği "bana dair"/"JARVIS'e dair" dosyalarının bulunduğu klasör
+    /// (`src/profile_files.rs`). `None` — çağıran (TUI/native) hiç ayarlamadıysa — bu özellik
+    /// tamamen devre dışıdır, hiçbir davranış değişmez (embedding_provider ile aynı "isteğe bağlı
+    /// ek, asla zorunlu bağımlılık değil" deseni).
+    profile_files_dir: Option<PathBuf>,
+    /// İsteğe bağlı hava durumu sağlayıcısı — JARVIS'in tek gerçek internet erişimi gerektiren
+    /// yeteneği (kullanıcı onayıyla, 16 Ağustos 2026). Yalnız açılış karşılamasında kullanılır;
+    /// hiçbir governed capability/task/policy yoluna hiç girmez, model ona hiç "çağrı" yapamaz —
+    /// yalnız Runtime'ın kendisi, başlangıç metnini oluştururken bir kez okur.
+    weather_provider: Option<Box<dyn WeatherProvider>>,
 }
 
 impl Default for Runtime {
@@ -60,6 +70,8 @@ impl Default for Runtime {
             last_workspace_citations: Vec::new(),
             hybrid_queries_this_session: 0,
             fts_only_queries_this_session: 0,
+            profile_files_dir: None,
+            weather_provider: None,
         }
     }
 }
@@ -547,6 +559,105 @@ impl Runtime {
         self.embedding_provider = provider;
     }
 
+    /// Kullanıcının elle düzenlediği profil dosyalarının okunacağı klasörü ayarlar (bkz.
+    /// `profile_files.rs`). Çağıran taraf (TUI/native) klasör yoksa şablon dosyalarla oluşturmak
+    /// için `ensure_profile_files_exist`'i kendisi çağırmalı — bu yalnız *nereden okunacağını*
+    /// belirler, dosya oluşturmaz.
+    pub fn set_profile_files_dir(&mut self, dir: Option<PathBuf>) {
+        self.profile_files_dir = dir;
+    }
+
+    /// "Bana dair"/"JARVIS'e dair" dosyalarını (varsa) taze okur ve model verisi zarfına sarar —
+    /// bellek kayıtları için kullanılan aynı "data, instruction değil" ilkesiyle
+    /// (`isolate_memory_as_data`), kullanıcı bu dosyaları kendi yazmış olsa bile model buradan
+    /// hiçbir zaman tool/policy yetkisi kazanmaz. Her turda taze okunur (önbelleklenmez) — dosya
+    /// küçük bir boyuta zaten kırpılıyor (`MAX_PROFILE_FILE_CHARS`), kullanıcı JARVIS çalışırken
+    /// dosyayı değiştirirse bir sonraki turda hemen yansısın diye.
+    fn profile_file_context(&self) -> Vec<ConversationMessage> {
+        let Some(dir) = self.profile_files_dir.as_ref() else {
+            return Vec::new();
+        };
+        [
+            ("Kullanıcı hakkında", ABOUT_USER_FILE_NAME),
+            ("JARVIS hakkında", ABOUT_JARVIS_FILE_NAME),
+        ]
+        .into_iter()
+        .filter_map(|(label, file_name)| {
+            let content = read_profile_file(&dir.join(file_name))?;
+            Some(ConversationMessage {
+                role: "user",
+                content: isolate_profile_file_as_data(label, &content),
+            })
+        })
+        .collect()
+    }
+
+    /// İsteğe bağlı hava durumu sağlayıcısını bağlar (ya da `None` ile ayırır). JARVIS'in
+    /// gerçek internete çıkan tek yeteneği — yalnız açılış karşılamasında kullanılır, hiçbir
+    /// governed capability/task/policy yoluna hiç girmez.
+    pub fn set_weather_provider(&mut self, provider: Option<Box<dyn WeatherProvider>>) {
+        self.weather_provider = provider;
+    }
+
+    /// JARVIS her açıldığında gösterilecek karşılama metni: isim (varsa), bekleyen onaylar, son
+    /// güncellenen (görev/oturum/geçici olmayan — yani gerçekten "not" sayılabilecek) bellek
+    /// kayıtları ve (sağlayıcı bağlıysa) güncel hava durumu. Yalnız yerelde zaten elde olan
+    /// verilerle çalışır — hava durumu dışında hiçbir yeni veri kaynağı gerektirmez, ve o da
+    /// isteğe bağlıdır (sağlayıcı bağlı değilse o satır hiç görünmez, hata değil).
+    pub fn startup_briefing(&self) -> String {
+        let mut lines = Vec::new();
+        let greeting = self
+            .profile_snapshot()
+            .ok()
+            .and_then(|snapshot| {
+                snapshot
+                    .record_for(ProfileField::PreferredAddress)
+                    .or_else(|| snapshot.record_for(ProfileField::DisplayName))
+                    .map(|record| record.value.clone())
+            })
+            .map(|name| format!("Hoş geldiniz, {name}."))
+            .unwrap_or_else(|| "Hoş geldiniz.".to_string());
+        lines.push(greeting);
+
+        if let Some(provider) = self.weather_provider.as_ref() {
+            if let Ok(weather) = provider.current_weather() {
+                lines.push(format!(
+                    "{}: {}°C, {}.",
+                    weather.location, weather.temperature_celsius, weather.description
+                ));
+            }
+        }
+
+        let pending = self.pending_approvals().len();
+        if pending > 0 {
+            lines.push(format!("{pending} bekleyen onayınız var."));
+        }
+
+        if let Ok(records) = self.list_memory() {
+            let mut notes: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.namespace,
+                        MemoryNamespace::Project | MemoryNamespace::UserProfile
+                    ) && record.source != "secret-manager"
+                })
+                .collect();
+            notes.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
+            if !notes.is_empty() {
+                let preview = notes
+                    .iter()
+                    .take(3)
+                    .map(|record| format!("{} = {}", record.key, record.value))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                lines.push(format!("Son notlarınız: {preview}."));
+            }
+        }
+
+        lines.join(" ")
+    }
+
     /// Whether workspace retrieval is currently hybrid (FTS + embedding) or FTS-only. Surfaced to
     /// the user (`/status`) so hybrid mode is never a silent, invisible behavior change.
     pub fn embedding_status(&self) -> Option<&str> {
@@ -857,6 +968,7 @@ impl Runtime {
         self.append_chat_turn("user", request.content.clone());
         let conversation = self.conversation_context();
         let memories = self.approved_memory_context();
+        let profile_files = self.profile_file_context();
         let citations = self.approved_workspace_context(&request.content);
         let attachments = request.attachments.clone();
         // RAG chunks, attachment descriptors and vision output are inputs the user may want us
@@ -874,6 +986,7 @@ impl Runtime {
                 content: isolate_memory_as_data(record),
             })
             .collect::<Vec<_>>();
+        model_messages.extend(profile_files);
         model_messages.extend(citations.iter().map(|citation| ConversationMessage {
             role: "user",
             content: isolate_untrusted_content(&citation.as_untrusted_content()),

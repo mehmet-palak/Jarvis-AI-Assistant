@@ -12,12 +12,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
 use jarvis_core::{
-    attachment_receipt_manifest, default_desktop_preferences_path, inspect_local_attachment,
-    load_desktop_preferences, parse_memory_intent, propose_profile_field, save_desktop_preferences,
+    attachment_receipt_manifest, default_desktop_preferences_path, default_profile_files_dir,
+    ensure_profile_files_exist, inspect_local_attachment, load_desktop_preferences,
+    parse_memory_intent, propose_profile_field, save_desktop_preferences,
     turkish_case_fold as turkish_search_fold, AttachmentReceipt, AttachmentRef, DesktopPreferences,
     InputType, LlamaEmbeddingProvider, LlamaServerProvider, LlamaVisionServerProvider,
-    MemoryIntent, ProfileField, Request, Runtime, SqliteStore, TaskState, ThemePreference,
-    VisionProvider,
+    MemoryIntent, OpenMeteoWeatherProvider, ProfileField, Request, Runtime, SqliteStore, TaskState,
+    ThemePreference, VisionProvider,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,16 +238,26 @@ impl JarvisDesktop {
                 (field, include)
             })
             .collect();
+        let startup_briefing = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .startup_briefing();
         Self {
             runtime,
             provider,
             vision,
             receiver,
             sender,
-            messages: vec![Message {
-                role: MessageRole::System,
-                content: "JARVIS desktop hazır. Mesajlar salt-okunur kartlarda görünür; yalnız alttaki composer düzenlenebilir. Pencereyi kapatmak model sunucusunu RAM'den çıkarmaz.".into(),
-            }],
+            messages: vec![
+                Message {
+                    role: MessageRole::System,
+                    content: "JARVIS desktop hazır. Mesajlar salt-okunur kartlarda görünür; yalnız alttaki composer düzenlenebilir. Pencereyi kapatmak model sunucusunu RAM'den çıkarmaz.".into(),
+                },
+                Message {
+                    role: MessageRole::System,
+                    content: startup_briefing,
+                },
+            ],
             message_search: String::new(),
             role_filter: None,
             draft: String::new(),
@@ -1749,6 +1760,13 @@ fn main() -> eframe::Result<()> {
     if embedding_provider.is_reachable() {
         runtime.set_embedding_provider(Some(Box::new(embedding_provider)));
     }
+    if let Some(profile_files_dir) = default_profile_files_dir() {
+        ensure_profile_files_exist(&profile_files_dir);
+        runtime.set_profile_files_dir(Some(profile_files_dir));
+    }
+    runtime.set_weather_provider(Some(
+        Box::new(OpenMeteoWeatherProvider::istanbul_umraniye()),
+    ));
     let runtime = Arc::new(Mutex::new(runtime));
     let provider = LlamaServerProvider::local_default();
     let vision = LlamaVisionServerProvider::local_default();
@@ -1777,13 +1795,14 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_desktop_instance_lock, desktop_notification, focus_jarvis_window_with,
+        acquire_desktop_instance_lock, desktop_notification, egui, focus_jarvis_window_with,
         handle_natural_language_memory_command, is_explicit_model_exit, message_matches_filter,
         model_unavailable_notification, notification_requests_jarvis_focus, send_notification_with,
-        stop_model_button_is_armed, turkish_search_fold, Message, MessageRole,
-        NOTIFICATION_FOCUS_ACTION, STOP_MODEL_CONFIRM_WINDOW,
+        stop_model_button_is_armed, turkish_search_fold, JarvisDesktop, LlamaServerProvider,
+        LlamaVisionServerProvider, Message, MessageRole, NOTIFICATION_FOCUS_ACTION,
+        STOP_MODEL_CONFIRM_WINDOW,
     };
-    use jarvis_core::{ProfileField, Runtime, SqliteStore, TaskState};
+    use jarvis_core::{propose_profile_field, ProfileField, Runtime, SqliteStore, TaskState};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -1869,6 +1888,41 @@ mod tests {
             handle_natural_language_memory_command(&runtime, "bugün hava nasıl"),
             None,
             "ordinary conversation with no trigger phrase must fall through untouched"
+        );
+    }
+
+    /// 16 Ağustos 2026'da eklenen açılış karşılaması: `JarvisDesktop::new`, sabit "hazır" mesajının
+    /// hemen ardından `Runtime::startup_briefing()`'i ikinci sistem mesajı olarak eklemeli — hava
+    /// durumu sağlayıcısı bağlı değilken bile isim/onay/not kısmı görünmeli (bu test hava
+    /// sağlayıcısı hiç bağlamıyor, yalnız `main()`'in gerçekten yaptığı wiring'i — profil alanı
+    /// set edilmişse selamlamada göründüğünü — doğruluyor).
+    #[test]
+    fn desktop_startup_shows_the_runtime_briefing_as_a_second_system_message() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let proposal = propose_profile_field(ProfileField::DisplayName, "Mehmet", "test", true)
+            .expect("valid profile field proposal");
+        runtime
+            .commit_memory_proposal(&proposal, true)
+            .expect("commit must succeed");
+        let runtime = Arc::new(Mutex::new(runtime));
+
+        let ctx = egui::Context::default();
+        let desktop = JarvisDesktop::new(
+            runtime,
+            LlamaServerProvider::local_default(),
+            LlamaVisionServerProvider::local_default(),
+            "test durumu".into(),
+            &ctx,
+        );
+
+        assert_eq!(desktop.messages.len(), 2);
+        assert_eq!(desktop.messages[0].role, MessageRole::System);
+        assert_eq!(desktop.messages[1].role, MessageRole::System);
+        assert!(
+            desktop.messages[1].content.contains("Mehmet"),
+            "briefing must greet the user by their profile display name: {}",
+            desktop.messages[1].content
         );
     }
 

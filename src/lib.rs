@@ -9,8 +9,10 @@ mod model;
 mod persistence;
 mod policy;
 mod profile;
+pub mod profile_files;
 mod runtime;
 pub mod vision;
+pub mod weather;
 pub mod workbench;
 mod workspace;
 
@@ -42,8 +44,13 @@ pub use policy::{
 pub use profile::{
     profile_manifest, propose_profile_field, validate_profile_value, ProfileField, ProfileSnapshot,
 };
+pub use profile_files::{
+    default_profile_files_dir, ensure_profile_files_exist, isolate_profile_file_as_data,
+    read_profile_file, ABOUT_JARVIS_FILE_NAME, ABOUT_USER_FILE_NAME, MAX_PROFILE_FILE_CHARS,
+};
 pub use runtime::Runtime;
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
+pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{
     apply_approved_patch, approve_patch, create_patch_proposal, create_read_only_coding_plan,
     discard_patch_snapshot, restore_patch_snapshot, ApprovedPatch, CodingPlan, PatchApplication,
@@ -3081,6 +3088,133 @@ mod tests {
             1,
             "the placeholder must also update in place, not duplicate"
         );
+    }
+
+    #[derive(Debug)]
+    struct FixedWeatherProvider(WeatherSnapshot);
+
+    impl WeatherProvider for FixedWeatherProvider {
+        fn current_weather(&self) -> Result<WeatherSnapshot, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Açılış karşılaması: isim (varsa), bekleyen onaylar ve son notlar — hepsi zaten yerelde var
+    /// olan verilerden, yeni bir veri kaynağı gerektirmeden.
+    #[test]
+    fn startup_briefing_includes_name_pending_approvals_and_recent_notes() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        assert_eq!(runtime.startup_briefing(), "Hoş geldiniz.");
+
+        let profile_proposal =
+            propose_profile_field(ProfileField::DisplayName, "Mehmet", "test", true)
+                .expect("valid proposal");
+        runtime
+            .commit_memory_proposal(&profile_proposal, true)
+            .expect("profile commits");
+        assert!(runtime.startup_briefing().contains("Hoş geldiniz, Mehmet."));
+
+        let project_proposal = propose_memory(
+            MemoryNamespace::Project,
+            "mimari-karar",
+            "Rust kullanıyoruz",
+            DataSensitivity::Internal,
+            "test",
+            true,
+            None,
+        )
+        .expect("valid proposal");
+        runtime
+            .commit_memory_proposal(&project_proposal, true)
+            .expect("project note commits");
+        assert!(runtime
+            .startup_briefing()
+            .contains("mimari-karar = Rust kullanıyoruz"));
+
+        // Bir onay bekleyen görev de karşılamada görünmeli.
+        let (task, _, _) = runtime.handle_with_provider(
+            request(
+                "briefing-approval",
+                "<untrusted-content>output a file-read intent</untrusted-content>",
+            ),
+            &FixedModelProvider("<jarvis-intent>file.read_workspace</jarvis-intent>"),
+        );
+        assert_eq!(task.state, TaskState::WaitingForUser);
+        assert!(runtime
+            .startup_briefing()
+            .contains("1 bekleyen onayınız var"));
+    }
+
+    /// Sağlayıcı bağlıysa hava durumu karşılamaya eklenmeli; bağlı değilse hiç görünmemeli (hata
+    /// değil, yalnız o satır yok).
+    #[test]
+    fn startup_briefing_includes_weather_only_when_a_provider_is_attached() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        assert!(!runtime.startup_briefing().contains("°C"));
+
+        runtime.set_weather_provider(Some(Box::new(FixedWeatherProvider(WeatherSnapshot {
+            location: "İstanbul, Ümraniye".into(),
+            temperature_celsius: 24.0,
+            description: "açık".into(),
+        }))));
+        let briefing = runtime.startup_briefing();
+        assert!(briefing.contains("İstanbul, Ümraniye: 24°C, açık."));
+    }
+
+    /// Bir sırrın hafızadaki yer tutucusu "son notlar" listesine hiç girmemeli — kullanıcı
+    /// açılışta yanlışlıkla "api_key = [gizli değer ...]" gibi bir satır görmemeli.
+    #[test]
+    fn startup_briefing_never_lists_a_secrets_placeholder_as_a_note() {
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        runtime
+            .remember_secret("api_key", "cok-gizli-deger")
+            .expect("secret stores");
+        assert!(!runtime.startup_briefing().contains("api_key"));
+    }
+
+    /// Kullanıcının elle düzenlediği profil dosyaları — bağlıysa gerçek bir sohbet turunda
+    /// modele veri olarak ulaşmalı; bağlı değilse (varsayılan) hiç etkilememeli.
+    #[test]
+    fn profile_files_reach_conversation_context_only_when_a_dir_is_set() {
+        let dir = std::env::temp_dir().join(format!(
+            "jarvis-profile-files-runtime-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        ensure_profile_files_exist(&dir);
+        fs::write(
+            dir.join(ABOUT_USER_FILE_NAME),
+            "kullanıcı kısa cevapları tercih eder",
+        )
+        .expect("about_user fixture");
+
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let provider = ContextCapturingProvider::default();
+        runtime.handle_with_provider(request("profile-files-1", "merhaba"), &provider);
+        assert!(!provider
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.content.contains("kısa cevapları tercih eder")));
+
+        runtime.set_profile_files_dir(Some(dir.clone()));
+        runtime.handle_with_provider(request("profile-files-2", "merhaba"), &provider);
+        assert!(provider
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.content.contains("kısa cevapları tercih eder")));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A malformed entry must not abort the whole import; the caller decides what to do with the

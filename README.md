@@ -129,8 +129,22 @@ tetikleyicisiyle); model normal sohbet üretirken bu yollara hiç erişemez.
 **Sohbet geçmişi:** diske de yazılır (yalnız RAM değil) — JARVIS yeniden başlatılınca kaldığı yerden
 devam eder. `/clear` hem görünen listeyi hem modele giden bağlamı hem diskteki kaydı siler.
 
+**Sır (Secret Manager):** `/secret anahtar = değer`, `/secret show <anahtar>`, `/secret forget <anahtar>`,
+`/secrets` (yalnız anahtarları listeler). Gerçek değer sıradan bellekten tamamen ayrı bir tabloda
+tutulur; normal sohbet bağlamına asla girmez, yalnız `/secret show` ile açıkça istenince görünür.
+
+**Açılış karşılaması:** JARVIS her açıldığında (TUI ve native masaüstü) isim (varsa) + güncel hava
+durumu (İstanbul/Ümraniye, isteğe bağlı) + bekleyen onay sayısı + son notlarla kişiselleştirilmiş,
+yazılı bir karşılama gösterir (`Runtime::startup_briefing`). Sesli karşılama henüz yok, F5'in kapsamında.
+
+**Profil dosyaları (elle düzenlenen):** `~/.config/jarvis/profile/about_user.md` ve `about_jarvis.md`
+— kullanıcının kendi editörüyle doğrudan düzenlediği, JARVIS'in yalnız okuduğu (asla yazmadığı) serbest
+metin dosyaları; her turda taze okunur.
+
 Detaylı karar/gerekçe: [ADR-0003](docs/adr/0003-user-profile-schema.md) (bellek/profil şeması),
-[ADR-0004](docs/adr/0004-hybrid-rag-embedding.md) (hibrit RAG/embedding).
+[ADR-0004](docs/adr/0004-hybrid-rag-embedding.md) (hibrit RAG/embedding),
+[ADR-0005](docs/adr/0005-startup-briefing-profile-files-and-weather.md) (açılış karşılaması, profil
+dosyaları, hava durumu).
 
 ## İlk desteklenen governed istekler
 
