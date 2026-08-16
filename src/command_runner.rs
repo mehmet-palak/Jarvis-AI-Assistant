@@ -227,6 +227,7 @@ pub fn run_allowlisted_command(
         &extra_binds,
         &resolved_program,
         &arg_refs,
+        limits,
     )?;
     apply_worker_rlimits(&mut command, limits);
     let mut child = command

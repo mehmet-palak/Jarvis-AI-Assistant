@@ -4033,13 +4033,17 @@ diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old-b\n+new-
     /// `jarvis_core` is linked here as a *regular* (non-`cfg(test)`) dependency of the `jarvis`
     /// binary's own test build — unlike `cargo test --lib` inside `jarvis_core` itself, its
     /// `#[cfg(test)]` plain-`git`-without-bwrap fallback is **not** active here, so this exercises
-    /// the real, production bubblewrap path (ADR-0001: no host-shell fallback ever). This dev
-    /// sandbox denies `CLONE_NEWNET` (documented repeatedly across this project, e.g.
-    /// `docs/adr/0001-isolated-coding-worker.md`), so bwrap itself cannot start here — the
-    /// assertion is therefore written to hold on *either* outcome: the file ends up in exactly one
-    /// of its two valid states (never partially patched), and the reply text names which one
-    /// happened. On a machine where the sandbox can actually start (any real deployment target),
-    /// the same test proves the change really lands on disk.
+    /// the real, production `systemd-run` cgroup + bubblewrap path (ADR-0001: no host-shell
+    /// fallback ever) end to end, on real hardware. Two real bugs were found and fixed live
+    /// (2026-08-16) making this actually pass for the first time — both were previously
+    /// misdiagnosed as "this dev sandbox denies `CLONE_NEWNET`", which was never the true cause:
+    /// (1) `apply_worker_rlimits` set a *fixed* `RLIMIT_NPROC=64`, but that limit counts *all*
+    /// threads the real UID owns system-wide, not "how many this worker spawns" — an ordinary
+    /// desktop already owns thousands (browser, IDE, ...), so the fixed 64 made bwrap's own
+    /// internal `unshare(CLONE_NEWUSER)` fail immediately; (2) `--tmpfs /tmp` was mounted *after*
+    /// the workspace bind, so a workspace whose real path happens to live under `/tmp` (routine —
+    /// `std::env::temp_dir()`-based roots, exactly what this test and real ad-hoc scratch
+    /// workspaces use) got silently shadowed and disappeared inside the sandbox.
     #[test]
     fn approve_patch_with_no_test_plan_applies_immediately_and_stays_synchronous() {
         let (runtime, provider, vision, sender) = stored_runtime_fixture();
@@ -4075,20 +4079,73 @@ diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old-b\n+new-
 
         let on_disk = std::fs::read_to_string(root.join("demo.txt")).unwrap();
         let reply = app.messages.last().unwrap().content.clone();
-        assert!(
-            on_disk == "old\n" || on_disk == "new\n",
-            "the file must never be left in a partially-patched state, got: {on_disk:?}"
+        assert_eq!(
+            on_disk, "new\n",
+            "the real isolated worker must actually apply the patch to disk; reply was: {reply}"
         );
-        if on_disk == "new\n" {
-            assert!(reply.contains("kalıcı"), "reply was: {reply}");
-        } else {
-            assert!(
-                reply.contains("uygulanamadı"),
-                "an untouched file must be explained by a clear failure, reply was: {reply}"
-            );
-        }
+        assert!(reply.contains("kalıcı"), "reply was: {reply}");
         assert!(!app.pending, "no test plan means no worker should spawn");
         assert!(app.pending_patch.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The sibling of the test above, one layer further: a *non-empty* `test_plan` routes through
+    /// `Runtime::apply_coding_patch_with_regression_check`, which runs the allowlist command
+    /// runner (`run_allowlisted_command`/`run_test_plan`) — the *other* major consumer of
+    /// `isolated_worker_command`, previously exercised only through the `#[cfg(test)]` bypass just
+    /// like patch-apply was. Proven directly against `Runtime` (not through the TUI's background
+    /// thread) to keep this a fast, synchronous, still-real assertion. `python3 -m platform` is
+    /// allowlisted (only `-m` is, for `python3`), fast, and side-effect-free — enough to prove the
+    /// real command actually ran inside the sandbox rather than being skipped or faked.
+    #[test]
+    fn approve_patch_with_a_real_test_plan_runs_it_through_the_real_isolated_worker() {
+        let (runtime, _provider, _vision, _sender) = stored_runtime_fixture();
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-main-approve-patch-testplan-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("fixture root");
+        std::fs::write(root.join("demo.txt"), "old\n").expect("fixture file");
+
+        let plan = jarvis_core::create_read_only_coding_plan(
+            &root,
+            "demo.txt içeriğini değiştir",
+            vec![PathBuf::from("demo.txt")],
+            vec!["python3 -m platform".to_string()],
+        )
+        .expect("valid plan");
+        let proposal = jarvis_core::create_patch_proposal(
+            &plan,
+            "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            vec![PathBuf::from("demo.txt")],
+        )
+        .expect("valid proposal");
+        let approval = jarvis_core::approve_patch(&proposal, true).expect("user approved");
+
+        let (checked, outcome) = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression-checked apply must run");
+
+        assert!(outcome.is_ok(), "outcome was: {outcome:?}");
+        assert!(checked.kept, "no regression expected: {checked:?}");
+        assert_eq!(
+            checked.baseline.ran.len(),
+            1,
+            "the allowlisted command must actually run, not be skipped: {:?}",
+            checked.baseline
+        );
+        assert!(checked.baseline.all_ran_passed());
+        assert_eq!(checked.post_patch.ran.len(), 1);
+        assert!(checked.post_patch.all_ran_passed());
+        let on_disk = std::fs::read_to_string(root.join("demo.txt")).unwrap();
+        assert_eq!(on_disk, "new\n");
 
         std::fs::remove_dir_all(&root).ok();
     }

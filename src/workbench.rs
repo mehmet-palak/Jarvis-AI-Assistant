@@ -23,12 +23,16 @@ pub struct WorkerLimits {
     pub max_output_bytes: u64,
     pub max_changed_files: usize,
     pub max_diff_bytes: usize,
-    /// F4 "Resource kontrolü". This dev sandbox has no cgroup delegation, so a real CPU/RAM
-    /// *cgroup* quota (the ADR-0001 "Ek" ideal) cannot be built or verified here. `setrlimit`
-    /// on the child right before `exec` needs no special privilege and is genuinely enforced by
-    /// the kernel — a real, testable substitute, not a cgroup replacement in every respect (it
-    /// bounds one process's own address space, not a whole cgroup's resident set).
+    /// F4 "Resource kontrolü": `setrlimit` on the child right before `exec` — needs no special
+    /// privilege, genuinely enforced by the kernel. Bounds one process's own address space; the
+    /// `MemoryMax=` cgroup limit (`cgroup_scope_prefix`) is the whole-process-tree backstop on
+    /// top of this, catching a worker that spawns children instead of allocating itself.
     pub max_memory_bytes: u64,
+    /// F4 "Resource kontrolü": real cgroup v2 CPU bandwidth cap (`systemd-run --user --scope -p
+    /// CPUQuota=`), applied to the *whole* worker process tree — unlike `RLIMIT_CPU` (a hard
+    /// CPU-seconds ceiling on one process before it's killed), this throttles continuously and
+    /// covers every process the worker spawns, not just its own. 400 = 4 cores' worth by default.
+    pub max_cpu_percent: u32,
     pub network: WorkerNetwork,
 }
 
@@ -40,6 +44,7 @@ impl Default for WorkerLimits {
             max_changed_files: 12,
             max_diff_bytes: 256 * 1024,
             max_memory_bytes: 512 * 1024 * 1024,
+            max_cpu_percent: 400,
             network: WorkerNetwork::Denied,
         }
     }
@@ -618,7 +623,7 @@ fn run_git_apply(
     check_only: bool,
     limits: &WorkerLimits,
 ) -> Result<(), String> {
-    let mut command = isolated_git_apply_command(workspace_root, check_only)?;
+    let mut command = isolated_git_apply_command(workspace_root, check_only, limits)?;
     apply_worker_rlimits(&mut command, limits);
     let mut child = command
         .spawn()
@@ -742,6 +747,49 @@ pub(crate) fn terminate_then_kill(child: &mut Child, grace_period: Duration) {
     let _ = child.wait();
 }
 
+/// Number of *threads* (not processes — see below) the real UID running this process currently
+/// owns, system-wide: for every numeric `/proc` entry whose owner uid matches, the number of
+/// entries under its `task/` subdirectory, summed. Used to compute a headroom-above-current
+/// `RLIMIT_NPROC` instead of a fixed absolute number — see the bug this fixed, documented on
+/// `apply_worker_rlimits`. Must run in the parent, before `fork`; `/proc` traversal is not
+/// async-signal-safe, so this cannot itself live inside a `pre_exec` closure.
+///
+/// **Counting threads, not processes, is not optional**: `RLIMIT_NPROC` is documented (`man
+/// setrlimit`) as counting threads ("more precisely, on Linux, threads"), and an ordinary desktop
+/// is overwhelmingly threads, not processes — verified live (2026-08-16) on this machine: ~170
+/// top-level processes for the session's UID, but ~1837 threads once every process's `task/`
+/// entries are summed (a single browser process alone holds dozens). A first version of this
+/// function counted only top-level `/proc/PID` entries (one per process) and, even with generous
+/// headroom added on top, still landed far below the real in-kernel count — reproduced live with
+/// `prlimit --nproc=428:428 --pid=$$` on this same shell, which *still* failed a plain `bwrap`
+/// invocation the same way the too-low fixed `64` originally did.
+fn current_thread_count_for_real_uid() -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let real_uid = unsafe { libc::getuid() };
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter(|entry| {
+            entry
+                .metadata()
+                .map(|metadata| metadata.uid() == real_uid)
+                .unwrap_or(false)
+        })
+        .map(|entry| {
+            fs::read_dir(entry.path().join("task"))
+                .map(|tasks| tasks.count() as u64)
+                .unwrap_or(1)
+        })
+        .sum()
+}
+
 /// Applies `setrlimit` to the child right before `exec` (F4 "Resource kontrolü"). Needs no
 /// special privilege — a process may always lower its own limits — and is genuinely enforced by
 /// the kernel, unlike the struct fields this module used to leave unread. Four limits, each
@@ -750,16 +798,31 @@ pub(crate) fn terminate_then_kill(child: &mut Child, grace_period: Duration) {
 /// - `RLIMIT_FSIZE`: bounds any single file the child writes, independent of `max_memory_bytes`
 ///   — a compiler/test run can legitimately produce build artifacts far larger than a source
 ///   file, so this is deliberately more generous than `max_diff_bytes`.
-/// - `RLIMIT_NPROC`: bounds how many processes the child's *user* may hold at once — a real,
-///   if blunt, fork-bomb backstop (blunt because the limit is per-uid, not per-child-tree; the
-///   PID namespace from `--unshare-pid` is the sharper containment for "how many processes can
-///   this worker itself spawn").
-/// - `RLIMIT_CPU`: a generous multiple of the wall-clock quota, as a backstop against a
-///   multi-threaded spin that racks up more CPU-seconds than wall-seconds; the wall-clock
-///   watchdog (`wait_with_deadline_and_cancellation`) is still the primary enforcement.
+/// - `RLIMIT_NPROC`: bounds how many *additional* processes the worker's user may hold at once —
+///   a real, if blunt, fork-bomb backstop (blunt because the limit is per-uid, not per-child-tree;
+///   the PID namespace from `--unshare-pid` is the sharper containment for "how many processes can
+///   this worker itself spawn"). **Bug found and fixed live (2026-08-16):** this used to be a
+///   fixed `64`. `RLIMIT_NPROC` is a per-real-UID limit counted *system-wide*, not "how many
+///   descendants of this process" — on any ordinary desktop the user's UID already owns far more
+///   than 64 processes (168 on this machine at the time this was found: browser, IDE, JARVIS's own
+///   services, ...), so setting a fixed `64` made *any* further `fork`/`clone` from the rlimited
+///   process fail immediately with `EAGAIN`, including bwrap's own internal
+///   `unshare(CLONE_NEWUSER)` call — silently breaking the entire isolated worker path. Verified
+///   live: `prlimit --nproc=64:64 --pid=$$` on an ordinary shell (168 pre-existing processes) made
+///   even a plain `fork()` fail with the exact "Resource temporarily unavailable" the isolated
+///   worker was hitting. This had been misdiagnosed in an earlier session as the *sandbox* denying
+///   namespace creation — it was this bug the whole time. The fix keeps the same real backstop
+///   (bounded new-process budget) without breaking on a normal, already-busy desktop session.
 pub(crate) fn apply_worker_rlimits(command: &mut Command, limits: &WorkerLimits) {
     let max_memory_bytes = limits.max_memory_bytes;
     let max_runtime_seconds = u64::from(limits.max_runtime_seconds.max(1));
+    // 1024 headroom, not a smaller number: the ambient thread count on a real desktop session
+    // moves on its own between this measurement and the child's actual `fork`/`clone` a few
+    // milliseconds later (background browser/IDE activity) — still a real, finite fork-bomb
+    // backstop, just nowhere near "unlimited" (`ulimit -u` with no rlimit at all is ~250,000 on
+    // this machine).
+    const NPROC_HEADROOM: u64 = 1024;
+    let nproc = current_thread_count_for_real_uid().saturating_add(NPROC_HEADROOM);
     // SAFETY: `pre_exec` runs in the forked child before `exec`, between `fork` and `exec` — only
     // async-signal-safe calls are allowed there. `setrlimit` is async-signal-safe. Each call sets
     // a limit on the child itself; it cannot affect the parent (this) process's own limits.
@@ -776,7 +839,6 @@ pub(crate) fn apply_worker_rlimits(command: &mut Command, limits: &WorkerLimits)
                 rlim_max: fsize_bytes,
             };
             libc::setrlimit(libc::RLIMIT_FSIZE, &fsize_limit);
-            let nproc: u64 = 64;
             let nproc_limit = libc::rlimit {
                 rlim_cur: nproc,
                 rlim_max: nproc,
@@ -793,11 +855,34 @@ pub(crate) fn apply_worker_rlimits(command: &mut Command, limits: &WorkerLimits)
     }
 }
 
+/// F4 "Resource kontrolü": wraps `command` in a real cgroup v2 scope (`systemd-run --user
+/// --scope`) enforcing `limits.max_memory_bytes`/`limits.max_cpu_percent` on the *whole* worker
+/// process tree, not just the single process `apply_worker_rlimits` bounds. `MemorySwapMax=0` is
+/// required, not cosmetic — verified live (2026-08-16): with swap available, exceeding
+/// `MemoryMax` alone just pushes pages to swap instead of triggering the kernel OOM-kill; only
+/// with swap denied inside the scope does a genuinely over-budget worker actually get killed.
+/// `--quiet` is load-bearing too: without it, systemd-run's own "Running as unit: ..." banner
+/// lands on the *wrapped* command's stdout, corrupting the real worker's output. Not gated behind
+/// `#[cfg(not(test))]` like `isolated_worker_command` is — building these args has no namespace/
+/// process side effects of its own, so the real-kernel test below can call it directly.
+fn cgroup_scope_prefix(command: &mut Command, limits: &WorkerLimits) {
+    command
+        .arg("--user")
+        .arg("--scope")
+        .arg("--quiet")
+        .arg("--collect")
+        .arg(format!("-pMemoryMax={}", limits.max_memory_bytes))
+        .arg("-pMemorySwapMax=0")
+        .arg(format!("-pCPUQuota={}%", limits.max_cpu_percent.max(1)))
+        .arg("--");
+}
+
 /// The release worker sees only the approved workspace, read-only runtime libraries (plus
 /// `extra_ro_binds` — e.g. a rustup-style `~/.cargo/bin` that lives outside `/usr`), a private
-/// `/tmp`, no inherited environment and a new network namespace. Failure to start bubblewrap is
-/// an execution failure, not permission to fall back to the host shell. Shared by `git apply`
-/// (F4 patch apply) and the allowlist command runner (F4 "Allowlist command runner" /
+/// `/tmp`, no inherited environment and a new network namespace, inside a real cgroup v2 scope
+/// (`cgroup_scope_prefix`) bounding the whole tree's RAM/CPU. Failure to start systemd-run or
+/// bubblewrap is an execution failure, not permission to fall back to the host shell. Shared by
+/// `git apply` (F4 patch apply) and the allowlist command runner (F4 "Allowlist command runner" /
 /// "Test/verifier runner") — one isolation boundary, not two independently-maintained ones.
 #[cfg(not(test))]
 pub(crate) fn isolated_worker_command(
@@ -806,6 +891,7 @@ pub(crate) fn isolated_worker_command(
     extra_ro_binds: &[PathBuf],
     program: &Path,
     args: &[&str],
+    limits: &WorkerLimits,
 ) -> Result<Command, String> {
     let workspace_root = fs::canonicalize(workspace_root)
         .map_err(|error| format!("isolated worker cannot resolve workspace: {error}"))?;
@@ -816,6 +902,10 @@ pub(crate) fn isolated_worker_command(
         Some(relative) => workspace_root.join(relative),
         None => workspace_root.clone(),
     };
+    let systemd_run = Path::new("/usr/bin/systemd-run");
+    if !systemd_run.is_file() {
+        return Err("isolated worker requires /usr/bin/systemd-run".into());
+    }
     let bubblewrap = Path::new("/usr/bin/bwrap");
     if !bubblewrap.is_file() {
         return Err("isolated worker requires /usr/bin/bwrap".into());
@@ -834,8 +924,10 @@ pub(crate) fn isolated_worker_command(
             ));
         }
     }
-    let mut command = Command::new(bubblewrap);
+    let mut command = Command::new(systemd_run);
+    cgroup_scope_prefix(&mut command, limits);
     command
+        .arg(bubblewrap)
         .arg("--die-with-parent")
         .arg("--new-session")
         .arg("--unshare-net")
@@ -847,6 +939,16 @@ pub(crate) fn isolated_worker_command(
         .arg("--unshare-ipc")
         .arg("--unshare-uts")
         .arg("--clearenv")
+        // Bug found and fixed live (2026-08-16): `--tmpfs /tmp` must be mounted *before* any bind
+        // that might land inside `/tmp` — bwrap applies mounts in argument order, so a later,
+        // broader mount at a parent path (here, a fresh private `/tmp`) shadows/hides an earlier,
+        // more specific bind mounted underneath it. This used to come *after* the workspace bind;
+        // a workspace whose real path happens to live under `/tmp` (routine — e.g.
+        // `std::env::temp_dir()`-based scratch roots, exactly what a coding-plan fixture or a
+        // real user session's temp workspace can be) would silently vanish inside the sandbox,
+        // surfacing as `bwrap: Can't chdir to <path>: No such file or directory` — reproduced live
+        // with the exact patch-apply path this module implements.
+        .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
         .args(["--ro-bind", "/usr", "/usr"])
         .args(["--ro-bind", "/lib", "/lib"])
         .args(["--ro-bind", "/lib64", "/lib64"]);
@@ -857,7 +959,6 @@ pub(crate) fn isolated_worker_command(
         .arg("--bind")
         .arg(&workspace_root)
         .arg(&workspace_root)
-        .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
         .args(["--setenv", "HOME", "/nonexistent"])
         .args(["--setenv", "PATH", "/usr/bin"])
         .arg("--chdir")
@@ -871,9 +972,13 @@ pub(crate) fn isolated_worker_command(
     Ok(command)
 }
 
-/// Unit tests prove patch/command semantics using a controlled temporary folder. The test runner
-/// itself is already a sandbox and may prohibit `CLONE_NEWNET`; production builds never use this
-/// path.
+/// Unit tests prove patch/command semantics using a controlled temporary folder rather than
+/// spawning real `systemd-run`/`bwrap` processes — `cargo test` runs many tests in parallel, and
+/// each real invocation creates its own set of Linux namespaces; doing that hundreds of times
+/// concurrently is exactly the kind of load that can transiently exhaust a sandboxed CI runner's
+/// namespace budget (`bwrap: Creating new namespace failed: Resource temporarily unavailable`).
+/// Production builds never use this path; the real cgroup/namespace mechanism is instead proven
+/// once, directly, by `cgroup_memory_limit_is_enforced_by_the_real_kernel_when_available` below.
 #[cfg(test)]
 pub(crate) fn isolated_worker_command(
     workspace_root: &Path,
@@ -881,6 +986,7 @@ pub(crate) fn isolated_worker_command(
     _extra_ro_binds: &[PathBuf],
     program: &Path,
     args: &[&str],
+    _limits: &WorkerLimits,
 ) -> Result<Command, String> {
     if let Some(relative) = chdir_relative {
         validate_workspace_relative_path(relative)?;
@@ -899,7 +1005,11 @@ pub(crate) fn isolated_worker_command(
     Ok(command)
 }
 
-fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result<Command, String> {
+fn isolated_git_apply_command(
+    workspace_root: &Path,
+    check_only: bool,
+    limits: &WorkerLimits,
+) -> Result<Command, String> {
     let git = Path::new("/usr/bin/git");
     #[cfg(not(test))]
     if !git.is_file() {
@@ -910,7 +1020,7 @@ fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result
         args.push("--check");
     }
     args.extend(["--whitespace=error", "-"]);
-    let mut command = isolated_worker_command(workspace_root, None, &[], git, &args)?;
+    let mut command = isolated_worker_command(workspace_root, None, &[], git, &args, limits)?;
     command.stdout(Stdio::null());
     Ok(command)
 }
@@ -1077,6 +1187,53 @@ mod tests {
             .parse()
             .expect("ulimit -v must print a number of KiB");
         assert_eq!(reported_kib * 1024, limits.max_memory_bytes);
+    }
+
+    /// F4 "Resource kontrolü": proves `cgroup_scope_prefix` genuinely constrains a worker's total
+    /// memory at the kernel level, complementing (not duplicating) the rlimit test above — a
+    /// process that actually *touches* enough pages to exceed `MemoryMax` must be killed, not
+    /// merely throttled. `MemorySwapMax=0` is what makes this true: verified live (2026-08-16)
+    /// that on a machine with swap, exceeding `MemoryMax` alone just pushes pages to swap instead
+    /// of triggering the OOM-killer — and that an *untouched* `bytearray()` can stay backed by the
+    /// shared zero page and never grow real RSS at all, which would make a naive version of this
+    /// test pass for the wrong reason. Skips (does not fail) when this environment has no
+    /// functioning `systemd-run --user` session (e.g. a minimal CI container with no user systemd
+    /// instance) — the mechanism itself is real-kernel and environment-dependent, same category as
+    /// the rlimit test; production code fails loudly on that same unavailability instead
+    /// (`isolated_worker_command`'s explicit `/usr/bin/systemd-run` check) rather than silently
+    /// degrading, so a skip here never hides a real production gap.
+    #[test]
+    fn cgroup_memory_limit_is_enforced_by_the_real_kernel_when_available() {
+        let probe = std::process::Command::new("systemd-run")
+            .args(["--user", "--scope", "--quiet", "--", "/bin/true"])
+            .status();
+        if !matches!(probe, Ok(status) if status.success()) {
+            eprintln!(
+                "skipping cgroup_memory_limit_is_enforced_by_the_real_kernel_when_available: \
+                 no functioning `systemd-run --user` session in this environment"
+            );
+            return;
+        }
+        let limits = WorkerLimits {
+            max_memory_bytes: 64 * 1024 * 1024,
+            ..WorkerLimits::default()
+        };
+        let mut command = std::process::Command::new("systemd-run");
+        cgroup_scope_prefix(&mut command, &limits);
+        let status = command
+            .arg("/usr/bin/python3")
+            .args([
+                "-c",
+                "data = bytearray(400 * 1024 * 1024)\n\
+                 for i in range(0, len(data), 4096): data[i] = 1\n\
+                 print('should not reach here')",
+            ])
+            .status()
+            .expect("systemd-run must be spawnable when the probe above succeeded");
+        assert!(
+            !status.success(),
+            "a worker that actually touches memory past MemoryMax (swap denied) must be killed"
+        );
     }
 
     #[test]

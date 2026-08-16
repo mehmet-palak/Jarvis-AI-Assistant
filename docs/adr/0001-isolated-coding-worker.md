@@ -102,3 +102,40 @@ bulunup düzeltildi: `ModelProvider::complete()` üretimde 8 token'a sabitliydi,
 planı satırı, tam dosya yeniden yazımı) sessizce kırpıyordu — `complete_with_budget` eklendi, model
 sunucusunun context penceresi 2048'den 8192'ye çıkarıldı. Detaylı kanıt: `DEVELOPMENT_PLAN.md`, F4
 bölümü.
+
+## Ek 3 — Kritik düzeltme: "sandbox `CLONE_NEWNET` reddediyor" iddiası yanlıştı; gerçek cgroup v2 eklendi (16 Ağustos 2026, F4 sonrası TUI-düzeltme oturumu)
+
+Bu belgede (Ek/Ek 2) ve `DEVELOPMENT_PLAN.md`'de tekrar tekrar geçen "bu geliştirme sandbox'ı
+`CLONE_NEWNET` vermiyor, gerçek `bwrap` burada başlatılamaz" iddiası **yanlıştı**. Gerçek makinede
+doğrudan test edildi: `unshare --user`, tam ağ izolasyonlu `bwrap --unshare-net`, ve
+`systemd-run --user --scope -p MemoryMax=...` **hepsi ayrıcalıksız çalışıyor**. Asıl engel iki
+gerçek, önceden fark edilmemiş koddu:
+
+1. **`apply_worker_rlimits`'te sabit `RLIMIT_NPROC=64`.** Bu limit Linux'ta süreç ağacı başına değil,
+   gerçek UID'nin sistem genelinde sahip olduğu **toplam thread sayısına** göre sayılıyor. Sıradan
+   bir masaüstünde bu sayı zaten binlerce (bu makinede ~1837) — sabit `64`, rlimit'i alan sürecin
+   (ve bwrap'ın kendi iç `unshare(CLONE_NEWUSER)` çağrısının) her türlü yeni süreç/thread
+   oluşturmasını anında `EAGAIN` ile kırıyordu. Canlı doğrulandı: `prlimit --nproc=64:64 --pid=$$`
+   sıradan bir shell'de bile düz bir `fork()`'u aynı hatayla kırıyor. Düzeltme: sabit sayı yerine
+   o anki gerçek thread sayısı + 1024 pay, dinamik ölçülüyor.
+2. **`--tmpfs /tmp`, workspace bind'ından SONRA mount ediliyordu.** Workspace'in gerçek yolu `/tmp`
+   altındaysa (rutin — geçici/scratch workspace'ler tam olarak bunu yapar), sonraki genel `--tmpfs
+   /tmp` mount'u önceki spesifik bind'ı gölgeliyordu. Düzeltme: `--tmpfs /tmp` artık her zaman
+   bind'lardan önce.
+
+**Sonuç**: izole worker (bwrap ile gerçek `git apply`/allowlisted komut çalıştırma) ilk kez gerçek
+makinede, `#[cfg(test)]` bypass'ı olmadan, uçtan uca kanıtlandı — `src/main.rs`'teki ilgili testler
+artık yalnız gerçek başarıyı kabul ediyor (önceden "iki geçerli sonuçtan biri" kabul ediyorlardı).
+
+**Aynı turda eklenen, gerçek cgroup v2 kaynak kontrolü**: `isolated_worker_command` artık `bwrap`'ı
+`systemd-run --user --scope -p MemoryMax=... -p MemorySwapMax=0 -p CPUQuota=...%` ile sarmalıyor —
+tüm worker süreç ağacını (yalnız `RLIMIT_AS`'ın bağladığı tek süreci değil) gerçek bir cgroup'a
+bağlıyor. `MemorySwapMax=0` gerekli: takas açıkken `MemoryMax` aşımı süreci öldürmüyor, sayfaları
+takasa itiyor (canlı doğrulandı). Gerçek kernel testiyle kanıtlandı (`cgroup_memory_limit_is_
+enforced_by_the_real_kernel_when_available`): sayfalara gerçekten dokunan bir süreç, sınırın
+üstünde, gerçekten `SIGKILL` alıyor.
+
+**Hâlâ açık, ama artık "burada yapılamaz" değil, yalnız "henüz yapılmadı":** seccomp filtresi,
+gerçek copy-on-write overlay (`bwrap --tmp-overlay` bu makinede çalıştığı doğrulandı, henüz
+entegre edilmedi). Toplam workspace disk kotası da hâlâ yok — cgroups bunu sağlamıyor, muhtemelen
+overlay'in tmpfs `size=` parametresiyle birlikte çözülmeli.
