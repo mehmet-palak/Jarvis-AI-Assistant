@@ -2529,6 +2529,74 @@ mod tests {
         assert_eq!(retrieved[0].value, "Ali");
     }
 
+    /// Kullanıcının gerçek `jarvis.db`'sinde bulunan, yukarıdaki fix'ten önce kalmış gerçek bir
+    /// üretim verisi hatası (16 Ağustos 2026): TUI'de kaynak listesinde `USER_PROFILE:language` ve
+    /// `USER_PROFILE:preferred_address` iki kez görünüyordu. Kök neden: eski `memory_id` türetme
+    /// mantığı zamanında yazılmış iki satır, yukarıdaki fix devreye girdiğinde silinmeden kalmıştı.
+    /// Bu test tam o senaryoyu simüle ediyor — `raw_connection` ile fix'ten önceki gibi iki farklı
+    /// `memory_id`'li, aynı `(namespace, key)` satırı elle ekleniyor, sonra store gerçekten yeniden
+    /// açılıyor (gerçek dosya tabanlı restart — `migrate()`'in her açılışta çalıştığını, yalnız bir
+    /// kerelik elle çalıştırılan bir script olmadığını kanıtlamak için) ve yalnız en son güncellenen
+    /// satırın hayatta kaldığı doğrulanıyor.
+    #[test]
+    fn a_real_restart_deduplicates_legacy_memory_rows_left_over_from_before_the_memory_id_fix() {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-legacy-memory-dedup-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let path_str = path.to_str().expect("utf-8 test path").to_string();
+
+        {
+            let store = SqliteStore::open(&path_str).expect("initial open");
+            let connection = store.raw_connection();
+            // Two rows for the same (namespace, key), different memory_id — exactly the shape the
+            // pre-fix `propose_memory` used to produce. The older row is inserted with an earlier
+            // updated_at and a lexicographically larger memory_id, to prove the tie-break really
+            // uses updated_at first, not just string order.
+            connection
+                .execute(
+                    "INSERT INTO memories(memory_id, schema_version, namespace, memory_key,
+                        memory_value, sensitivity, source, include_in_model_context, created_at,
+                        updated_at, expires_at, trust_level, scope_id)
+                     VALUES ('memory-zzz-old', 1, 'USER_PROFILE', 'language', 'Türkçe', 'INTERNAL',
+                        'native-profile', 1, 100, 100, NULL, 'USER_ASSERTED', NULL)",
+                    [],
+                )
+                .expect("insert legacy older row");
+            connection
+                .execute(
+                    "INSERT INTO memories(memory_id, schema_version, namespace, memory_key,
+                        memory_value, sensitivity, source, include_in_model_context, created_at,
+                        updated_at, expires_at, trust_level, scope_id)
+                     VALUES ('memory-aaa-new', 1, 'USER_PROFILE', 'language', 'Türkçe / İngilizce',
+                        'INTERNAL', 'native-profile', 1, 200, 200, NULL, 'USER_ASSERTED', NULL)",
+                    [],
+                )
+                .expect("insert legacy newer row");
+        }
+
+        // A real restart — a brand new `SqliteStore::open` over the same file — must run the
+        // dedup repair, not just a one-off migration script.
+        let restarted = SqliteStore::open(&path_str).expect("reopen runs migrate() again");
+        let all = restarted.list_memory().expect("list");
+        assert_eq!(
+            all.len(),
+            1,
+            "the stale duplicate row must be gone after a real reopen"
+        );
+        assert_eq!(all[0].memory_id, "memory-aaa-new");
+        assert_eq!(
+            all[0].value, "Türkçe / İngilizce",
+            "the most recently updated value must be the one that survives"
+        );
+
+        fs::remove_file(&path_str).expect("test database cleanup");
+    }
+
     #[test]
     fn expired_or_context_disabled_memory_is_not_given_to_the_model() {
         let store = SqliteStore::in_memory().expect("sqlite schema");

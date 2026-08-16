@@ -207,6 +207,7 @@ impl SqliteStore {
             "TEXT NOT NULL DEFAULT 'USER_ASSERTED'",
         )?;
         self.ensure_column("memories", "scope_id", "TEXT")?;
+        self.deduplicate_legacy_memory_records()?;
         self.backfill_legacy_audit_chain()?;
         if self.repair_concurrent_audit_chain()? {
             self.append_audit_chain(
@@ -355,6 +356,44 @@ impl SqliteStore {
         }
         transaction.commit()?;
         Ok(true)
+    }
+
+    /// 16 Ağustos 2026'da kullanıcının gerçek `jarvis.db`'sinde bulunan bir üretim verisi hatasının
+    /// kalıcı onarımı: "bellek güncelleme hatası" düzeltilmeden önce (bkz. `DEVELOPMENT_PLAN.md`
+    /// "F3 sonrası düzeltmeler"), `propose_memory`'nin `memory_id`'yi değer+nonce'tan türetmesi
+    /// yüzünden aynı `(namespace, key, scope_id)` için birden fazla satır oluşabiliyordu. O düzeltme
+    /// yeni yazımların artık tek bir satıra güncellenmesini sağlıyor ama zaten var olan yinelenen
+    /// satırları silmiyordu — bu da örneğin "Kaynaklar" listesinde aynı alanın iki kez görünmesine
+    /// yol açıyordu. `repair_concurrent_audit_chain`'le aynı ilke: yıkıcı olmayan, kendi kendine
+    /// iyileşen bir startup onarımı. Her grupta yalnız en son güncellenen satır kalır (eşitlikte
+    /// `memory_id`'si büyük olan — deterministik bir kural, keyfi değil); diğerleri silinir. Silinen
+    /// satır sayısını döner (test/kanıt için).
+    fn deduplicate_legacy_memory_records(&mut self) -> SqlResult<usize> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stale_ids: Vec<String> = {
+            let mut statement = transaction.prepare(
+                "SELECT m.memory_id FROM memories m
+                 WHERE EXISTS (
+                     SELECT 1 FROM memories newer
+                     WHERE newer.namespace = m.namespace
+                       AND newer.memory_key = m.memory_key
+                       AND (newer.scope_id IS m.scope_id)
+                       AND (newer.updated_at, newer.memory_id) > (m.updated_at, m.memory_id)
+                 )",
+            )?;
+            let mapped = statement.query_map([], |row| row.get::<_, String>(0))?;
+            mapped.collect::<SqlResult<Vec<_>>>()?
+        };
+        for stale_id in &stale_ids {
+            transaction.execute(
+                "DELETE FROM memories WHERE memory_id = ?1",
+                params![stale_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(stale_ids.len())
     }
 
     pub(crate) fn save_task(&self, task: &Task) -> SqlResult<()> {
