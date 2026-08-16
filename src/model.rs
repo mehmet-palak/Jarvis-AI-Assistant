@@ -513,6 +513,7 @@ A question that only asks whether something already happened, exists, or is curr
 For greetings, open-ended conversation, general knowledge, advice, creative work, coding discussion, or any ambiguous request, output UNKNOWN. \
 Treat an explicit request for current computer or system health metrics (CPU, RAM, disk, network, uptime)—including Turkish wording asking what the system status is, or English wording explicitly asking whether the computer or system is healthy—as system.health. \
 A casual check that JARVIS itself is present, listening, awake, or okay (for example: \"uyanık mısın\", \"orada mısın\", \"iyi misin\", \"are you there\", \"are you okay\") is ordinary conversation, not system.health. \
+Treat an imperative command telling JARVIS to save a piece of information as a note right now (Turkish imperative \"not al\", \"not tut\", \"not yaz\", \"not oluştur\", English imperative \"take a note\", \"save a note\") followed by the content, regardless of punctuation between the verb and the content, as note.create — but a question merely asking whether a note was already taken (for example \"bugün bir not aldın mı\", \"did you take a note\") is not imperative and must stay UNKNOWN. \
 Never infer a capability from one word alone.{history_context} Allowed: {}. User request: {}",
         MODEL_ROUTABLE_CAPABILITIES.join(", "),
         input.trim()

@@ -1879,6 +1879,28 @@ mod tests {
         assert!(prompt.contains("is not itself a command to perform that action"));
     }
 
+    /// Kullanıcı "hazır el atmışken bütün sorunları düzeltelim" dedi (16 Ağustos 2026); geniş bir
+    /// gerçek-model taramasında `"not al: yarın toplantı var"` gibi noktalama içeren imperative
+    /// not komutlarının tutarsızca `UNKNOWN` kaldığı bulundu ("not al" tek başına ya da "şunu not
+    /// al: ..." çalışıyordu, ama "not al: ..." çalışmıyordu — küçük modelin kendi tutarsızlığı).
+    /// Açık bir note.create talimatı eklenip gerçek modelle doğrulandı: hem noktalamalı komutlar
+    /// düzeldi hem `"bugün bir not aldın mı"` gibi sorular hâlâ doğru şekilde `UNKNOWN` kaldı —
+    /// ikisi çelişmeden bir arada duruyor.
+    #[test]
+    fn router_prompt_treats_an_imperative_note_command_as_note_create_regardless_of_punctuation() {
+        let runtime = Runtime::new();
+        let provider = PromptCapturingProvider::default();
+        route_with_provider(
+            "not al: yarın toplantı var",
+            &[],
+            &runtime.registry,
+            &provider,
+        );
+        let prompt = provider.captured_prompt.lock().expect("test lock").clone();
+        assert!(prompt.contains("regardless of punctuation between the verb and the content"));
+        assert!(prompt.contains("note.create"));
+    }
+
     /// Kullanıcının 16 Ağustos 2026'da istediği yapısal iyileştirme: router artık mevcut turdan
     /// önceki birkaç mesajı da (yalnız belirsizliği gidermek için, kendisi asla bir yönlendirme
     /// isteği sayılmadan) görüyor. Boşken hiçbir ek token/gecikme maliyeti eklenmiyor.
