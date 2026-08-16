@@ -3,3 +3,4 @@
 /jarvis.db-*
 /jarvis.db.pre-migration-backup-*.db
 /notes/
+/append-notes/

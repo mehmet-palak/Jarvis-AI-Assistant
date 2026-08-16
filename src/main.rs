@@ -1826,6 +1826,55 @@ fn submit(
         });
         return;
     }
+    if let Some(rest) = input.strip_prefix("/note-append ") {
+        // F4 "Yerel üretkenlik tool framework"'ün ikinci gerçek tool'u — F4'ün coding-patch
+        // sandbox'ından tamamen ayrı, `note.create` ile aynı Policy → Task → Approval →
+        // execute → Verifier zincirinden geçen basit bir "var olan dosyaya satır ekle" işlemi.
+        // Model çağrısı gerektirmiyor — deterministik `classify()` üzerinden `Runtime::handle`.
+        let Some((path, line)) = rest.split_once('|') else {
+            app.push_system("Kullanım: /note-append <proje-içi-göreli-dosya> | <eklenecek satır>");
+            return;
+        };
+        let (path, line) = (path.trim(), line.trim());
+        if path.is_empty() || line.is_empty() {
+            app.push_system("Kullanım: /note-append <proje-içi-göreli-dosya> | <eklenecek satır>");
+            return;
+        }
+        let request = Request {
+            schema_version: 1,
+            request_id: format!(
+                "tui-append-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system clock must be after UNIX epoch")
+                    .as_nanos()
+            ),
+            input_type: InputType::Gui,
+            content: format!("file.append_note: {path}|{line}"),
+            attachments: vec![],
+        };
+        let (task, _, _) = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .handle(request);
+        if task.state == TaskState::WaitingForUser {
+            let preview = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .preview_pending_action(&task.task_id)
+                .unwrap_or_else(|| "(önizleme yok)".into());
+            app.push_system(format!(
+                "Onay bekliyor ({}):\n{preview}\nOnay: /approve • Vazgeç: /cancel",
+                task.task_id
+            ));
+        } else {
+            app.push_system(format!(
+                "İstek beklenmeyen bir durumda tamamlandı: {:?}",
+                task.state
+            ));
+        }
+        return;
+    }
     if let Some(rest) = input.strip_prefix("/index-preview ").map(str::trim) {
         let mut parts = rest.split_whitespace();
         let Some(folder) = parts.next() else {
@@ -2128,7 +2177,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2506,7 +2555,17 @@ fn show_pending_approvals(app: &mut App, runtime: &Arc<Mutex<Runtime>>) {
     let pending: Vec<String> = runtime
         .pending_approvals()
         .into_iter()
-        .map(|approval| format!("{} • {}", approval.task_id, approval.action_id))
+        .map(|approval| {
+            // F4 "Yerel üretkenlik tool framework" — "ExplainBeforeExecute" artık gerçekten
+            // uygulanıyor: kullanıcı onaylamadan önce tam olarak ne olacağını görüyor, yalnız
+            // task/action ID değil.
+            match runtime.preview_pending_action(&approval.task_id) {
+                Some(preview) => {
+                    format!("{} • {}\n  {preview}", approval.task_id, approval.action_id)
+                }
+                None => format!("{} • {}", approval.task_id, approval.action_id),
+            }
+        })
         .collect();
     if pending.is_empty() {
         app.push_system("Onay bekleyen işlem yok.");
@@ -3649,6 +3708,54 @@ diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old-b\n+new-
         app.input = "/abort".into();
         submit(&mut app, &runtime, &provider, &vision, &sender);
         assert!(app.messages.last().unwrap().content.contains("yok"));
+    }
+
+    /// F4 "Yerel üretkenlik tool framework": `/note-append` model'e hiç dokunmadan, doğrudan
+    /// Policy/Task/Approval zincirinden geçiyor — onaydan önce tam önizleme gösteriliyor, onaydan
+    /// sonra dosyaya gerçekten yazılıyor ve doğrulanıyor.
+    #[test]
+    fn note_append_asks_for_approval_shows_a_preview_and_writes_only_after_approve() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        let relative_path = format!(
+            "main-append-test-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        );
+        let full_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("append-notes")
+            .join(&relative_path);
+
+        app.input = format!("/note-append {relative_path} | merhaba dünya");
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        let reply = app.messages.last().unwrap().content.clone();
+        assert!(reply.contains("Onay bekliyor"), "reply was: {reply}");
+        assert!(reply.contains("merhaba dünya"), "reply was: {reply}");
+        assert!(
+            !full_path.exists(),
+            "nothing must be written before approval"
+        );
+
+        app.input = "/approve".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert_eq!(
+            std::fs::read_to_string(&full_path).unwrap(),
+            "merhaba dünya\n"
+        );
+
+        std::fs::remove_file(&full_path).ok();
+    }
+
+    #[test]
+    fn note_append_without_a_pipe_separator_shows_usage_and_never_touches_the_runtime() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.input = "/note-append eksik-ayirici".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("Kullanım:"));
     }
 
     #[test]

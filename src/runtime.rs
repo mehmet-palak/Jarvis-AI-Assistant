@@ -865,6 +865,19 @@ impl Runtime {
         approvals
     }
 
+    /// F4 "Yerel üretkenlik tool framework": tam olarak neyin onaylanacağını, onaylamadan önce
+    /// gösteriyor — `PolicyControl::ExplainBeforeExecute` şimdiye kadar bildirilen ama hiçbir
+    /// zaman uygulanmayan bir kontroldü (yalnız task_id/action_id gösteriliyordu). `None` döner:
+    /// task/input bulunamazsa, ya da bu capability için kayıtlı bir `LocalTool` yoksa (henüz
+    /// approval-gated her capability bir `LocalTool` değil, ör. F4 coding patch'leri kendi
+    /// önizlemesine sahip).
+    pub fn preview_pending_action(&self, task_id: &str) -> Option<String> {
+        let task = self.tasks.get(task_id)?;
+        let input = self.pending_inputs.get(task_id)?;
+        let manifest = self.registry.get(&task.capability)?;
+        local_tool_for(&manifest.capability_id).map(|tool| tool.preview(input))
+    }
+
     pub fn handle(&mut self, request: Request) -> (Task, ToolResult, VerifierResult) {
         let capability = classify(&request.content).to_owned();
         self.handle_with_resolution(

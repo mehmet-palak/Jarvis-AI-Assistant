@@ -1335,67 +1335,236 @@ fn project_outline() -> ToolResult {
     }
 }
 
-fn execute_approved(manifest: &CapabilityManifest, input: &str, task_id: &str) -> ToolResult {
-    if manifest.sandbox_profile != "LOCAL_RESTRICTED" || manifest.capability_id != "note.create" {
-        return sandbox_violation("persistent note requires LOCAL_RESTRICTED profile");
+/// F4 "Yerel üretkenlik tool framework": the one shared contract every approval-gated local tool
+/// implements. `CapabilityManifest`/`capability_manifest` already carry the risk/scope/verifier
+/// metadata Policy needs; this trait is what makes a *new* tool pluggable into `execute_approved`
+/// (dispatch) and the approval flow's preview (what the user sees before they approve) without
+/// either of those growing a hardcoded per-tool branch. Adding a tool means: one manifest entry
+/// (`capabilities.rs`), one `policy_for` arm, one struct implementing this trait, one entry in
+/// `local_tool_for`'s dispatch table — nothing else has to change.
+trait LocalTool: Send + Sync {
+    /// Read-only, no side effect: exactly what would happen if this action is approved. Shown to
+    /// the user before they approve (`Runtime::preview_pending_action`) — the same principle F4's
+    /// patch preview already established for coding, generalized to every approval-gated tool.
+    /// Previously, `PolicyControl::ExplainBeforeExecute` was a declared-but-unenforced control —
+    /// nothing actually showed an explanation before approval; this closes that real gap.
+    fn preview(&self, input: &str) -> String;
+    /// The actual side-effecting action. Only ever reached through `Runtime::approve` — Task
+    /// state and Policy already gate this call, this function trusts that gate and does not
+    /// re-check it.
+    fn execute(&self, input: &str, task_id: &str) -> ToolResult;
+}
+
+fn note_body(input: &str) -> &str {
+    input
+        .split_once(':')
+        .map(|(_, text)| text.trim())
+        .filter(|text| !text.is_empty())
+        .unwrap_or("JARVIS note")
+}
+
+struct NoteCreateTool;
+
+impl LocalTool for NoteCreateTool {
+    fn preview(&self, input: &str) -> String {
+        format!(
+            "Yeni bir not dosyası oluşturulacak. İçerik:\n{}",
+            note_body(input)
+        )
     }
-    let directory = std::env::var_os("JARVIS_NOTE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("notes"));
-    if let Err(error) = fs::create_dir_all(&directory) {
-        return ToolResult {
-            status: ToolStatus::Failure,
-            output: String::new(),
-            error: Some(error.to_string()),
-            state_changed: false,
-            evidence: vec![],
-        };
-    }
-    let root = match fs::canonicalize(&directory) {
-        Ok(root) => root,
-        Err(error) => {
+
+    fn execute(&self, input: &str, task_id: &str) -> ToolResult {
+        let directory = std::env::var_os("JARVIS_NOTE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("notes"));
+        if let Err(error) = fs::create_dir_all(&directory) {
             return ToolResult {
                 status: ToolStatus::Failure,
                 output: String::new(),
                 error: Some(error.to_string()),
                 state_changed: false,
                 evidence: vec![],
-            }
+            };
         }
-    };
-    let path = root.join(format!(
-        "{}.md",
-        task_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
-    ));
-    if path.parent() != Some(root.as_path()) || !path.starts_with(&root) {
-        return ToolResult {
-            status: ToolStatus::Failure,
-            output: String::new(),
-            error: Some("note path escapes allowed root".into()),
-            state_changed: false,
-            evidence: vec![],
+        let root = match fs::canonicalize(&directory) {
+            Ok(root) => root,
+            Err(error) => {
+                return ToolResult {
+                    status: ToolStatus::Failure,
+                    output: String::new(),
+                    error: Some(error.to_string()),
+                    state_changed: false,
+                    evidence: vec![],
+                }
+            }
         };
+        let path = root.join(format!(
+            "{}.md",
+            task_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
+        ));
+        if path.parent() != Some(root.as_path()) || !path.starts_with(&root) {
+            return ToolResult {
+                status: ToolStatus::Failure,
+                output: String::new(),
+                error: Some("note path escapes allowed root".into()),
+                state_changed: false,
+                evidence: vec![],
+            };
+        }
+        let body = note_body(input);
+        match fs::write(&path, format!("# JARVIS Note\n\n{}\n", body)) {
+            Ok(()) => ToolResult {
+                status: ToolStatus::Success,
+                output: path.display().to_string(),
+                error: None,
+                state_changed: true,
+                evidence: vec![format!("file.exists:{}", path.display())],
+            },
+            Err(error) => ToolResult {
+                status: ToolStatus::Failure,
+                output: String::new(),
+                error: Some(error.to_string()),
+                state_changed: false,
+                evidence: vec![],
+            },
+        }
     }
+}
+
+/// F4 "Yerel üretkenlik tool framework"'ün ikinci gerçek tool'u — çerçevenin coding'e/note'a özgü
+/// olmadığını kanıtlıyor. Bilerek dar: yalnız zaten var olan, workspace-göreli bir metin
+/// dosyasına TEK BİR satır ekliyor (F4'ün sandbox'lı kod patch'lerinden tamamen ayrı, çok daha
+/// basit bir yerel üretkenlik ihtiyacı — ör. kişisel bir todo/log dosyası).
+struct FileAppendNoteTool;
+
+/// `JARVIS_APPEND_DIR` (yoksa proje kökü altında `append-notes/`) — yalnız bu kök altındaki,
+/// gizli-bilgi benzeri olmayan dosyalara ekleme yapılabilir. `note.create`'in kendi
+/// `JARVIS_NOTE_DIR` deseniyle aynı; ikinci bir izin modeli icat edilmedi.
+fn file_append_note_root() -> Result<PathBuf, String> {
+    let directory = std::env::var_os("JARVIS_APPEND_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("append-notes"));
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("append target directory unavailable: {error}"))?;
+    fs::canonicalize(&directory)
+        .map_err(|error| format!("append target directory unavailable: {error}"))
+}
+
+/// `input`'in `"<capability>: <relative-path>|<line>"` biçimini ortak olarak çözüyor —
+/// `preview`/`execute` aynı ayrıştırmayı iki kez yazmasın diye.
+fn parse_append_note_input(input: &str) -> Result<(PathBuf, String), String> {
     let body = input
         .split_once(':')
         .map(|(_, text)| text.trim())
-        .filter(|text| !text.is_empty())
-        .unwrap_or("JARVIS note");
-    match fs::write(&path, format!("# JARVIS Note\n\n{}\n", body)) {
-        Ok(()) => ToolResult {
-            status: ToolStatus::Success,
-            output: path.display().to_string(),
-            error: None,
-            state_changed: true,
-            evidence: vec![format!("file.exists:{}", path.display())],
-        },
-        Err(error) => ToolResult {
-            status: ToolStatus::Failure,
-            output: String::new(),
-            error: Some(error.to_string()),
-            state_changed: false,
-            evidence: vec![],
-        },
+        .unwrap_or("");
+    let (path_part, line) = body
+        .split_once('|')
+        .ok_or_else(|| "expected format: <relative-path>|<line>".to_string())?;
+    let relative_path = PathBuf::from(path_part.trim());
+    workbench::validate_workspace_relative_path(&relative_path)?;
+    workspace::reject_secret_like_workspace_document_name(&relative_path)?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Err("append line must not be empty".into());
+    }
+    if line.len() > 2_000 {
+        return Err("append line exceeds the 2000-byte limit".into());
+    }
+    Ok((relative_path, line.to_string()))
+}
+
+impl LocalTool for FileAppendNoteTool {
+    fn preview(&self, input: &str) -> String {
+        match parse_append_note_input(input) {
+            Ok((relative_path, line)) => format!(
+                "{} dosyasına şu satır eklenecek:\n{line}",
+                relative_path.display()
+            ),
+            Err(error) => format!("Geçersiz istek, onaylanamaz: {error}"),
+        }
+    }
+
+    fn execute(&self, input: &str, _task_id: &str) -> ToolResult {
+        let (relative_path, line) = match parse_append_note_input(input) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return ToolResult {
+                    status: ToolStatus::Failure,
+                    output: String::new(),
+                    error: Some(error),
+                    state_changed: false,
+                    evidence: vec![],
+                }
+            }
+        };
+        let root = match file_append_note_root() {
+            Ok(root) => root,
+            Err(error) => {
+                return ToolResult {
+                    status: ToolStatus::Failure,
+                    output: String::new(),
+                    error: Some(error),
+                    state_changed: false,
+                    evidence: vec![],
+                }
+            }
+        };
+        let path = root.join(&relative_path);
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        if existing.len() + line.len() + 1 > MAX_WORKSPACE_DOCUMENT_BYTES as usize {
+            return ToolResult {
+                status: ToolStatus::Failure,
+                output: String::new(),
+                error: Some("append target would exceed the workspace document size limit".into()),
+                state_changed: false,
+                evidence: vec![],
+            };
+        }
+        let mut new_content = existing;
+        if !new_content.is_empty() && !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        new_content.push_str(&line);
+        new_content.push('\n');
+        match fs::write(&path, &new_content) {
+            Ok(()) => ToolResult {
+                status: ToolStatus::Success,
+                output: path.display().to_string(),
+                error: None,
+                state_changed: true,
+                evidence: vec![
+                    format!("file.exists:{}", path.display()),
+                    format!("file.contains:{}:{line}", path.display()),
+                ],
+            },
+            Err(error) => ToolResult {
+                status: ToolStatus::Failure,
+                output: String::new(),
+                error: Some(error.to_string()),
+                state_changed: false,
+                evidence: vec![],
+            },
+        }
+    }
+}
+
+fn local_tool_for(capability_id: &str) -> Option<&'static dyn LocalTool> {
+    match capability_id {
+        "note.create" => Some(&NoteCreateTool),
+        "file.append_note" => Some(&FileAppendNoteTool),
+        _ => None,
+    }
+}
+
+fn execute_approved(manifest: &CapabilityManifest, input: &str, task_id: &str) -> ToolResult {
+    if manifest.sandbox_profile != "LOCAL_RESTRICTED" {
+        return sandbox_violation(
+            "this capability's sandbox profile does not allow local execution",
+        );
+    }
+    match local_tool_for(&manifest.capability_id) {
+        Some(tool) => tool.execute(input, task_id),
+        None => sandbox_violation("no local tool is registered for this capability"),
     }
 }
 
@@ -1432,6 +1601,28 @@ fn verify(result: &ToolResult) -> VerifierResult {
                     return VerifierResult {
                         status: VerifyStatus::Fail,
                         reason: "project root evidence does not exist".into(),
+                        evidence: result.evidence.clone(),
+                    };
+                }
+            }
+            // F4 "Yerel üretkenlik tool framework": `file.exists`'ten daha güçlü bir doğrulama —
+            // dosyanın yalnız var olmasını değil, iddia edilen içeriği gerçekten taşıdığını
+            // kontrol ediyor. `FileAppendNoteTool` bunu kullanıyor.
+            if let Some(rest) = evidence.strip_prefix("file.contains:") {
+                let Some((path, expected_substring)) = rest.split_once(':') else {
+                    return VerifierResult {
+                        status: VerifyStatus::Fail,
+                        reason: "malformed file contains evidence".into(),
+                        evidence: result.evidence.clone(),
+                    };
+                };
+                let contains = fs::read_to_string(path)
+                    .map(|content| content.contains(expected_substring))
+                    .unwrap_or(false);
+                if !contains {
+                    return VerifierResult {
+                        status: VerifyStatus::Fail,
+                        reason: "expected content was not found in the file".into(),
                         evidence: result.evidence.clone(),
                     };
                 }
@@ -5907,6 +6098,145 @@ mod tests {
         assert_eq!(health.sandbox_profile, "NO_EXEC_READ_ONLY");
         assert!(!health.requires_network);
         assert!(capability_manifest("unknown").is_none());
+    }
+
+    fn append_note_relative_path(name: &str) -> String {
+        format!(
+            "append-test-{name}-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        )
+    }
+
+    /// F4 "Yerel üretkenlik tool framework": `file.append_note` uçtan uca aynı Policy → Task →
+    /// Approval → execute → Verifier zincirinden geçiyor — `note.create`'e özgü hiçbir kod yolu
+    /// yeniden yazılmadan, `LocalTool` dispatch'i sayesinde.
+    #[test]
+    fn file_append_note_goes_through_the_full_approval_chain_and_verifies() {
+        let relative_path = append_note_relative_path("chain");
+        let mut runtime = Runtime::new();
+        let (task, _, _) = runtime.handle(request(
+            "append-1",
+            &format!("file.append_note: {relative_path}|ilk satır"),
+        ));
+        assert_eq!(task.state, TaskState::WaitingForUser);
+        let (resumed, result, verification) = runtime
+            .approve(&task.task_id)
+            .expect("approval should resume");
+        assert_eq!(resumed.state, TaskState::Completed);
+        assert_eq!(result.status, ToolStatus::Success);
+        assert_eq!(verification.status, VerifyStatus::Pass);
+        let full_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("append-notes")
+            .join(&relative_path);
+        assert_eq!(fs::read_to_string(&full_path).unwrap(), "ilk satır\n");
+        fs::remove_file(&full_path).ok();
+    }
+
+    #[test]
+    fn file_append_note_appends_without_overwriting_the_previous_line() {
+        let relative_path = append_note_relative_path("append-twice");
+        let mut runtime = Runtime::new();
+        let (first, _, _) = runtime.handle(request(
+            "append-2",
+            &format!("file.append_note: {relative_path}|birinci"),
+        ));
+        runtime.approve(&first.task_id).expect("first approval");
+        let (second, _, _) = runtime.handle(request(
+            "append-3",
+            &format!("file.append_note: {relative_path}|ikinci"),
+        ));
+        runtime.approve(&second.task_id).expect("second approval");
+        let full_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("append-notes")
+            .join(&relative_path);
+        assert_eq!(fs::read_to_string(&full_path).unwrap(), "birinci\nikinci\n");
+        fs::remove_file(&full_path).ok();
+    }
+
+    /// F4 "Yerel üretkenlik tool framework" — "preview": onaydan önce kullanıcı tam olarak neyin
+    /// olacağını görmeli. `PolicyControl::ExplainBeforeExecute` önceden bildirilen ama hiç
+    /// uygulanmayan bir kontroldü.
+    #[test]
+    fn preview_shows_the_exact_pending_action_before_approval() {
+        let relative_path = append_note_relative_path("preview");
+        let mut runtime = Runtime::new();
+        let (task, _, _) = runtime.handle(request(
+            "append-4",
+            &format!("file.append_note: {relative_path}|önizlenecek satır"),
+        ));
+        let preview = runtime
+            .preview_pending_action(&task.task_id)
+            .expect("a preview must exist for an approval-gated LocalTool");
+        assert!(preview.contains(&relative_path), "preview was: {preview}");
+        assert!(
+            preview.contains("önizlenecek satır"),
+            "preview was: {preview}"
+        );
+        // Onaylanmadan önce dosyaya hiçbir şey yazılmamış olmalı — preview salt-okunur.
+        let full_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("append-notes")
+            .join(&relative_path);
+        assert!(!full_path.exists());
+        runtime.cancel(&task.task_id);
+    }
+
+    #[test]
+    fn preview_is_none_for_a_task_with_no_registered_local_tool() {
+        let mut runtime = Runtime::new();
+        let (task, _, _) = runtime.handle(request("append-5", "system health"));
+        // system.health onay gerektirmez (senkron tamamlanır), bu yüzden zaten pending_inputs'ta
+        // kalmaz — ama yine de "kayıtlı bir LocalTool yok" durumunu None ile kanıtlıyoruz.
+        assert!(runtime.preview_pending_action(&task.task_id).is_none());
+    }
+
+    #[test]
+    fn append_note_rejects_traversal_secret_names_and_oversized_lines() {
+        assert!(parse_append_note_input("file.append_note: ../escape.txt|line").is_err());
+        assert!(parse_append_note_input("file.append_note: .env|line").is_err());
+        assert!(parse_append_note_input("file.append_note: ok.txt|").is_err());
+        let huge_line = "x".repeat(3_000);
+        assert!(parse_append_note_input(&format!("file.append_note: ok.txt|{huge_line}")).is_err());
+        assert!(parse_append_note_input("file.append_note: ok.txt|normal bir satır").is_ok());
+    }
+
+    #[test]
+    fn verify_file_contains_evidence_passes_only_when_the_content_is_really_present() {
+        let relative_path = append_note_relative_path("verify-contains");
+        let full_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("append-notes")
+            .join(&relative_path);
+        fs::create_dir_all(full_path.parent().unwrap()).unwrap();
+        fs::write(&full_path, "gerçek içerik\n").unwrap();
+
+        let passing = ToolResult {
+            status: ToolStatus::Success,
+            output: String::new(),
+            error: None,
+            state_changed: true,
+            evidence: vec![format!(
+                "file.contains:{}:gerçek içerik",
+                full_path.display()
+            )],
+        };
+        assert_eq!(verify(&passing).status, VerifyStatus::Pass);
+
+        let failing = ToolResult {
+            status: ToolStatus::Success,
+            output: String::new(),
+            error: None,
+            state_changed: true,
+            evidence: vec![format!(
+                "file.contains:{}:hiç yazılmamış bir metin",
+                full_path.display()
+            )],
+        };
+        assert_eq!(verify(&failing).status, VerifyStatus::Fail);
+
+        fs::remove_file(&full_path).ok();
     }
 
     #[test]

@@ -27,6 +27,7 @@ impl CapabilityRegistry {
             "code.project_outline",
             "docs.workspace_summary",
             "note.create",
+            "file.append_note",
         ] {
             if let Some(manifest) = capability_manifest(id) {
                 registry.manifests.insert(id.into(), manifest);
@@ -81,6 +82,19 @@ pub fn capability_manifest(capability: &str) -> Option<CapabilityManifest> {
             requires_network: false,
             sandbox_profile: "LOCAL_RESTRICTED".into(),
             verifier_profile: "file_exists".into(),
+        }),
+        // F4 "Yerel üretkenlik tool framework"'ün ikinci gerçek tool'u — `note.create` ile aynı
+        // manifest/policy/approval/verifier deseni, farklı bir `LocalTool` implementasyonu
+        // (src/lib.rs). Yalnız workspace-göreli, gizli-bilgi benzeri olmayan bir dosyaya tek
+        // satır ekliyor.
+        "file.append_note" => Some(CapabilityManifest {
+            capability_id: capability.into(),
+            version: "1.0.0".into(),
+            risk: Risk::Medium,
+            effect_scope: "DIGITAL_LOCAL".into(),
+            requires_network: false,
+            sandbox_profile: "LOCAL_RESTRICTED".into(),
+            verifier_profile: "file_contains".into(),
         }),
         "system.time" => Some(CapabilityManifest {
             capability_id: capability.into(),

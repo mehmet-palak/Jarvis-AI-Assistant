@@ -29,6 +29,8 @@ pub fn classify(input: &str) -> &str {
         "docs.workspace_summary"
     } else if lower.contains("not oluştur") || lower.contains("note.create") {
         "note.create"
+    } else if lower.contains("file.append_note") {
+        "file.append_note"
     } else {
         "unknown"
     }
@@ -219,6 +221,18 @@ pub fn policy_for(capability: &str, _input: &str) -> PolicyResult {
             decision: PolicyDecision::AskUser,
             risk: Risk::Medium,
             reason: "Kalıcı bir not dosyası oluşturur.".into(),
+            approval_required: true,
+            required_controls: vec![
+                PolicyControl::UserApproval,
+                PolicyControl::ExplainBeforeExecute,
+                PolicyControl::VerifierRequired,
+                PolicyControl::AuditRequired,
+            ],
+        },
+        "file.append_note" => PolicyResult {
+            decision: PolicyDecision::AskUser,
+            risk: Risk::Medium,
+            reason: "Var olan bir dosyaya kalıcı bir satır ekler.".into(),
             approval_required: true,
             required_controls: vec![
                 PolicyControl::UserApproval,
