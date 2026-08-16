@@ -16,6 +16,7 @@ mod profile;
 pub mod profile_files;
 pub mod project_analyst;
 mod runtime;
+mod seccomp_filter;
 pub mod vision;
 pub mod weather;
 pub mod workbench;

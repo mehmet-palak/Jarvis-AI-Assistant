@@ -990,6 +990,11 @@ pub(crate) fn isolated_worker_command(
                 .arg(&workspace_root);
         }
     }
+    // F4 "OS izolasyonu": a real seccomp-bpf allowlist, applied by bwrap to itself right before
+    // its own final `execve` of `program` — bwrap's earlier namespace/mount setup (which
+    // genuinely needs syscalls this filter denies) is already finished by then, so this only ever
+    // constrains what the *target program* can call, never bwrap's own bootstrap.
+    let seccomp_memfd = crate::seccomp_filter::attach_seccomp_filter(&mut command)?;
     command
         .args(["--setenv", "HOME", "/nonexistent"])
         .args(["--setenv", "PATH", "/usr/bin"])
@@ -1001,6 +1006,15 @@ pub(crate) fn isolated_worker_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // SAFETY: this closure only captures `seccomp_memfd` to keep its underlying fd open until
+    // exec — it does not call anything beyond what was already required to be async-signal-safe
+    // by the other `pre_exec` hook (`apply_worker_rlimits`) attached to this same `Command`.
+    unsafe {
+        command.pre_exec(move || {
+            let _ = &seccomp_memfd;
+            Ok(())
+        });
+    }
     Ok(command)
 }
 

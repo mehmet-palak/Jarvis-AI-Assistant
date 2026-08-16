@@ -149,3 +149,20 @@ dizinleri (`target/`, `node_modules/`) artık her çalıştırmada sıfırlanıy
 bilinçli tercih edildi, gerçek kullanımda yavaşlık gözlemlenirse ayrıca ele alınmalı.
 
 F4'ün 15 maddesinden kalan tek madde: seccomp.
+
+## Ek 5 — Seccomp eklendi, F4 15/15 (16 Ağustos 2026, aynı oturum, 12. tur)
+
+Yeni `src/seccomp_filter.rs`: `libseccomp` crate ile gerçek bir seccomp-bpf allowlist filtresi,
+`ScmpFilterContext::export_bpf_mem` (bwrap'ın man sayfasının adlandırdığı `seccomp_export_bpf`
+fonksiyonunun ta kendisi) ile derleniyor, `memfd_create` (CLOEXEC'siz) ile bir fd'ye yazılıp
+`--seccomp <fd>` olarak bwrap'a veriliyor — bwrap kendi namespace/mount kurulumunu bitirdikten
+SONRA, son `execve`'den hemen önce kendi üzerine yüklüyor, bu yüzden bwrap'ın kendi ihtiyaç
+duyduğu ayrıcalıklı syscall'ları asla etkilemiyor.
+
+Bu makinede `strace` kurulu değildi; kaynak paketinden kullanıcı dizinine (root gerekmeden)
+derlenip, kurulu olan her allowlist aracının gerçek çalıştırmaları izlendi (107 benzersiz syscall,
+`mvn`/`gradle` kurulu olmadığı için ampirik doğrulanamadı — dürüstçe not edildi). Kanarya testiyle
+doğrulandı: allowlist dışı bir syscall (`personality()`) filtre altında gerçekten `EPERM` alıyor,
+tüm izlenen araçlar filtre altında da çalışmaya devam ediyor.
+
+F4'ün 15 maddesi de artık `[x]` — hepsi gerçek makinede, gerçek kanıtla.
