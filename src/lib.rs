@@ -6319,6 +6319,42 @@ mod tests {
         assert!(runtime.preview_pending_action(&task.task_id).is_none());
     }
 
+    /// Real bug found live (2026-08-16): the four workspace-read capabilities that predate the
+    /// `LocalTool` refactor had *no* preview at all — a user whose request the router misrouted
+    /// here (a separately documented router-accuracy issue) had no way to see, before approving,
+    /// that this would only ever *describe* existing files, never write anything new. `code.
+    /// project_outline` in particular must say so explicitly, since that is exactly the
+    /// misunderstanding a misrouted "write me some code" request produces.
+    #[test]
+    fn legacy_workspace_read_capabilities_now_have_an_honest_preview() {
+        let mut runtime = Runtime::new();
+        let (task, _, _) = runtime.handle(request("legacy-preview-1", "kod projesi özeti"));
+        assert_eq!(task.capability, "code.project_outline");
+        let preview = runtime
+            .preview_pending_action(&task.task_id)
+            .expect("a preview must exist even for a pre-LocalTool capability");
+        assert!(preview.contains("YAZMAZ"), "preview was: {preview}");
+        runtime.cancel(&task.task_id);
+
+        let (task, _, _) = runtime.handle(request("legacy-preview-2", "proje bilgisi"));
+        assert_eq!(task.capability, "project.info");
+        assert!(runtime.preview_pending_action(&task.task_id).is_some());
+        runtime.cancel(&task.task_id);
+
+        let (task, _, _) = runtime.handle(request("legacy-preview-3", "doküman özeti"));
+        assert_eq!(task.capability, "docs.workspace_summary");
+        assert!(runtime.preview_pending_action(&task.task_id).is_some());
+        runtime.cancel(&task.task_id);
+
+        let (task, _, _) = runtime.handle(request("legacy-preview-4", "dosya oku: Cargo.toml"));
+        assert_eq!(task.capability, "file.read_workspace");
+        let preview = runtime
+            .preview_pending_action(&task.task_id)
+            .expect("a preview must exist even for a pre-LocalTool capability");
+        assert!(preview.contains("Cargo.toml"), "preview was: {preview}");
+        runtime.cancel(&task.task_id);
+    }
+
     #[test]
     fn append_note_rejects_traversal_secret_names_and_oversized_lines() {
         assert!(parse_append_note_input("file.append_note: ../escape.txt|line").is_err());

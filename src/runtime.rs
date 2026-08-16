@@ -875,7 +875,18 @@ impl Runtime {
         let task = self.tasks.get(task_id)?;
         let input = self.pending_inputs.get(task_id)?;
         let manifest = self.registry.get(&task.capability)?;
-        local_tool_for(&manifest.capability_id).map(|tool| tool.preview(input))
+        if let Some(tool) = local_tool_for(&manifest.capability_id) {
+            return Some(tool.preview(input));
+        }
+        // These four predate the `LocalTool` refactor (`execute_approved`'s own hardcoded match
+        // in `lib.rs`, not the trait dispatch `local_tool_for` covers) — real bug found live
+        // (2026-08-16): they had *no* preview at all, so `ExplainBeforeExecute` (their own
+        // declared policy control) was silently unenforced for exactly this set, the same gap
+        // `preview_pending_action` was built to close for `note.create`/`file.append_note`. A
+        // user asking JARVIS to *write* new code, misrouted here by the local model (a real,
+        // separately documented router-accuracy issue), had no way to see — before approving —
+        // that this would only ever *list* existing files, never write anything new.
+        legacy_workspace_read_preview(&manifest.capability_id, input)
     }
 
     pub fn handle(&mut self, request: Request) -> (Task, ToolResult, VerifierResult) {
@@ -1506,6 +1517,40 @@ impl Runtime {
             },
             finalize,
         ))
+    }
+}
+
+/// `Runtime::preview_pending_action`'s fallback for the four read-only workspace capabilities
+/// that predate the `LocalTool` refactor. Each description is deliberately honest about scope —
+/// `code.project_outline` in particular spells out "lists existing files, never writes new code",
+/// directly addressing the misfire this was built to surface: the local model routing a "write me
+/// some code" request here instead of replying conversationally (a real, separately documented
+/// router-accuracy issue, not something this preview can fix on its own — but it lets the user
+/// *see and reject* the mistake before it executes, instead of finding out only after approving).
+fn legacy_workspace_read_preview(capability_id: &str, input: &str) -> Option<String> {
+    match capability_id {
+        "file.read_workspace" => {
+            let path = input
+                .split_once(':')
+                .map(|(_, path)| path.trim())
+                .filter(|path| !path.is_empty());
+            Some(match path {
+                Some(path) => format!(
+                    "Workspace içindeki şu dosyayı okuyup gösterecek (yeni bir şey yazmaz): {path}"
+                ),
+                None => "Workspace içinde bir dosya okuyacak, ama hangi dosya belirtilmemiş — muhtemelen başarısız olacak (bu yeni kod YAZMAZ, yalnız var olan bir dosyayı okur).".into(),
+            })
+        }
+        "project.info" => Some(
+            "Bu projenin kök dizini, Cargo.toml/README.md varlığı gibi genel bilgilerini gösterecek — yeni bir şey yazmaz.".into(),
+        ),
+        "code.project_outline" => Some(
+            "src/ altındaki var olan .rs dosyalarının bir listesini gösterecek. Yeni kod YAZMAZ — yalnız zaten var olanları listeler.".into(),
+        ),
+        "docs.workspace_summary" => Some(
+            "Proje kökündeki README.md dosyasının içeriğini gösterecek — yeni bir şey yazmaz.".into(),
+        ),
+        _ => None,
     }
 }
 
