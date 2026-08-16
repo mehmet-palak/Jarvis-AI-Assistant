@@ -628,6 +628,42 @@ pub fn isolate_memory_as_data(record: &MemoryRecord) -> String {
     )
 }
 
+/// TUI usability fix (2026-08-16): builds the "Kaynaklar" text appended after a reply, shared by
+/// both the TUI (`main.rs`) and the desktop client (`bin/jarvis_desktop.rs`) so the two never
+/// drift apart. Workspace-citation/vision lines (genuinely query-matched, i.e. actually relevant
+/// to what was asked) are still listed in full. Memory-attribution lines (`"• Kayıtlı bilgi
+/// kullanıldı: ..."`, one per record in `Runtime::approved_memory_context`'s always-on personal-
+/// ization context — retrieved on *every* turn regardless of topic, by design, so the model always
+/// knows the user's name/preferences even for small talk) are collapsed into one short count
+/// instead of listed individually: a trivial reply like "evet, uyanığım" was showing a multi-line
+/// source dump of unrelated profile/project records under it — this keeps the same transparency
+/// (the count is still visible, nothing is hidden) without the clutter. Returns `None` when there
+/// is nothing to show at all.
+pub fn format_sources_block(sources: &[String]) -> Option<String> {
+    const MEMORY_PREFIX: &str = "• Kayıtlı bilgi kullanıldı:";
+    let (memory_lines, other_lines): (Vec<&String>, Vec<&String>) = sources
+        .iter()
+        .partition(|line| line.starts_with(MEMORY_PREFIX));
+    let mut block = String::new();
+    if !other_lines.is_empty() {
+        block.push_str("\n\nKaynaklar:\n");
+        block.push_str(
+            &other_lines
+                .iter()
+                .map(|line| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if !memory_lines.is_empty() {
+        block.push_str(&format!(
+            "\n\n(bu yanıtta {} kayıtlı bilgi bağlam olarak kullanıldı)",
+            memory_lines.len()
+        ));
+    }
+    (!block.is_empty()).then_some(block)
+}
+
 /// Portable JSON backup of every memory record (any namespace), for the F3 "Memory
 /// migration/backup ... export/import" requirement. Excludes `memory_id` and `source`: import
 /// always mints a fresh id (matching how `propose_memory` already works — nothing round-trips a
@@ -3628,6 +3664,51 @@ mod tests {
             Some(MemoryNamespace::EphemeralToolOutput)
         );
         assert_eq!(parse_memory_namespace("bilinmeyen"), None);
+    }
+
+    #[test]
+    fn format_sources_block_is_none_when_there_is_nothing_to_show() {
+        assert_eq!(format_sources_block(&[]), None);
+    }
+
+    #[test]
+    fn format_sources_block_lists_citation_and_vision_lines_in_full() {
+        let sources = vec![
+            "• [1] docs/adr#chunk-0 — \"...\" (tamamı için: /source 1)".to_string(),
+            "• Local vision analizi: att-1".to_string(),
+        ];
+        let block = format_sources_block(&sources).expect("has content");
+        assert!(block.contains("Kaynaklar:"));
+        assert!(block.contains("docs/adr#chunk-0"));
+        assert!(block.contains("Local vision analizi"));
+        assert!(!block.contains("kayıtlı bilgi bağlam"));
+    }
+
+    /// TUI usability fix (2026-08-16): the bug report was a trivial reply ("uyanık mısın jarvis")
+    /// showing a multi-line dump of unrelated always-on profile/project memory. Individual
+    /// "Kayıtlı bilgi kullanıldı" lines must collapse into one short count, never listed one by
+    /// one, while genuinely query-matched citation lines are unaffected.
+    #[test]
+    fn format_sources_block_collapses_memory_attribution_into_one_compact_count() {
+        let sources = vec![
+            "• Kayıtlı bilgi kullanıldı: USER_PROFILE:nickname".to_string(),
+            "• Kayıtlı bilgi kullanıldı: PROJECT:proje-notu".to_string(),
+        ];
+        let block = format_sources_block(&sources).expect("has content");
+        assert!(!block.contains("Kaynaklar:"));
+        assert!(!block.contains("USER_PROFILE"));
+        assert!(block.contains("2 kayıtlı bilgi bağlam olarak kullanıldı"));
+    }
+
+    #[test]
+    fn format_sources_block_shows_both_a_citation_list_and_a_memory_count_together() {
+        let sources = vec![
+            "• [1] docs/adr#chunk-0 — \"...\" (tamamı için: /source 1)".to_string(),
+            "• Kayıtlı bilgi kullanıldı: USER_PROFILE:nickname".to_string(),
+        ];
+        let block = format_sources_block(&sources).expect("has content");
+        assert!(block.contains("Kaynaklar:\n• [1]"));
+        assert!(block.contains("1 kayıtlı bilgi bağlam olarak kullanıldı"));
     }
 
     /// F3 "Memory migration/backup ... export/import": a round trip must reproduce every field

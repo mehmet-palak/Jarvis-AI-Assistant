@@ -291,9 +291,8 @@ impl JarvisDesktop {
         while let Ok(reply) = self.receiver.try_recv() {
             if let Some(message) = self.messages.get_mut(reply.placeholder_index) {
                 message.content = reply.content;
-                if !reply.sources.is_empty() {
-                    message.content.push_str("\n\nKaynaklar:\n");
-                    message.content.push_str(&reply.sources.join("\n"));
+                if let Some(sources_block) = jarvis_core::format_sources_block(&reply.sources) {
+                    message.content.push_str(&sources_block);
                 }
             }
             self.pending = false;

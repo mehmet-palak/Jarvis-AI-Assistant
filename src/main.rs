@@ -16,7 +16,7 @@ use crossterm::{
 use jarvis_core::{
     analyze_repository, approve_patch, attachment_receipt_manifest, default_profile_files_dir,
     draft_coding_plan_with_provider, draft_patch_with_provider, ensure_profile_files_exist,
-    inspect_local_attachment, memory_export, memory_import, new_cancel_flag,
+    format_sources_block, inspect_local_attachment, memory_export, memory_import, new_cancel_flag,
     parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
     profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
     propose_unrecognized_remember_intent_with_provider, AttachmentReceipt, AttachmentRef,
@@ -88,6 +88,11 @@ struct TuiNotification {
 struct App {
     messages: Vec<Message>,
     input: String,
+    /// TUI usability fix (2026-08-16): char-index (not byte-index) position within `input` where
+    /// typing/Backspace/Delete/paste act. Previously `input` was append-only (no cursor concept
+    /// at all), so Left/Right arrow keys did nothing and Ctrl+Backspace could only ever delete
+    /// from the end. Always kept in `0..=input.chars().count()`.
+    input_cursor: usize,
     status: String,
     model_state: String,
     last_model_check: Instant,
@@ -127,6 +132,7 @@ impl App {
                 content: intro.into(),
             }],
             input: String::new(),
+            input_cursor: 0,
             status: "Hazır • Ctrl+C çıkış • /help kısayollar".into(),
             model_state: model_state.into(),
             last_model_check: Instant::now(),
@@ -406,9 +412,8 @@ fn event_loop(
         while let Ok(reply) = receiver.try_recv() {
             if let Some(message) = app.messages.get_mut(reply.message_index) {
                 message.content = reply.content;
-                if !reply.sources.is_empty() {
-                    message.content.push_str("\n\nKaynaklar:\n");
-                    message.content.push_str(&reply.sources.join("\n"));
+                if let Some(sources_block) = format_sources_block(&reply.sources) {
+                    message.content.push_str(&sources_block);
                 }
             }
             app.last_citations = reply.citations;
@@ -444,19 +449,22 @@ fn event_loop(
             continue;
         }
         let key = match event::read()? {
-            Event::Paste(pasted) if !app.pending => {
-                append_pasted_text(&mut app.input, &pasted);
+            Event::Paste(pasted) => {
+                insert_pasted_text_at_cursor(&mut app.input, &mut app.input_cursor, &pasted);
                 app.status =
                     "Panodaki metin taslağa eklendi • Enter gönder • Ctrl+Backspace kelime sil"
                         .into();
                 continue;
             }
-            Event::Paste(_) => continue,
             Event::Mouse(mouse) => {
-                if is_primary_selection_paste(mouse.kind) && !app.pending {
+                if is_primary_selection_paste(mouse.kind) {
                     match primary_selection_text() {
                         Ok(pasted) if !pasted.is_empty() => {
-                            append_pasted_text(&mut app.input, &pasted);
+                            insert_pasted_text_at_cursor(
+                                &mut app.input,
+                                &mut app.input_cursor,
+                                &pasted,
+                            );
                             app.status = "Birincil seçim taslağa eklendi • Enter gönder".into();
                         }
                         Ok(_) => app.status = "Birincil seçimde metin yok.".into(),
@@ -482,16 +490,10 @@ fn event_loop(
         if apply_history_key_scroll(&mut app.scroll, key.code) {
             continue;
         }
-        if app.pending {
-            if key.code == KeyCode::Esc {
-                app.status = "JARVIS yanıt üretirken girdi kilitli. Yanıt tamamlanınca yeni mesaj gönderebilirsin.".into();
-            }
-            continue;
-        }
         if is_clipboard_paste_shortcut(key) {
             match clipboard_text() {
                 Ok(pasted) if !pasted.is_empty() => {
-                    append_pasted_text(&mut app.input, &pasted);
+                    insert_pasted_text_at_cursor(&mut app.input, &mut app.input_cursor, &pasted);
                     app.status = "Panodaki metin taslağa eklendi • Enter gönder".into();
                 }
                 Ok(_) => app.status = "Panoda metin yok.".into(),
@@ -500,22 +502,35 @@ fn event_loop(
             continue;
         }
         if is_delete_previous_word_shortcut(key) {
-            delete_previous_word(&mut app.input);
+            delete_previous_word(&mut app.input, &mut app.input_cursor);
             continue;
         }
         if should_clear_draft(key) {
             app.input.clear();
+            app.input_cursor = 0;
             if is_clear_draft_shortcut(key) {
                 app.status = "Taslak temizlendi.".into();
             }
             continue;
         }
         match key.code {
-            KeyCode::Enter => submit(&mut app, &runtime, &provider, &vision, &sender),
-            KeyCode::Backspace => {
-                app.input.pop();
+            KeyCode::Enter if app.pending => {
+                app.status = "JARVIS önceki isteğe yanıt üretiyor; taslağını yazmaya devam edebilirsin, yanıt bitince Enter'a bas.".into();
             }
-            KeyCode::Char(character) => app.input.push(character),
+            KeyCode::Enter => submit(&mut app, &runtime, &provider, &vision, &sender),
+            KeyCode::Backspace => backspace_at_cursor(&mut app.input, &mut app.input_cursor),
+            KeyCode::Delete => delete_forward_at_cursor(&mut app.input, &mut app.input_cursor),
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                move_cursor_word_left(&app.input, &mut app.input_cursor)
+            }
+            KeyCode::Left => move_cursor_left(&app.input, &mut app.input_cursor),
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                move_cursor_word_right(&app.input, &mut app.input_cursor)
+            }
+            KeyCode::Right => move_cursor_right(&app.input, &mut app.input_cursor),
+            KeyCode::Char(character) => {
+                insert_char_at_cursor(&mut app.input, &mut app.input_cursor, character)
+            }
             _ => {}
         }
     }
@@ -635,22 +650,120 @@ fn apply_history_key_scroll(scroll: &mut u16, key: KeyCode) -> bool {
     true
 }
 
-fn append_pasted_text(input: &mut String, pasted: &str) {
+/// Byte offset of the `char_index`-th character in `s` (char-count based, so it stays correct
+/// for multi-byte Turkish letters like ı/ş/ğ/ü/ö/ç). Clamped to `s.len()` when `char_index` is at
+/// or past the end — the natural "insert/delete at the end" position.
+fn char_index_to_byte_index(s: &str, char_index: usize) -> usize {
+    s.char_indices()
+        .nth(char_index)
+        .map_or(s.len(), |(index, _)| index)
+}
+
+/// Inserts `pasted` (with the same newline→space collapsing `append_pasted_text` always did) at
+/// `*cursor` instead of always at the end, then advances `*cursor` past the inserted text. When
+/// `*cursor` is already at the end (the common "just typed, then pasted" case) this behaves
+/// exactly like the old end-only `append_pasted_text`.
+fn insert_pasted_text_at_cursor(input: &mut String, cursor: &mut usize, pasted: &str) {
+    let byte_index = char_index_to_byte_index(input, *cursor);
+    let mut previous_char = input[..byte_index].chars().last();
     let mut previous_was_line_break = false;
+    let mut insertion = String::new();
     for character in pasted.chars() {
         if matches!(character, '\n' | '\r') {
-            if !input.chars().last().is_some_and(char::is_whitespace) {
-                input.push(' ');
+            if !previous_char.is_some_and(char::is_whitespace) {
+                insertion.push(' ');
+                previous_char = Some(' ');
             }
             previous_was_line_break = true;
         } else {
             if previous_was_line_break && character.is_whitespace() {
                 continue;
             }
-            input.push(character);
+            insertion.push(character);
+            previous_char = Some(character);
             previous_was_line_break = false;
         }
     }
+    let inserted_chars = insertion.chars().count();
+    input.insert_str(byte_index, &insertion);
+    *cursor += inserted_chars;
+}
+
+fn insert_char_at_cursor(input: &mut String, cursor: &mut usize, character: char) {
+    let byte_index = char_index_to_byte_index(input, *cursor);
+    input.insert(byte_index, character);
+    *cursor += 1;
+}
+
+/// Deletes the character immediately before `*cursor` (a no-op at the start of the draft),
+/// mirroring what every other text editor does with plain Backspace — unlike the old behavior,
+/// which always deleted the *last* character of `input` regardless of where the cursor was.
+fn backspace_at_cursor(input: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let end = char_index_to_byte_index(input, *cursor);
+    let start = char_index_to_byte_index(input, *cursor - 1);
+    input.replace_range(start..end, "");
+    *cursor -= 1;
+}
+
+/// Deletes the character at `*cursor` (forward delete / the `Delete` key); the cursor itself does
+/// not move, since the text after it shifts left into its place.
+fn delete_forward_at_cursor(input: &mut String, cursor: &mut usize) {
+    let char_count = input.chars().count();
+    if *cursor >= char_count {
+        return;
+    }
+    let start = char_index_to_byte_index(input, *cursor);
+    let end = char_index_to_byte_index(input, *cursor + 1);
+    input.replace_range(start..end, "");
+}
+
+fn move_cursor_left(input: &str, cursor: &mut usize) {
+    let _ = input;
+    *cursor = cursor.saturating_sub(1);
+}
+
+fn move_cursor_right(input: &str, cursor: &mut usize) {
+    *cursor = (*cursor + 1).min(input.chars().count());
+}
+
+/// Char index of the start of the "word" immediately before `cursor` — skips any whitespace right
+/// before the cursor first, then skips back over non-whitespace, exactly like a terminal's
+/// readline Ctrl+Left. Used both by Ctrl+Left (cursor move) and by Ctrl+Backspace/Ctrl+W (delete).
+fn word_start_before_cursor(input: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = cursor.min(chars.len());
+    while index > 0 && chars[index - 1].is_whitespace() {
+        index -= 1;
+    }
+    while index > 0 && !chars[index - 1].is_whitespace() {
+        index -= 1;
+    }
+    index
+}
+
+/// Char index just past the "word" immediately after `cursor` — the Ctrl+Right mirror of
+/// `word_start_before_cursor`.
+fn word_end_after_cursor(input: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = cursor.min(chars.len());
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    while index < chars.len() && !chars[index].is_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn move_cursor_word_left(input: &str, cursor: &mut usize) {
+    *cursor = word_start_before_cursor(input, *cursor);
+}
+
+fn move_cursor_word_right(input: &str, cursor: &mut usize) {
+    *cursor = word_end_after_cursor(input, *cursor);
 }
 
 fn clipboard_text() -> Result<String, String> {
@@ -672,16 +785,21 @@ fn clipboard_text_from(arguments: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|_| "panodaki veri UTF-8 metin değil".into())
 }
 
-fn delete_previous_word(input: &mut String) {
-    let without_trailing_whitespace = input.trim_end_matches(char::is_whitespace).len();
-    input.truncate(without_trailing_whitespace);
-    let start = input
-        .char_indices()
-        .rev()
-        .find(|(_, character)| character.is_whitespace())
-        .map_or(0, |(index, _)| index);
-    input.truncate(start);
-    input.truncate(input.trim_end_matches(char::is_whitespace).len());
+/// Deletes the word immediately before `*cursor` (Ctrl+Backspace / Ctrl+W) *and* the single run
+/// of whitespace separating it from whatever comes before — the same "no orphan space left
+/// behind" readline behavior the old end-only version had, generalized to work from any cursor
+/// position instead of always the end of the whole draft.
+fn delete_previous_word(input: &mut String, cursor: &mut usize) {
+    let word_start = word_start_before_cursor(input, *cursor);
+    let chars: Vec<char> = input.chars().collect();
+    let mut deletion_start = word_start;
+    while deletion_start > 0 && chars[deletion_start - 1].is_whitespace() {
+        deletion_start -= 1;
+    }
+    let cursor_byte = char_index_to_byte_index(input, *cursor);
+    let deletion_start_byte = char_index_to_byte_index(input, deletion_start);
+    input.replace_range(deletion_start_byte..cursor_byte, "");
+    *cursor = deletion_start;
 }
 
 /// Preview shown after `/remember key = value` or any `/remember sensitivity|ttl ...`
@@ -832,6 +950,7 @@ fn submit(
 ) {
     let input = app.input.trim().to_owned();
     app.input.clear();
+    app.input_cursor = 0;
     if input.is_empty() {
         return;
     }
@@ -2294,6 +2413,7 @@ fn submit(
         _ => {}
     }
     if app.model_state != "ready" {
+        app.input_cursor = input.chars().count();
         app.input = input;
         app.status = "Model henüz RAM'e yükleniyor; mesajın kutuda tutuluyor. Birkaç saniye sonra Enter'a tekrar bas.".into();
         return;
@@ -2613,20 +2733,39 @@ fn cancel_task(app: &mut App, runtime: &Arc<Mutex<Runtime>>, task_id: &str) {
     }
 }
 
-/// Keeps the cursor and the newest portion of a long draft visible in a fixed-height input box.
-/// Input is character-based so backspace and Turkish text remain safe; it deliberately does not
-/// edit the read-only message history above it.
-fn input_view(input: &str, width: u16, rows: u16) -> (Vec<Line<'static>>, u16, u16) {
+/// Keeps `cursor` (a char index into `input`) visible in a fixed-height input box, scrolling the
+/// window only as far as needed to do so. Input is character-based so backspace and Turkish text
+/// remain safe; it deliberately does not edit the read-only message history above it.
+///
+/// When the whole draft fits in `width * rows`, the window never scrolls (identical to the old
+/// always-show-everything behavior). When it doesn't, the window slides just far enough that
+/// `cursor` stays inside it — which reduces to "always show the tail" exactly when `cursor` is at
+/// the end of the draft, matching the previous append-only behavior byte-for-byte.
+fn input_view(input: &str, cursor: usize, width: u16, rows: u16) -> (Vec<Line<'static>>, u16, u16) {
     let width = usize::from(width.max(1));
     let rows = usize::from(rows.max(1));
     let capacity = width.saturating_mul(rows);
-    let mut visible: Vec<char> = input.chars().collect();
-    let was_clipped = visible.len() > capacity;
-    if was_clipped {
-        let start = visible.len() - capacity;
-        visible = visible[start..].to_vec();
+    let chars: Vec<char> = input.chars().collect();
+    let char_len = chars.len();
+    let cursor = cursor.min(char_len);
+
+    let window_start = if char_len <= capacity {
+        0
+    } else {
+        cursor
+            .saturating_sub(capacity.saturating_sub(1))
+            .min(char_len - capacity)
+    };
+    let window_end = (window_start + capacity).min(char_len);
+    let mut visible: Vec<char> = chars[window_start..window_end].to_vec();
+    if window_start > 0 {
         if let Some(first) = visible.first_mut() {
             *first = '…';
+        }
+    }
+    if window_end < char_len {
+        if let Some(last) = visible.last_mut() {
+            *last = '…';
         }
     }
 
@@ -2634,11 +2773,14 @@ fn input_view(input: &str, width: u16, rows: u16) -> (Vec<Line<'static>>, u16, u
         .chunks(width)
         .map(|chunk| Line::from(chunk.iter().collect::<String>()))
         .collect::<Vec<_>>();
-    let visible_len = visible.len();
-    let (cursor_row, cursor_column) = if visible_len == capacity {
+    let cursor_in_window = (cursor - window_start).min(capacity);
+    let (cursor_row, cursor_column) = if cursor_in_window >= capacity {
         ((rows - 1) as u16, (width - 1) as u16)
     } else {
-        ((visible_len / width) as u16, (visible_len % width) as u16)
+        (
+            (cursor_in_window / width) as u16,
+            (cursor_in_window % width) as u16,
+        )
     };
     (lines, cursor_row, cursor_column)
 }
@@ -2801,7 +2943,8 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
     };
     let input_width = layout[2].width.saturating_sub(2);
     let input_rows = layout[2].height.saturating_sub(2);
-    let (input_lines, cursor_row, cursor_column) = input_view(&app.input, input_width, input_rows);
+    let (input_lines, cursor_row, cursor_column) =
+        input_view(&app.input, app.input_cursor, input_width, input_rows);
     let input = Paragraph::new(input_lines)
         .block(Block::default().borders(Borders::ALL).title(input_title))
         .style(Style::default().fg(Color::White))
@@ -2809,20 +2952,22 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
     frame.render_widget(input, layout[2]);
     let footer = Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, layout[3]);
-    if !app.pending {
-        let cursor_x = (layout[2].x + 1 + cursor_column).min(layout[2].right().saturating_sub(2));
-        let cursor_y = (layout[2].y + 1 + cursor_row).min(layout[2].bottom().saturating_sub(2));
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
+    // Editing stays live while `pending` too (F4-adjacent TUI fix, 2026-08-16) — the draft cursor
+    // is always real now, not just while idle.
+    let cursor_x = (layout[2].x + 1 + cursor_column).min(layout[2].right().saturating_sub(2));
+    let cursor_y = (layout[2].y + 1 + cursor_row).min(layout[2].bottom().saturating_sub(2));
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        append_pasted_text, apply_history_key_scroll, apply_history_mouse_scroll,
-        delete_previous_word, draft_rows, history_line_count, history_lines, input_view,
+        apply_history_key_scroll, apply_history_mouse_scroll, backspace_at_cursor,
+        delete_forward_at_cursor, delete_previous_word, draft_rows, history_line_count,
+        history_lines, input_view, insert_char_at_cursor, insert_pasted_text_at_cursor,
         is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-        is_primary_selection_paste, native_desktop_binary_path, notification_arguments,
+        is_primary_selection_paste, move_cursor_left, move_cursor_right, move_cursor_word_left,
+        move_cursor_word_right, native_desktop_binary_path, notification_arguments,
         notification_preview, parse_remember_namespace_prefix, return_to_latest,
         should_clear_draft, should_close_tui_for_key, submit, try_notify_desktop, tui_exit_action,
         tui_notification, App, Message, MessageRole, TuiExitAction, WorkerReply,
@@ -2855,7 +3000,7 @@ mod tests {
 
     #[test]
     fn long_draft_keeps_its_tail_visible() {
-        let (lines, _, _) = input_view("0123456789abcdef", 5, 2);
+        let (lines, _, _) = input_view("0123456789abcdef", 16, 5, 2);
         let rendered = lines
             .into_iter()
             .map(|line| line.to_string())
@@ -2867,8 +3012,100 @@ mod tests {
 
     #[test]
     fn cursor_advances_to_next_input_row() {
-        let (_, row, column) = input_view("12345", 5, 3);
+        let (_, row, column) = input_view("12345", 5, 5, 3);
         assert_eq!((row, column), (1, 0));
+    }
+
+    /// TUI bug #4 (2026-08-16): the draft had no cursor concept at all — Left/Right did nothing.
+    /// A cursor placed in the middle of a long draft now scrolls the window to keep it visible,
+    /// with an ellipsis on whichever side is actually clipped.
+    #[test]
+    fn a_cursor_in_the_middle_of_a_long_draft_scrolls_a_window_around_it_with_both_ellipses() {
+        let (lines, row, column) = input_view("0123456789abcdefghij", 10, 5, 2);
+        let rendered = lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(rendered.starts_with('…'));
+        assert!(rendered.ends_with('…'));
+        assert_eq!(rendered.chars().count(), 10);
+        // The cursor character itself must still land inside the rendered window.
+        assert!((row as usize * 5 + column as usize) < 10);
+    }
+
+    #[test]
+    fn a_cursor_at_the_very_start_shows_the_head_not_the_tail() {
+        let (lines, row, column) = input_view("0123456789abcdef", 0, 5, 2);
+        let rendered = lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        // The window's own last visible cell is sacrificed for the "more text below" ellipsis
+        // (same tradeoff the old tail-only version always made at the *start*), so only the head
+        // is asserted, not the exact clipped prefix.
+        assert!(!rendered.starts_with('…'), "cursor at 0 must show the head");
+        assert!(
+            rendered.ends_with('…'),
+            "tail must be clipped, draft doesn't fit"
+        );
+        assert_eq!((row, column), (0, 0));
+    }
+
+    #[test]
+    fn cursor_movement_and_editing_respect_the_cursor_position_not_just_the_end() {
+        // "aş cd": a(0) ş(1) ' '(2) c(3) d(4) — 5 chars, ş is a 2-byte UTF-8 char.
+        let mut input = "aş cd".to_owned();
+        let mut cursor = input.chars().count(); // 5, at the end
+
+        move_cursor_left(&input, &mut cursor);
+        move_cursor_left(&input, &mut cursor);
+        assert_eq!(cursor, 3); // sitting right before 'c'
+
+        // Backspace deletes *before* the cursor, not always the last character of the string.
+        backspace_at_cursor(&mut input, &mut cursor); // deletes the space at index 2
+        assert_eq!(input, "aşcd");
+        assert_eq!(cursor, 2);
+
+        // Delete removes the character *at* the cursor without moving it.
+        delete_forward_at_cursor(&mut input, &mut cursor); // deletes 'c' at index 2
+        assert_eq!(input, "aşd");
+        assert_eq!(cursor, 2);
+
+        move_cursor_right(&input, &mut cursor);
+        assert_eq!(cursor, 3); // now at the end
+        insert_char_at_cursor(&mut input, &mut cursor, 'z');
+        assert_eq!(input, "aşdz");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn ctrl_left_and_ctrl_right_jump_by_word_like_a_shells_readline() {
+        let input = "merhaba dünya güzel".to_owned();
+        let mut cursor = input.chars().count();
+
+        move_cursor_word_left(&input, &mut cursor);
+        assert_eq!(input.chars().skip(cursor).collect::<String>(), "güzel");
+
+        move_cursor_word_left(&input, &mut cursor);
+        assert_eq!(
+            input.chars().skip(cursor).collect::<String>(),
+            "dünya güzel"
+        );
+
+        move_cursor_word_right(&input, &mut cursor);
+        move_cursor_word_right(&input, &mut cursor);
+        assert_eq!(cursor, input.chars().count());
+    }
+
+    #[test]
+    fn pasting_in_the_middle_of_a_draft_inserts_at_the_cursor_not_the_end() {
+        let mut input = "merhaba dünya".to_owned();
+        let mut cursor = "merhaba".chars().count(); // right after "merhaba"
+        insert_pasted_text_at_cursor(&mut input, &mut cursor, " güzel");
+        assert_eq!(input, "merhaba güzel dünya");
+        assert_eq!(cursor, "merhaba güzel".chars().count());
     }
 
     #[test]
@@ -2933,17 +3170,36 @@ mod tests {
     #[test]
     fn pasted_multiline_text_stays_in_one_message_draft() {
         let mut input = "Merhaba ".to_owned();
-        append_pasted_text(&mut input, "dostum\n  nasılsın?");
+        let mut cursor = input.chars().count();
+        insert_pasted_text_at_cursor(&mut input, &mut cursor, "dostum\n  nasılsın?");
         assert_eq!(input, "Merhaba dostum nasılsın?");
+        assert_eq!(cursor, input.chars().count());
     }
 
     #[test]
     fn word_delete_keeps_utf8_boundaries_intact() {
         let mut input = "merhaba dünya güzel".to_owned();
-        delete_previous_word(&mut input);
+        let mut cursor = input.chars().count();
+        delete_previous_word(&mut input, &mut cursor);
         assert_eq!(input, "merhaba dünya");
-        delete_previous_word(&mut input);
+        assert_eq!(cursor, input.chars().count());
+        delete_previous_word(&mut input, &mut cursor);
         assert_eq!(input, "merhaba");
+        assert_eq!(cursor, input.chars().count());
+    }
+
+    /// TUI bug #3 (2026-08-16): Ctrl+Backspace previously always deleted from the *end* of the
+    /// whole draft, ignoring the cursor. Deleting a word from the middle must only remove that
+    /// word, leaving the text after the cursor untouched.
+    #[test]
+    fn word_delete_from_the_middle_of_a_draft_only_removes_that_word() {
+        let mut input = "merhaba dünya güzel".to_owned();
+        let mut cursor = "merhaba dünya".chars().count(); // right after "dünya"
+        delete_previous_word(&mut input, &mut cursor);
+        // "dünya" and its separating space are both gone; the space before "güzel" is untouched,
+        // so the cursor lands right after "merhaba" — matching what was left of the draft.
+        assert_eq!(input, "merhaba güzel");
+        assert_eq!(cursor, "merhaba".chars().count());
     }
 
     #[test]
@@ -3050,6 +3306,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = App::new("ready");
         app.input = "Türkçe taslak uzun olsa da imleç composer içinde kalmalı".into();
+        app.input_cursor = app.input.chars().count();
         app.messages.push(Message {
             role: MessageRole::User,
             content: "Önceki uzun tur ".repeat(14),
