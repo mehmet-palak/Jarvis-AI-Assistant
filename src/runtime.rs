@@ -1347,4 +1347,79 @@ impl Runtime {
         self.save_task(&task);
         Some(task)
     }
+
+    /// F4 "Patch apply transaction": applies one approved patch (workbench does the actual
+    /// snapshot/apply/rollback-on-apply-failure work — see `apply_approved_patch`) and records the
+    /// one audit event that pure library function has no way to write itself (it has no `Runtime`
+    /// to write to). This is the only place in the crate that turns a reviewed diff into a real
+    /// change on disk.
+    pub fn apply_coding_patch(
+        &mut self,
+        plan: &CodingPlan,
+        proposal: &PatchProposal,
+        approval: &ApprovedPatch,
+    ) -> Result<PatchApplication, String> {
+        let application = apply_approved_patch(plan, proposal, approval)?;
+        self.record_audit(AuditEvent::pending(
+            format!("patch-{}", proposal.proposal_id),
+            "coding.patch.applied",
+        ));
+        Ok(application)
+    }
+
+    /// F4 "Test/verifier runner" tied to "Isolated worker bootstrap": runs `plan.test_plan`
+    /// against the just-applied change (`cancel`: an unrelated, distinct mechanism from
+    /// `Runtime::cancel` above — that one stops a *task before its side effect starts*; this
+    /// `CancelFlag` stops an *already-running* isolated test process mid-flight, F4 "Gerçek
+    /// cancellation"). If every command that actually ran passed, the pre-apply snapshot is
+    /// discarded and the change stands. Otherwise — a real failure, or the run was cancelled —
+    /// the snapshot is restored automatically: the workspace ends up exactly as it was before the
+    /// patch, not silently left half-applied. Either outcome is audited under a distinct event
+    /// name so the audit trail alone tells the story without reading application logs.
+    pub fn run_coding_tests_and_finalize(
+        &mut self,
+        plan: &CodingPlan,
+        application: PatchApplication,
+        cancel: Option<&CancelFlag>,
+    ) -> (TestRunReport, Result<(), String>) {
+        let report = run_test_plan(&plan.workspace_root, &plan.test_plan, &plan.limits, cancel);
+        let cancelled = report
+            .ran
+            .iter()
+            .any(|run| run.stopped == Some(WorkerStopReason::UserCancelled));
+        let passed = report.all_ran_passed() && !cancelled;
+        let proposal_id = application.proposal_id.clone();
+        let finalize = if passed {
+            self.record_audit(AuditEvent::pending(
+                format!("patch-{proposal_id}"),
+                "coding.tests.passed",
+            ));
+            discard_patch_snapshot(application.snapshot)
+        } else {
+            self.record_audit(AuditEvent::pending(
+                format!("patch-{proposal_id}"),
+                if cancelled {
+                    "coding.tests.cancelled"
+                } else {
+                    "coding.tests.failed"
+                },
+            ));
+            let restore = restore_patch_snapshot(&application.snapshot);
+            let cleanup = discard_patch_snapshot(application.snapshot);
+            self.record_audit(AuditEvent::pending(
+                format!("patch-{proposal_id}"),
+                "coding.patch.rolled_back_after_test_outcome",
+            ));
+            match (restore, cleanup) {
+                (Err(restore_error), _) => Err(format!(
+                    "tests did not pass and automatic rollback also failed: {restore_error}"
+                )),
+                (_, Err(cleanup_error)) => Err(format!(
+                    "tests did not pass; workspace was restored but snapshot cleanup failed: {cleanup_error}"
+                )),
+                _ => Ok(()),
+            }
+        };
+        (report, finalize)
+    }
 }

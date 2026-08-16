@@ -43,6 +43,28 @@ pub trait ModelProvider: Send + Sync {
     fn model_id(&self) -> &str;
     fn complete(&self, prompt: &str) -> Result<ModelResponse, String>;
 
+    /// `complete()` alone has no way to say how much output a call actually needs — every real
+    /// caller shared one hardcoded budget. That budget (`LlamaServerProvider`: 8 tokens) is
+    /// correct for the short, fixed-vocabulary answers most callers want (a capability ID, a
+    /// single classification word) but silently truncates anything genuinely long — this was a
+    /// real, previously-undetected bug: `draft_coding_plan_with_provider`'s `TESTS:` line and
+    /// every full-file rewrite `draft_patch_with_provider` asks for were being cut off mid-word
+    /// in production (confirmed live against the real server, 16 Ağustos 2026 F4 completion
+    /// session), silently masked for the coding-plan case only by its own fallback to
+    /// `RepoOverview.suggested_test_commands`.
+    ///
+    /// Default implementation ignores `_max_tokens` and forwards to `complete` — every existing
+    /// short-answer call site (router, memory-intent classification, every test mock) is
+    /// unaffected by this method's addition. Only a provider that can actually vary its own
+    /// output budget per call needs to override it.
+    fn complete_with_budget(
+        &self,
+        prompt: &str,
+        _max_tokens: u16,
+    ) -> Result<ModelResponse, String> {
+        self.complete(prompt)
+    }
+
     /// Conversation output is data-only: it is never interpreted as a capability or tool call.
     fn converse(&self, conversation: &str) -> Result<ModelResponse, String> {
         self.complete(conversation)
@@ -395,12 +417,16 @@ impl ModelProvider for LlamaServerProvider {
     }
 
     fn complete(&self, prompt: &str) -> Result<ModelResponse, String> {
+        self.complete_with_budget(prompt, 8)
+    }
+
+    fn complete_with_budget(&self, prompt: &str, max_tokens: u16) -> Result<ModelResponse, String> {
         self.chat(
             vec![
-                json!({"role":"system","content":"Return exactly the requested classification text. Do not use tools."}),
+                json!({"role":"system","content":"Return exactly the requested output. Do not use tools."}),
                 json!({"role":"user","content":prompt}),
             ],
-            8,
+            max_tokens,
         )
     }
 

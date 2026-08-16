@@ -7,6 +7,7 @@ pub mod desktop_config;
 pub mod embedding;
 mod memory_intent;
 mod model;
+pub mod patch_generator;
 mod persistence;
 mod policy;
 mod profile;
@@ -43,6 +44,7 @@ pub use model::{
     LlamaCliProvider, LlamaServerProvider, ModelProvider, ModelResponse, ModelRuntimeState,
     RouteSource,
 };
+pub use patch_generator::draft_patch_with_provider;
 pub use persistence::SqliteStore;
 pub use policy::{
     authorize_pentest_target, classify, policy_for, validate_pentest_scope, validate_request,
@@ -61,9 +63,9 @@ pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{
     apply_approved_patch, approve_patch, create_patch_proposal, create_read_only_coding_plan,
-    discard_patch_snapshot, new_cancel_flag, restore_patch_snapshot, ApprovedPatch, CancelFlag,
-    CodingPlan, PatchApplication, PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork,
-    WorkerStopReason,
+    discard_patch_snapshot, generate_unified_diff_for_file, new_cancel_flag,
+    restore_patch_snapshot, ApprovedPatch, CancelFlag, CodingPlan, PatchApplication, PatchProposal,
+    PatchSnapshot, WorkerLimits, WorkerNetwork, WorkerStopReason,
 };
 pub(crate) use workspace::{
     chunk_workspace_text, configured_retrieval_candidate_multiplier, configured_rrf_k,
@@ -2941,6 +2943,147 @@ mod tests {
         assert!(messages
             .iter()
             .all(|message| !message.content.contains("expired")));
+    }
+
+    fn coding_patch_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-runtime-coding-patch-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("fixture root");
+        fs::write(root.join("demo.txt"), "old\n").expect("fixture file");
+        root
+    }
+
+    /// F4 "Patch apply transaction" wired to `Runtime`: the one path that turns a reviewed diff
+    /// into a real file change, and the one place that can audit it (the pure `workbench`
+    /// function has no `Runtime` to write an audit event to).
+    #[test]
+    fn applying_an_approved_coding_patch_actually_changes_the_file_and_is_audited() {
+        let root = coding_patch_fixture("apply");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let plan = create_read_only_coding_plan(
+            &root,
+            "demo.txt içeriğini değiştir",
+            vec![PathBuf::from("demo.txt")],
+            vec![],
+        )
+        .expect("valid plan");
+        let proposal = create_patch_proposal(
+            &plan,
+            "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            vec![PathBuf::from("demo.txt")],
+        )
+        .expect("valid proposal");
+        let approval = approve_patch(&proposal, true).expect("explicit approval");
+
+        let application = runtime
+            .apply_coding_patch(&plan, &proposal, &approval)
+            .expect("patch applies");
+        assert_eq!(fs::read_to_string(root.join("demo.txt")).unwrap(), "new\n");
+        assert!(runtime.audit.iter().any(|event| {
+            event.task_id == format!("patch-{}", proposal.proposal_id)
+                && event.event == "coding.patch.applied"
+        }));
+
+        discard_patch_snapshot(application.snapshot).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// F4 "Test/verifier runner" + rollback: a test command that genuinely fails must restore
+    /// the file to its pre-patch content automatically, not leave a half-applied change behind —
+    /// and the audit trail must say so under a distinct event name.
+    #[test]
+    fn a_failing_test_after_apply_rolls_back_the_file_and_is_audited() {
+        let root = coding_patch_fixture("rollback");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let plan = create_read_only_coding_plan(
+            &root,
+            "demo.txt içeriğini değiştir",
+            vec![PathBuf::from("demo.txt")],
+            vec!["python3 -m jarvis_test_module_that_does_not_exist".to_string()],
+        )
+        .expect("valid plan");
+        let proposal = create_patch_proposal(
+            &plan,
+            "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            vec![PathBuf::from("demo.txt")],
+        )
+        .expect("valid proposal");
+        let approval = approve_patch(&proposal, true).expect("explicit approval");
+        let application = runtime
+            .apply_coding_patch(&plan, &proposal, &approval)
+            .expect("patch applies");
+        assert_eq!(fs::read_to_string(root.join("demo.txt")).unwrap(), "new\n");
+
+        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
+        assert!(!report.all_ran_passed());
+        assert!(
+            finalize.is_ok(),
+            "rollback itself must succeed: {finalize:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("demo.txt")).unwrap(),
+            "old\n",
+            "a failing test must restore the file to its pre-patch content"
+        );
+        assert!(runtime.audit.iter().any(|event| {
+            event.task_id == format!("patch-{}", proposal.proposal_id)
+                && event.event == "coding.tests.failed"
+        }));
+        assert!(runtime.audit.iter().any(|event| {
+            event.task_id == format!("patch-{}", proposal.proposal_id)
+                && event.event == "coding.patch.rolled_back_after_test_outcome"
+        }));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The success mirror of the rollback test: every configured test command actually passing
+    /// keeps the change, discards the snapshot, and audits a distinct "passed" event.
+    #[test]
+    fn passing_tests_after_apply_keep_the_change_and_audit_passed() {
+        let root = coding_patch_fixture("keep");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let plan = create_read_only_coding_plan(
+            &root,
+            "demo.txt içeriğini değiştir",
+            vec![PathBuf::from("demo.txt")],
+            vec!["python3 -m this".to_string()],
+        )
+        .expect("valid plan");
+        let proposal = create_patch_proposal(
+            &plan,
+            "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            vec![PathBuf::from("demo.txt")],
+        )
+        .expect("valid proposal");
+        let approval = approve_patch(&proposal, true).expect("explicit approval");
+        let application = runtime
+            .apply_coding_patch(&plan, &proposal, &approval)
+            .expect("patch applies");
+
+        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
+        assert!(report.all_ran_passed());
+        assert!(finalize.is_ok());
+        assert_eq!(
+            fs::read_to_string(root.join("demo.txt")).unwrap(),
+            "new\n",
+            "a passing test must keep the applied change"
+        );
+        assert!(runtime.audit.iter().any(|event| {
+            event.task_id == format!("patch-{}", proposal.proposal_id)
+                && event.event == "coding.tests.passed"
+        }));
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

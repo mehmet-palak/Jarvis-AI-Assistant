@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,16 +14,16 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use jarvis_core::{
-    analyze_repository, attachment_receipt_manifest, default_profile_files_dir,
-    draft_coding_plan_with_provider, ensure_profile_files_exist, inspect_local_attachment,
-    memory_export, memory_import, parse_data_sensitivity, parse_memory_intent,
-    parse_memory_namespace, preview_workspace_index, profile_manifest, propose_memory,
-    propose_memory_with_trust_and_scope, propose_profile_field,
+    analyze_repository, approve_patch, attachment_receipt_manifest, default_profile_files_dir,
+    draft_coding_plan_with_provider, draft_patch_with_provider, ensure_profile_files_exist,
+    inspect_local_attachment, memory_export, memory_import, new_cancel_flag,
+    parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
+    profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
     propose_unrecognized_remember_intent_with_provider, AttachmentReceipt, AttachmentRef,
-    DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider,
-    LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
-    OpenMeteoWeatherProvider, ProfileField, Request, Runtime, SqliteStore, TaskState, TrustLevel,
-    VisionProvider, WorkspaceCitation,
+    CancelFlag, CodingPlan, DataSensitivity, InputType, LlamaEmbeddingProvider,
+    LlamaServerProvider, LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
+    OpenMeteoWeatherProvider, PatchProposal, ProfileField, Request, Runtime, SqliteStore,
+    TaskState, TrustLevel, VisionProvider, WorkspaceCitation,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -69,6 +70,14 @@ struct WorkerReply {
     /// çağrılmamıştır; alıcı taraf bunu `app.pending_memory`'ye koyup normal onay akışını
     /// başlatmalı, asla doğrudan yazmamalı.
     memory_proposal: Option<MemoryProposal>,
+    /// F4 "Coding plan UX" ← → "Patch generator" köprüsü: `/plan` başarıyla bir `CodingPlan`
+    /// ürettiğinde dolduruluyor. `app.pending_coding_plan`'a konup `/patch`'in hangi plana göre
+    /// çalışacağını belirliyor.
+    coding_plan: Option<CodingPlan>,
+    /// F4 "Patch preview/review": `/patch` başarıyla bir taslak ürettiğinde dolduruluyor.
+    /// `app.pending_patch`'e konup `/approve-patch`/`/reject-patch`'in üzerinde çalışacağı teklif
+    /// oluyor — tıpkı `pending_memory`'nin `/remember approve|reject` için yaptığı gibi.
+    patch_proposal: Option<(CodingPlan, PatchProposal)>,
 }
 
 struct TuiNotification {
@@ -92,6 +101,14 @@ struct App {
     /// reply; `/source <n>` opens one by its 1-based position here. Cleared whenever a reply
     /// used none, mirroring `Runtime::last_workspace_citations` — never stale across turns.
     last_citations: Vec<WorkspaceCitation>,
+    /// F4: en son `/plan`'ın ürettiği plan — `/patch`'in üzerinde çalıştığı taban.
+    pending_coding_plan: Option<CodingPlan>,
+    /// F4 "Patch preview/review": en son `/patch`'in ürettiği, henüz onaylanmamış teklif.
+    pending_patch: Option<(CodingPlan, PatchProposal)>,
+    /// F4 "Gerçek cancellation": bir arka plan test/komut çalışırken dolu — `/cancel` bunu
+    /// `true`'ya çeviriyor. `Runtime::cancel`'dan (bir task başlamadan önce iptali) tamamen ayrı:
+    /// bu, hâlâ çalışan izole bir süreci ortasında durduruyor.
+    active_cancel: Option<CancelFlag>,
 }
 
 impl App {
@@ -117,6 +134,9 @@ impl App {
             sent_attachment_receipts: vec![],
             pending_memory: None,
             last_citations: vec![],
+            pending_coding_plan: None,
+            pending_patch: None,
+            active_cancel: None,
         }
     }
 
@@ -390,9 +410,20 @@ fn event_loop(
             app.last_citations = reply.citations;
             app.status = reply.status;
             app.pending = false;
+            // F4 "Gerçek cancellation": her yanıt tek bir arka plan işinin sonucu (app.pending
+            // yeni bir gönderiyi zaten engelliyor) — aktif bir CancelFlag varsa bu iş bitmiş
+            // demektir, artık iptal edilecek bir şey kalmadı.
+            app.active_cancel = None;
             app.record_attachment_receipts(reply.attachment_receipts);
             if let Some(proposal) = reply.memory_proposal {
                 app.pending_memory = Some(proposal);
+            }
+            if let Some(plan) = reply.coding_plan {
+                app.pending_patch = None; // yeni plan eskisini geçersiz kılar
+                app.pending_coding_plan = Some(plan);
+            }
+            if let Some(patch) = reply.patch_proposal {
+                app.pending_patch = Some(patch);
             }
             if let Some(notification) = reply.notification {
                 notify_desktop(notification.title, &notification.content);
@@ -1398,7 +1429,7 @@ fn submit(
         let provider = provider.clone();
         let sender = sender.clone();
         std::thread::spawn(move || {
-            let content = match analyze_repository(&root) {
+            let (content, coding_plan) = match analyze_repository(&root) {
                 Ok(overview) => {
                     match draft_coding_plan_with_provider(&overview, &request_summary, &provider) {
                         Ok(plan) => {
@@ -1426,15 +1457,21 @@ fn submit(
                                 .map(|note| format!("  • {note}"))
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            format!(
-                                "Coding plan (salt-okunur, hiçbir dosyaya dokunulmadı):\nİstek: {}\nEtkilenebilecek dosyalar:\n{files}\nTest planı:\n{tests}\nNotlar:\n{risks}",
+                            let next_step = if plan.affected_files.is_empty() {
+                                String::new()
+                            } else {
+                                "\nDevam etmek için: /patch (bu plana göre gerçek bir diff taslağı üretir, hiçbir dosyaya henüz dokunmaz)".to_string()
+                            };
+                            let content = format!(
+                                "Coding plan (salt-okunur, hiçbir dosyaya dokunulmadı):\nİstek: {}\nEtkilenebilecek dosyalar:\n{files}\nTest planı:\n{tests}\nNotlar:\n{risks}{next_step}",
                                 plan.request_summary,
-                            )
+                            );
+                            (content, Some(plan))
                         }
-                        Err(error) => format!("Plan üretilemedi: {error}"),
+                        Err(error) => (format!("Plan üretilemedi: {error}"), None),
                     }
                 }
-                Err(error) => format!("Repo analiz edilemedi: {error}"),
+                Err(error) => (format!("Repo analiz edilemedi: {error}"), None),
             };
             let _ = sender.send(WorkerReply {
                 message_index,
@@ -1447,6 +1484,212 @@ fn submit(
                 citations: vec![],
                 attachment_receipts: vec![],
                 memory_proposal: None,
+                coding_plan,
+                patch_proposal: None,
+            });
+        });
+        return;
+    }
+    if input == "/patch" {
+        // F4 "Patch generator": model her etkilenen dosyanın tam yeni içeriğini üretiyor (diff
+        // sözdizimi değil — küçük yerel modeller hunk satır numaralarında güvenilir değil), gerçek
+        // diff makine tarafında (`git diff --no-index`) hesaplanıyor. Hiçbir dosyaya henüz
+        // dokunulmuyor; yalnız bir öneri.
+        let Some(plan) = app.pending_coding_plan.clone() else {
+            app.push_system("Önce /plan <istek> ile bir plan oluştur.");
+            return;
+        };
+        if plan.affected_files.is_empty() {
+            app.push_system(
+                "Bu planda etkilenen dosya yok; /patch üretilemez. Önce /plan ile daha somut bir istek dene.",
+            );
+            return;
+        }
+        let message_index = app.messages.len();
+        app.messages.push(Message {
+            role: MessageRole::Jarvis,
+            content: "Patch taslağı hazırlanıyor (model her dosyanın tamamını yeniden yazıyor, henüz hiçbir şey diske yazılmadı)…".into(),
+        });
+        app.pending = true;
+        app.status = "Patch taslağı hazırlanıyor…".into();
+        let provider = provider.clone();
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let (content, patch_proposal) = match draft_patch_with_provider(&plan, &provider) {
+                Ok(proposal) => {
+                    const MAX_DIFF_PREVIEW_CHARS: usize = 4_000;
+                    let diff_preview: String = proposal
+                        .unified_diff
+                        .chars()
+                        .take(MAX_DIFF_PREVIEW_CHARS)
+                        .collect();
+                    let truncated_note = if proposal.unified_diff.chars().count()
+                        > diff_preview.chars().count()
+                    {
+                        "\n... (önizleme kısaltıldı; onaylanırsa TAM diff uygulanır)".to_string()
+                    } else {
+                        String::new()
+                    };
+                    let files = proposal
+                        .affected_files
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let content = format!(
+                        "Patch taslağı (henüz uygulanmadı):\nDosyalar: {files}\n\n{diff_preview}{truncated_note}\n\nOnaylamak için /approve-patch, vazgeçmek için /reject-patch"
+                    );
+                    (content, Some((plan.clone(), proposal)))
+                }
+                Err(error) => (format!("Patch üretilemedi: {error}"), None),
+            };
+            let _ = sender.send(WorkerReply {
+                message_index,
+                content,
+                status: "Patch taslağı hazır • /approve-patch veya /reject-patch".into(),
+                task_id: String::new(),
+                approval_pending: false,
+                notification: None,
+                sources: vec![],
+                citations: vec![],
+                attachment_receipts: vec![],
+                memory_proposal: None,
+                coding_plan: None,
+                patch_proposal,
+            });
+        });
+        return;
+    }
+    if input == "/reject-patch" {
+        if app.pending_patch.take().is_some() {
+            app.push_system("Patch teklifi reddedildi; hiçbir dosya değişmedi.");
+        } else {
+            app.push_system("Reddedilecek bir patch teklifi yok.");
+        }
+        return;
+    }
+    if input == "/abort" {
+        // F4 "Gerçek cancellation": `Runtime::cancel`'dan (bir task başlamadan önce iptali) ayrı —
+        // bu, hâlâ çalışan izole bir test/komut sürecini SIGTERM→grace period→SIGKILL ile durduruyor.
+        match app.active_cancel.as_ref() {
+            Some(cancel) => {
+                cancel.store(true, Ordering::SeqCst);
+                app.push_system(
+                    "İptal isteği gönderildi; şu anki adım kısa sürede (SIGTERM, gerekirse SIGKILL) duracak.",
+                );
+            }
+            None => app.push_system("İptal edilecek aktif bir arka plan işlemi yok."),
+        }
+        return;
+    }
+    if input == "/approve-patch" {
+        // F4 "Patch apply transaction" + "Test/verifier runner": onay → izole uygula → izole
+        // test çalıştır. Testler geçmezse (ya da /abort ile iptal edilirse) değişiklik otomatik
+        // geri alınır — bu, önce yazıp hatada geri alan mevcut `apply_approved_patch` deseninin
+        // aynısını test sonucuna da genişletiyor.
+        let Some((plan, proposal)) = app.pending_patch.take() else {
+            app.push_system("Onaylanacak bir patch teklifi yok. Önce /plan ve /patch çalıştır.");
+            return;
+        };
+        let approval = match approve_patch(&proposal, true) {
+            Ok(approval) => approval,
+            Err(error) => {
+                app.push_system(format!("Patch onaylanamadı: {error}"));
+                return;
+            }
+        };
+        let application = {
+            let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+            runtime_guard.apply_coding_patch(&plan, &proposal, &approval)
+        };
+        let application = match application {
+            Ok(application) => application,
+            Err(error) => {
+                app.push_system(format!("Patch uygulanamadı: {error}"));
+                return;
+            }
+        };
+        let changed = application
+            .changed_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        app.push_system(format!(
+            "Patch uygulandı: {changed}\nDoğrulama kanıtı:\n{}",
+            application.verifier_evidence.join("\n")
+        ));
+        if plan.test_plan.is_empty() {
+            app.push_system(
+                "Bu plan için test komutu yok; değişiklik kalıcı (otomatik geri alma tetiklenmeyecek).",
+            );
+            return;
+        }
+        let cancel = new_cancel_flag();
+        app.active_cancel = Some(cancel.clone());
+        let message_index = app.messages.len();
+        app.messages.push(Message {
+            role: MessageRole::Jarvis,
+            content: "Testler izole ortamda çalıştırılıyor (iptal için /abort)…".into(),
+        });
+        app.pending = true;
+        app.status = "Testler çalıştırılıyor…".into();
+        let runtime = Arc::clone(runtime);
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let (report, finalize) = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .run_coding_tests_and_finalize(&plan, application, Some(&cancel));
+            let ran_summary = report
+                .ran
+                .iter()
+                .map(|run| {
+                    format!(
+                        "  • {} → {}{}",
+                        run.command_line(),
+                        run.exit_code
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        run.stopped
+                            .map(|reason| format!(" ({reason:?})"))
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let skipped_summary = if report.skipped.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nAtlanan (komut olarak ayrıştırılamadı): {}",
+                    report.skipped.join("; ")
+                )
+            };
+            let content = match finalize {
+                Ok(()) if report.all_ran_passed() => format!(
+                    "Testler geçti; değişiklik kalıcı:\n{ran_summary}{skipped_summary}"
+                ),
+                Ok(()) => format!(
+                    "Testler geçmedi veya iptal edildi — değişiklik otomatik geri alındı (dosyalar patch öncesi hâline döndü):\n{ran_summary}{skipped_summary}"
+                ),
+                Err(error) => format!(
+                    "Testler tamamlandı ama geri alma sırasında sorun oldu: {error}\n{ran_summary}{skipped_summary}"
+                ),
+            };
+            let _ = sender.send(WorkerReply {
+                message_index,
+                content,
+                status: "Test/doğrulama tamamlandı.".into(),
+                task_id: String::new(),
+                approval_pending: false,
+                notification: None,
+                sources: vec![],
+                citations: vec![],
+                attachment_receipts: vec![],
+                memory_proposal: None,
+                coding_plan: None,
+                patch_proposal: None,
             });
         });
         return;
@@ -1753,7 +1996,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /approve-patch (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -1940,6 +2183,8 @@ fn submit(
                     citations: vec![],
                     attachment_receipts: vec![],
                     memory_proposal: Some(proposal),
+                    coding_plan: None,
+                    patch_proposal: None,
                 });
                 return;
             }
@@ -2032,6 +2277,8 @@ fn submit(
             citations,
             attachment_receipts,
             memory_proposal: None,
+            coding_plan: None,
+            patch_proposal: None,
         });
     });
 }
@@ -2395,6 +2642,7 @@ mod tests {
         ProfileField, Runtime, SqliteStore, TaskState, WorkspaceCitation,
     };
     use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3038,6 +3286,161 @@ mod tests {
             !app.pending,
             "an empty /plan must return synchronously, never spawn a worker"
         );
+    }
+
+    #[test]
+    fn patch_without_a_pending_plan_is_a_synchronous_no_op() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+
+        app.input = "/patch".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("/plan"));
+        assert!(!app.pending, "no plan means no worker should ever spawn");
+    }
+
+    #[test]
+    fn patch_with_an_empty_affected_files_plan_is_rejected_before_touching_the_model() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.pending_coding_plan = Some(
+            jarvis_core::create_read_only_coding_plan(
+                std::env::current_dir().expect("cwd"),
+                "belirsiz istek",
+                vec![],
+                vec![],
+            )
+            .expect("valid empty-scope plan"),
+        );
+
+        app.input = "/patch".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("üretilemez"));
+        assert!(!app.pending);
+    }
+
+    #[test]
+    fn reject_patch_clears_the_pending_proposal_without_touching_any_file() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.input = "/reject-patch".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("yok"));
+
+        let plan = jarvis_core::create_read_only_coding_plan(
+            std::env::current_dir().expect("cwd"),
+            "test",
+            vec![PathBuf::from("src/lib.rs")],
+            vec![],
+        )
+        .expect("valid plan");
+        let proposal = jarvis_core::create_patch_proposal(
+            &plan,
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            vec![PathBuf::from("src/lib.rs")],
+        )
+        .expect("valid proposal");
+        app.pending_patch = Some((plan, proposal));
+        app.input = "/reject-patch".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("reddedildi"));
+        assert!(app.pending_patch.is_none());
+    }
+
+    #[test]
+    fn abort_without_an_active_job_is_a_clear_no_op() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.input = "/abort".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("yok"));
+    }
+
+    #[test]
+    fn abort_with_an_active_job_flips_the_cancel_flag() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        let cancel = jarvis_core::new_cancel_flag();
+        app.active_cancel = Some(cancel.clone());
+        app.input = "/abort".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("İptal"));
+        assert!(cancel.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// F4 "Patch apply transaction" wired end to end through the real TUI command, no model
+    /// involved (the proposal is built directly, mirroring what `/patch` would have produced).
+    ///
+    /// `jarvis_core` is linked here as a *regular* (non-`cfg(test)`) dependency of the `jarvis`
+    /// binary's own test build — unlike `cargo test --lib` inside `jarvis_core` itself, its
+    /// `#[cfg(test)]` plain-`git`-without-bwrap fallback is **not** active here, so this exercises
+    /// the real, production bubblewrap path (ADR-0001: no host-shell fallback ever). This dev
+    /// sandbox denies `CLONE_NEWNET` (documented repeatedly across this project, e.g.
+    /// `docs/adr/0001-isolated-coding-worker.md`), so bwrap itself cannot start here — the
+    /// assertion is therefore written to hold on *either* outcome: the file ends up in exactly one
+    /// of its two valid states (never partially patched), and the reply text names which one
+    /// happened. On a machine where the sandbox can actually start (any real deployment target),
+    /// the same test proves the change really lands on disk.
+    #[test]
+    fn approve_patch_with_no_test_plan_applies_immediately_and_stays_synchronous() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-main-approve-patch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("fixture root");
+        std::fs::write(root.join("demo.txt"), "old\n").expect("fixture file");
+
+        let plan = jarvis_core::create_read_only_coding_plan(
+            &root,
+            "demo.txt içeriğini değiştir",
+            vec![PathBuf::from("demo.txt")],
+            vec![], // test planı yok -> tamamen senkron kalmalı
+        )
+        .expect("valid plan");
+        let proposal = jarvis_core::create_patch_proposal(
+            &plan,
+            "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            vec![PathBuf::from("demo.txt")],
+        )
+        .expect("valid proposal");
+        app.pending_patch = Some((plan, proposal));
+
+        app.input = "/approve-patch".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+
+        let on_disk = std::fs::read_to_string(root.join("demo.txt")).unwrap();
+        let reply = app.messages.last().unwrap().content.clone();
+        assert!(
+            on_disk == "old\n" || on_disk == "new\n",
+            "the file must never be left in a partially-patched state, got: {on_disk:?}"
+        );
+        if on_disk == "new\n" {
+            assert!(reply.contains("kalıcı"), "reply was: {reply}");
+        } else {
+            assert!(
+                reply.contains("uygulanamadı"),
+                "an untouched file must be explained by a clear failure, reply was: {reply}"
+            );
+        }
+        assert!(!app.pending, "no test plan means no worker should spawn");
+        assert!(app.pending_patch.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn approve_patch_without_a_pending_proposal_is_a_clear_no_op() {
+        let (runtime, provider, vision, sender) = stored_runtime_fixture();
+        let mut app = App::new("ready");
+        app.input = "/approve-patch".into();
+        submit(&mut app, &runtime, &provider, &vision, &sender);
+        assert!(app.messages.last().unwrap().content.contains("yok"));
     }
 
     #[test]

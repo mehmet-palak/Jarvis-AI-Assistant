@@ -176,8 +176,11 @@ Repository languages: {languages}. \
 Repository files:\n{file_list}{truncated_note}\n\n\
 Change request: {request_summary}"
     );
+    // 300 tokens: comfortably covers a `FILES:` line naming up to 12 real paths plus a `TESTS:`
+    // sentence. `complete()`'s default 8-token budget (tuned for router/classification answers)
+    // used to silently truncate this — confirmed live against the real model, 16 Ağustos 2026.
     let response = provider
-        .complete(&prompt)
+        .complete_with_budget(&prompt, 300)
         .map_err(|error| format!("coding plan draft failed: {error}"))?;
 
     let mut affected_files: Vec<PathBuf> = Vec::new();

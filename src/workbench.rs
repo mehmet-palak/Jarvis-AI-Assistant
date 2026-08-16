@@ -317,6 +317,98 @@ pub fn discard_patch_snapshot(snapshot: PatchSnapshot) -> Result<(), String> {
         .map_err(|error| format!("patch snapshot cleanup failed: {error}"))
 }
 
+/// F4 "Patch generator": computes the *real* unified diff for one file deterministically, from
+/// two full-content strings, via `git diff --no-index`. The reason this exists at all — a model
+/// is not asked to emit diff syntax itself. Small local models are unreliable at exact hunk
+/// line-number bookkeeping; asking for the *whole new file content* instead and having the
+/// machine compute the true diff removes an entire class of "the model's diff doesn't apply"
+/// failures, at the cost of a bigger prompt/response per file (an accepted trade for this
+/// project's file-size ceiling, see `MAX_WORKSPACE_DOCUMENT_BYTES`).
+///
+/// Neither string ever touches the real workspace or any sandbox: both are written to an
+/// ephemeral scratch directory removed before this returns, and `git diff --no-index` only reads
+/// its own two temporary files — there is nothing here for an isolation boundary to add, unlike
+/// `run_git_apply`, which is the one place a diff actually lands on the real workspace.
+/// `Ok(None)` means the two contents are identical (a legitimate "no change needed for this
+/// file" outcome, not an error).
+pub fn generate_unified_diff_for_file(
+    relative_path: &Path,
+    old_content: &str,
+    new_content: &str,
+) -> Result<Option<String>, String> {
+    validate_workspace_relative_path(relative_path)?;
+    if old_content == new_content {
+        return Ok(None);
+    }
+    let git = Path::new("/usr/bin/git");
+    if !git.is_file() {
+        return Err("patch generator requires /usr/bin/git".into());
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let scratch_root = std::env::temp_dir().join(format!("jarvis-diffgen-{nonce}"));
+    let relative_a = Path::new("a").join(relative_path);
+    let relative_b = Path::new("b").join(relative_path);
+    let old_path = scratch_root.join(&relative_a);
+    let new_path = scratch_root.join(&relative_b);
+    let write_scratch_file = |path: &Path, content: &str| -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "diff scratch path has no parent".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("diff scratch directory cannot be created: {error}"))?;
+        fs::write(path, content)
+            .map_err(|error| format!("diff scratch file cannot be written: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Both sides must share one file mode, or `git diff` emits an "old mode"/"new mode"
+            // line that `diff_header_files` (deliberately) treats as an unsupported diff shape.
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+        }
+        Ok(())
+    };
+    if let Err(error) = write_scratch_file(&old_path, old_content) {
+        let _ = fs::remove_dir_all(&scratch_root);
+        return Err(error);
+    }
+    if let Err(error) = write_scratch_file(&new_path, new_content) {
+        let _ = fs::remove_dir_all(&scratch_root);
+        return Err(error);
+    }
+    let output = Command::new(git)
+        .current_dir(&scratch_root)
+        .arg("diff")
+        .arg("--no-index")
+        .arg("--no-prefix")
+        .arg("--")
+        .arg(&relative_a)
+        .arg(&relative_b)
+        .output();
+    let _ = fs::remove_dir_all(&scratch_root);
+    let output =
+        output.map_err(|error| format!("patch generator could not run git diff: {error}"))?;
+    // `git diff --no-index` uses exit code 1 to mean "a diff was produced" (not an error) and 0
+    // to mean "no difference" — only anything else is a genuine failure.
+    match output.status.code() {
+        Some(0) => Ok(None),
+        Some(1) => {
+            let diff = String::from_utf8_lossy(&output.stdout).into_owned();
+            if diff.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(diff))
+            }
+        }
+        _ => Err(format!(
+            "patch generator's git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
+    }
+}
+
 pub fn validate_coding_plan(plan: &CodingPlan) -> Result<(), String> {
     if plan.schema_version != 1 {
         return Err("unsupported coding plan schema version".into());
@@ -773,6 +865,45 @@ fn hash_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F4 "Patch generator": two full-content strings must produce a diff whose header exactly
+    /// matches what `validate_patch_proposal`/`diff_header_files` expect — a single `a/<path>`,
+    /// `b/<path>` pair with the same relative path on both sides, no rename/mode-change noise.
+    #[test]
+    fn generated_diff_has_exactly_the_header_shape_the_validator_expects() {
+        let relative_path = PathBuf::from("src/example.rs");
+        let diff = generate_unified_diff_for_file(&relative_path, "old\n", "new\n")
+            .expect("git diff must run")
+            .expect("contents differ, a diff must be produced");
+        assert!(diff.starts_with("diff --git a/src/example.rs b/src/example.rs"));
+        assert!(diff.contains("-old"));
+        assert!(diff.contains("+new"));
+        // The generated diff must itself pass the same validation a model-authored diff would.
+        let plan = create_read_only_coding_plan(
+            std::env::current_dir().expect("workspace cwd"),
+            "Generated diff smoke test.",
+            vec![relative_path.clone()],
+            vec![],
+        )
+        .expect("valid plan");
+        let proposal = create_patch_proposal(&plan, diff, vec![relative_path])
+            .expect("a machine-generated diff must satisfy the same validator a model's would");
+        assert_eq!(
+            proposal.affected_files,
+            vec![PathBuf::from("src/example.rs")]
+        );
+    }
+
+    /// Identical contents must not be reported as a diff at all — this is what lets a caller skip
+    /// a file the model decided needs no change, rather than trying (and failing) to build an
+    /// empty diff for it.
+    #[test]
+    fn identical_contents_produce_no_diff() {
+        let relative_path = PathBuf::from("src/unchanged.rs");
+        let result = generate_unified_diff_for_file(&relative_path, "same\n", "same\n")
+            .expect("git diff must run even with no difference");
+        assert!(result.is_none());
+    }
 
     /// F4 "Resource kontrolü": `WorkerLimits.max_runtime_seconds` bir alan olarak vardı ama
     /// hiçbir yerde okunmuyordu — gerçek bir watchdog yoktu. `sleep` gerçekten `git apply`'den
