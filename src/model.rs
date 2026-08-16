@@ -480,21 +480,40 @@ pub fn normalize_llama_cli_output(raw: &str) -> String {
         .into()
 }
 
+/// `recent_history`: the last few conversation turns *before* the current one (never including
+/// it — the caller passes the current turn separately as `input`), for disambiguation only. Kept
+/// deliberately short (the caller passes at most a couple of prior messages) — this prompt is
+/// re-sent on every ordinary turn, so its cost is paid every time, unlike the conversational
+/// reply itself which is now skipped whenever routing succeeds (16 Ağustos 2026 latency fix).
 pub fn route_with_provider(
     input: &str,
+    recent_history: &[ConversationMessage],
     registry: &CapabilityRegistry,
     provider: &dyn ModelProvider,
 ) -> IntentResolution {
     // This is deliberately a model proposal, not a phrase-to-capability table. The proposal is
     // accepted only when it is an exact member of the local registry; Policy and Verifier still
     // govern the resulting task. Ordinary conversation therefore remains ordinary model chat.
+    let history_context = if recent_history.is_empty() {
+        String::new()
+    } else {
+        let rendered = recent_history
+            .iter()
+            .map(|message| format!("[{}] {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            " Recent conversation, for disambiguation only — never itself a request to route:\n{rendered}\n"
+        )
+    };
     let prompt = format!(
         "/no_think You are a local capability router. Output exactly one allowed capability ID or UNKNOWN, with no explanation. \
 Choose a capability only when the user clearly asks for its current local data or controlled local action. \
+A question that only asks whether something already happened, exists, or is currently true (for example using \"mı/mi/mu/mü\", \"did you\", \"have you\") is not itself a command to perform that action — route it UNKNOWN unless it also clearly asks for current local data or action. \
 For greetings, open-ended conversation, general knowledge, advice, creative work, coding discussion, or any ambiguous request, output UNKNOWN. \
 Treat an explicit request for current computer or system health metrics (CPU, RAM, disk, network, uptime)—including Turkish wording asking what the system status is, or English wording explicitly asking whether the computer or system is healthy—as system.health. \
 A casual check that JARVIS itself is present, listening, awake, or okay (for example: \"uyanık mısın\", \"orada mısın\", \"iyi misin\", \"are you there\", \"are you okay\") is ordinary conversation, not system.health. \
-Never infer a capability from one word alone. Allowed: {}. User request: {}",
+Never infer a capability from one word alone.{history_context} Allowed: {}. User request: {}",
         MODEL_ROUTABLE_CAPABILITIES.join(", "),
         input.trim()
     );

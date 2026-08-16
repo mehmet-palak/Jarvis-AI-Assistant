@@ -1015,8 +1015,15 @@ impl Runtime {
             // alone for the router call on this CPU-only 8B model) whenever a capability is
             // actually routed, with no change in behavior for ordinary chat (still needs both the
             // route check and the reply).
+            // `chat_history` already includes the current turn (appended at the top of this
+            // function) — exclude it here and pass only what came *before*, kept to the last
+            // couple of messages so the router's per-turn cost stays bounded.
+            let history_end = self.chat_history.len().saturating_sub(1);
+            let history_start = history_end.saturating_sub(2);
+            let recent_history = &self.chat_history[history_start..history_end];
             let routed = Some(route_with_provider(
                 &request.content,
+                recent_history,
                 &self.registry,
                 provider,
             ))

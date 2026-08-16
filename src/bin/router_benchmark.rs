@@ -41,7 +41,7 @@ fn main() {
     let mut elapsed_ms = Vec::new();
     for case in &cases {
         let started = Instant::now();
-        let route = route_with_provider(case.input, &registry, &provider);
+        let route = route_with_provider(case.input, &[], &registry, &provider);
         let elapsed = started.elapsed().as_millis();
         let ok = route.capability == case.expected && route.source == RouteSource::LocalModel;
         passed += usize::from(ok);

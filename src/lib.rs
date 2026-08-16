@@ -1856,7 +1856,7 @@ mod tests {
     fn router_prompt_excludes_a_casual_are_you_there_check_from_system_health() {
         let runtime = Runtime::new();
         let provider = PromptCapturingProvider::default();
-        route_with_provider("jarvis uyanık mısın", &runtime.registry, &provider);
+        route_with_provider("jarvis uyanık mısın", &[], &runtime.registry, &provider);
         let prompt = provider.captured_prompt.lock().expect("test lock").clone();
         assert!(prompt.contains("jarvis uyanık mısın"));
         assert!(prompt.contains("uyanık mısın"), "prompt must give the model a concrete example of a casual check that must NOT route to system.health");
@@ -1865,11 +1865,127 @@ mod tests {
         assert!(prompt.contains("Turkish wording asking what the system status is"));
     }
 
+    /// İkinci gerçek bug, aynı tarama sırasında bulundu (16 Ağustos 2026): "bugün bir not aldın
+    /// mı" (bir soru, geçmişe dair) gerçek modelle yanlışlıkla `note.create`e yönlendiriliyordu.
+    /// Gerçek modelle doğrulandı: bu genel kural eklendikten sonra `UNKNOWN` kalıyor, `"not al:
+    /// ..."` gibi asıl komutlar hâlâ `note.create`e gidiyor (regresyon yok, bkz.
+    /// DEVELOPMENT_PLAN.md).
+    #[test]
+    fn router_prompt_treats_a_past_tense_question_as_conversation_not_a_command() {
+        let runtime = Runtime::new();
+        let provider = PromptCapturingProvider::default();
+        route_with_provider("bugün bir not aldın mı", &[], &runtime.registry, &provider);
+        let prompt = provider.captured_prompt.lock().expect("test lock").clone();
+        assert!(prompt.contains("is not itself a command to perform that action"));
+    }
+
+    /// Kullanıcının 16 Ağustos 2026'da istediği yapısal iyileştirme: router artık mevcut turdan
+    /// önceki birkaç mesajı da (yalnız belirsizliği gidermek için, kendisi asla bir yönlendirme
+    /// isteği sayılmadan) görüyor. Boşken hiçbir ek token/gecikme maliyeti eklenmiyor.
+    #[test]
+    fn router_prompt_includes_recent_history_only_when_present() {
+        let runtime = Runtime::new();
+
+        let provider = PromptCapturingProvider::default();
+        route_with_provider("bu ne demek", &[], &runtime.registry, &provider);
+        let empty_prompt = provider.captured_prompt.lock().expect("test lock").clone();
+        assert!(
+            !empty_prompt.contains("Recent conversation"),
+            "no history must add no extra prompt content at all"
+        );
+
+        let provider = PromptCapturingProvider::default();
+        let history = vec![
+            ConversationMessage {
+                role: "user",
+                content: "projemdeki dosyaları gözden geçirebilir misin".into(),
+            },
+            ConversationMessage {
+                role: "assistant",
+                content: "Elbette, hangi klasörü inceleyeyim?".into(),
+            },
+        ];
+        route_with_provider("bu ne demek", &history, &runtime.registry, &provider);
+        let prompt_with_history = provider.captured_prompt.lock().expect("test lock").clone();
+        assert!(prompt_with_history.contains("Recent conversation"));
+        assert!(prompt_with_history.contains("gözden geçirebilir misin"));
+        assert!(prompt_with_history.contains("Elbette, hangi klasörü inceleyeyim?"));
+    }
+
+    /// Captures every prompt `complete()` (the router's call) receives, in order, without ever
+    /// going through it for `converse_messages` (that path returns a fixed reply directly) — so
+    /// the captured list is only ever router prompts, never conversational ones.
+    #[derive(Debug, Default)]
+    struct RouterHistoryCapturingProvider {
+        captured_route_prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ModelProvider for RouterHistoryCapturingProvider {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "router-history-capturing"
+        }
+        fn complete(&self, prompt: &str) -> Result<ModelResponse, String> {
+            self.captured_route_prompts
+                .lock()
+                .expect("test lock")
+                .push(prompt.to_string());
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: "UNKNOWN".into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+        fn converse_messages(
+            &self,
+            _messages: &[ConversationMessage],
+        ) -> Result<ModelResponse, String> {
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: "sohbet yanıtı".into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
+    /// Kullanıcının 16 Ağustos 2026'da istediği yapısal iyileştirmenin uçtan uca kanıtı: ikinci
+    /// bir sohbet turunda router artık ilk turu bağlam olarak görüyor, ama kendi güncel mesajını
+    /// asla "geçmiş" gibi ikinci kez görmüyor (yalnız "User request" olarak, bir kez).
+    #[test]
+    fn runtime_passes_only_the_preceding_turn_as_router_context_never_the_current_one() {
+        let mut runtime = Runtime::new();
+        let provider = RouterHistoryCapturingProvider::default();
+
+        runtime.handle_with_provider(request("hist-1", "ilk mesaj"), &provider);
+        runtime.handle_with_provider(request("hist-2", "bu ne demek"), &provider);
+
+        let prompts = provider.captured_route_prompts.lock().expect("test lock");
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            !prompts[0].contains("Recent conversation"),
+            "the very first turn has no prior history to show"
+        );
+        assert!(prompts[1].contains("Recent conversation"));
+        assert!(prompts[1].contains("ilk mesaj"));
+        assert!(prompts[1].contains("sohbet yanıtı"));
+        assert!(
+            !prompts[1].contains("[user] bu ne demek"),
+            "the current turn must appear only once, as the request being routed — not duplicated into its own history"
+        );
+    }
+
     #[test]
     fn free_text_routing_is_model_proposed_not_keyword_matched() {
         let runtime = Runtime::new();
         let route = route_with_provider(
             "saat kelimesini şiirde kullan",
+            &[],
             &runtime.registry,
             &FixedModelProvider("UNKNOWN"),
         );
@@ -1878,6 +1994,7 @@ mod tests {
 
         let route = route_with_provider(
             "Can you tell me the current local time?",
+            &[],
             &runtime.registry,
             &FixedModelProvider("system.time"),
         );
@@ -2353,6 +2470,7 @@ mod tests {
         let registry = CapabilityRegistry::baseline();
         let route = route_with_provider(
             "current value please",
+            &[],
             &registry,
             &FixedModelProvider("system.time"),
         );
@@ -2361,6 +2479,7 @@ mod tests {
 
         let rejected = route_with_provider(
             "bilinmeyen",
+            &[],
             &registry,
             &FixedModelProvider("shell.exec --unsafe"),
         );
