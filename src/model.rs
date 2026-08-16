@@ -492,7 +492,8 @@ pub fn route_with_provider(
         "/no_think You are a local capability router. Output exactly one allowed capability ID or UNKNOWN, with no explanation. \
 Choose a capability only when the user clearly asks for its current local data or controlled local action. \
 For greetings, open-ended conversation, general knowledge, advice, creative work, coding discussion, or any ambiguous request, output UNKNOWN. \
-Treat a request for the current local computer or JARVIS state—including Turkish wording asking what the system status is, or English wording asking whether the computer is healthy—as system.health. \
+Treat an explicit request for current computer or system health metrics (CPU, RAM, disk, network, uptime)—including Turkish wording asking what the system status is, or English wording explicitly asking whether the computer or system is healthy—as system.health. \
+A casual check that JARVIS itself is present, listening, awake, or okay (for example: \"uyanık mısın\", \"orada mısın\", \"iyi misin\", \"are you there\", \"are you okay\") is ordinary conversation, not system.health. \
 Never infer a capability from one word alone. Allowed: {}. User request: {}",
         MODEL_ROUTABLE_CAPABILITIES.join(", "),
         input.trim()

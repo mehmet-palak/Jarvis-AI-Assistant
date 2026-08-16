@@ -1815,6 +1815,56 @@ mod tests {
         );
     }
 
+    /// Captures the exact prompt `route_with_provider` sends, so router prompt wording can be
+    /// asserted on directly. The actual routing *decision* depends on the real local model (not
+    /// reproducible offline); this only proves the prompt text itself carries the intended
+    /// instruction — the decision was separately verified live against the real `llama-server`
+    /// (bkz. DEVELOPMENT_PLAN.md).
+    #[derive(Debug, Default)]
+    struct PromptCapturingProvider {
+        captured_prompt: std::sync::Mutex<String>,
+    }
+
+    impl ModelProvider for PromptCapturingProvider {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "prompt-capturing"
+        }
+        fn complete(&self, prompt: &str) -> Result<ModelResponse, String> {
+            *self.captured_prompt.lock().expect("test lock") = prompt.to_string();
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: "UNKNOWN".into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
+    /// Gerçek bug, kullanıcı bildirdi (16 Ağustos 2026): "jarvis uyanık mısın" gibi sıradan bir
+    /// "oradasın/dinliyor musun" kontrolü, gerçek modelle `system.health`e yönlendiriliyordu —
+    /// kullanıcı sohbet beklerken CPU/RAM/disk raporu alıyordu. Kök neden gerçek `llama-server`'a
+    /// karşı `curl` ile doğrulandı: eski router prompt'u "JARVIS state" ifadesini system.health
+    /// tetikleyicisi olarak sayıyordu, model bunu "uyanık mısın" gibi rastgele bir varlık
+    /// kontrolüyle karıştırıyordu. Düzeltilmiş prompt hem eski/doğru davranışı ("sistem durumu
+    /// nasıl" → system.health) hem yeni düzeltmeyi ("uyanık mısın" → sıradan sohbet) gerçek
+    /// modelle tek tek doğrulandı (bkz. DEVELOPMENT_PLAN.md).
+    #[test]
+    fn router_prompt_excludes_a_casual_are_you_there_check_from_system_health() {
+        let runtime = Runtime::new();
+        let provider = PromptCapturingProvider::default();
+        route_with_provider("jarvis uyanık mısın", &runtime.registry, &provider);
+        let prompt = provider.captured_prompt.lock().expect("test lock").clone();
+        assert!(prompt.contains("jarvis uyanık mısın"));
+        assert!(prompt.contains("uyanık mısın"), "prompt must give the model a concrete example of a casual check that must NOT route to system.health");
+        assert!(prompt.contains("ordinary conversation, not system.health"));
+        // The real system-status routing this line was added for (F2) must still be requested.
+        assert!(prompt.contains("Turkish wording asking what the system status is"));
+    }
+
     #[test]
     fn free_text_routing_is_model_proposed_not_keyword_matched() {
         let runtime = Runtime::new();
