@@ -69,6 +69,7 @@ pub use workbench::{
     discard_patch_snapshot, generate_unified_diff_for_file, new_cancel_flag,
     restore_patch_snapshot, scope_patch_proposal_to_files, ApprovedPatch, CancelFlag, CodingPlan,
     PatchApplication, PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork, WorkerStopReason,
+    WorkspaceWriteMode,
 };
 pub use workflow::{
     describe_workflow, run_workflow, StepOutcomeKind, WorkflowStep, WorkflowStepOutcome,

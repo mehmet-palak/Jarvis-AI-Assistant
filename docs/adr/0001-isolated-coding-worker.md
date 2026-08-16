@@ -135,7 +135,17 @@ takasa itiyor (canlı doğrulandı). Gerçek kernel testiyle kanıtlandı (`cgro
 enforced_by_the_real_kernel_when_available`): sayfalara gerçekten dokunan bir süreç, sınırın
 üstünde, gerçekten `SIGKILL` alıyor.
 
-**Hâlâ açık, ama artık "burada yapılamaz" değil, yalnız "henüz yapılmadı":** seccomp filtresi,
-gerçek copy-on-write overlay (`bwrap --tmp-overlay` bu makinede çalıştığı doğrulandı, henüz
-entegre edilmedi). Toplam workspace disk kotası da hâlâ yok — cgroups bunu sağlamıyor, muhtemelen
-overlay'in tmpfs `size=` parametresiyle birlikte çözülmeli.
+**Hâlâ açık, ama artık "burada yapılamaz" değil, yalnız "henüz yapılmadı":** seccomp filtresi.
+
+## Ek 4 — Gerçek overlay entegre edildi, disk kotası cgroup belleğiyle çözüldü (16 Ağustos 2026, aynı oturum, 11. tur)
+
+`WorkspaceWriteMode::Overlay` (`bwrap --overlay-src <root> --tmp-overlay <root>`) eklendi; allowlist
+komut çalıştırıcısı (test/build komutları) artık bunu kullanıyor — hiçbir yazı gerçek workspace'e
+ulaşmıyor, worker çıkınca hepsi kayboluyor. `git apply` bilinçli olarak `Direct` modda kaldı (onaylı
+bir değişikliğin kalıcı olması gerekiyor). Toplam disk kotası, Ek 3'teki `MemoryMax` cgroup'u
+overlay'in tmpfs arka planını da kapsadığı için "bedavaya" çözüldü — canlı kanıtlandı: 64MB sınırla
+200MB yazma denemesi gerçekten `SIGKILL` aldı. Bilinen ödünleşim: test/build komutlarının önbellek
+dizinleri (`target/`, `node_modules/`) artık her çalıştırmada sıfırlanıyor — güvenlik kazancı için
+bilinçli tercih edildi, gerçek kullanımda yavaşlık gözlemlenirse ayrıca ele alınmalı.
+
+F4'ün 15 maddesinden kalan tek madde: seccomp.

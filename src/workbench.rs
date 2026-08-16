@@ -17,6 +17,25 @@ pub enum WorkerNetwork {
     Denied,
 }
 
+/// F4 "Isolated worker bootstrap": how a worker's view of the workspace handles writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceWriteMode {
+    /// Writes land on the real host workspace — required whenever the worker's result must
+    /// persist (`git apply`: the whole point is that an approved patch reaches disk).
+    Direct,
+    /// Writes go to an invisible tmpfs overlay layer (`bwrap --overlay-src <root> --tmp-overlay
+    /// <root>`) and vanish the moment the worker exits — the real workspace is never touched, not
+    /// even transiently. Appropriate for a worker whose writes should never persist (arbitrary
+    /// allowlisted test/build commands: a `cargo test` run has no business leaving artifacts in,
+    /// or being able to corrupt, the user's real source tree). Verified live (2026-08-16): the
+    /// overlay's tmpfs backing is real Linux memory, which counts against cgroup memory
+    /// accounting exactly like any other page — a worker that writes past `WorkerLimits.
+    /// max_memory_bytes` into the overlay gets OOM-killed by the *same* `MemoryMax=` cgroup that
+    /// already bounds the worker's own allocations, giving a real, kernel-enforced total-write
+    /// budget "for free" without a separate disk-quota mechanism.
+    Overlay,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLimits {
     pub max_runtime_seconds: u32,
@@ -892,6 +911,7 @@ pub(crate) fn isolated_worker_command(
     program: &Path,
     args: &[&str],
     limits: &WorkerLimits,
+    write_mode: WorkspaceWriteMode,
 ) -> Result<Command, String> {
     let workspace_root = fs::canonicalize(workspace_root)
         .map_err(|error| format!("isolated worker cannot resolve workspace: {error}"))?;
@@ -955,10 +975,22 @@ pub(crate) fn isolated_worker_command(
     for bind in extra_ro_binds {
         command.arg("--ro-bind").arg(bind).arg(bind);
     }
+    match write_mode {
+        WorkspaceWriteMode::Direct => {
+            command
+                .arg("--bind")
+                .arg(&workspace_root)
+                .arg(&workspace_root);
+        }
+        WorkspaceWriteMode::Overlay => {
+            command
+                .arg("--overlay-src")
+                .arg(&workspace_root)
+                .arg("--tmp-overlay")
+                .arg(&workspace_root);
+        }
+    }
     command
-        .arg("--bind")
-        .arg(&workspace_root)
-        .arg(&workspace_root)
         .args(["--setenv", "HOME", "/nonexistent"])
         .args(["--setenv", "PATH", "/usr/bin"])
         .arg("--chdir")
@@ -987,6 +1019,7 @@ pub(crate) fn isolated_worker_command(
     program: &Path,
     args: &[&str],
     _limits: &WorkerLimits,
+    _write_mode: WorkspaceWriteMode,
 ) -> Result<Command, String> {
     if let Some(relative) = chdir_relative {
         validate_workspace_relative_path(relative)?;
@@ -1020,7 +1053,18 @@ fn isolated_git_apply_command(
         args.push("--check");
     }
     args.extend(["--whitespace=error", "-"]);
-    let mut command = isolated_worker_command(workspace_root, None, &[], git, &args, limits)?;
+    // `git apply` is the one worker whose whole point is that a successful write reaches the real
+    // workspace — `WorkspaceWriteMode::Direct`, not `Overlay` (which the allowlist command runner
+    // uses instead, since a test/build command's writes should never persist at all).
+    let mut command = isolated_worker_command(
+        workspace_root,
+        None,
+        &[],
+        git,
+        &args,
+        limits,
+        WorkspaceWriteMode::Direct,
+    )?;
     command.stdout(Stdio::null());
     Ok(command)
 }
@@ -1234,6 +1278,82 @@ mod tests {
             !status.success(),
             "a worker that actually touches memory past MemoryMax (swap denied) must be killed"
         );
+    }
+
+    /// F4 "Isolated worker bootstrap": proves `WorkspaceWriteMode::Overlay` (used by the
+    /// allowlist command runner, `command_runner.rs`) is genuinely a one-way mirror — a worker
+    /// can modify an existing file and create brand-new ones, but *none* of it ever reaches the
+    /// real host workspace, not even after the worker exits successfully. Builds the exact same
+    /// `bwrap --overlay-src <root> --tmp-overlay <root>` invocation `isolated_worker_command`'s
+    /// `#[cfg(not(test))]` branch does (this test module is itself compiled under `cfg(test)`, so
+    /// calling `isolated_worker_command` directly would silently hit the plain-process bypass
+    /// instead — same reason the cgroup test above builds its own `Command`). Skips (does not
+    /// fail) without a functioning `systemd-run --user` session, same rationale as that test.
+    #[test]
+    fn overlay_write_mode_never_lets_a_workers_writes_reach_the_real_workspace() {
+        let probe = std::process::Command::new("systemd-run")
+            .args(["--user", "--scope", "--quiet", "--", "/bin/true"])
+            .status();
+        if !matches!(probe, Ok(status) if status.success()) {
+            eprintln!(
+                "skipping overlay_write_mode_never_lets_a_workers_writes_reach_the_real_workspace: \
+                 no functioning `systemd-run --user` session in this environment"
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "jarvis-overlay-write-mode-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("test workspace dir");
+        fs::write(dir.join("existing.txt"), "original\n").expect("fixture file");
+
+        let limits = WorkerLimits::default();
+        let mut command = std::process::Command::new("systemd-run");
+        cgroup_scope_prefix(&mut command, &limits);
+        let status = command
+            .arg("/usr/bin/bwrap")
+            .arg("--die-with-parent")
+            .arg("--new-session")
+            .arg("--unshare-net")
+            .arg("--unshare-pid")
+            .arg("--unshare-ipc")
+            .arg("--unshare-uts")
+            .arg("--clearenv")
+            .args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"])
+            .args(["--ro-bind", "/usr", "/usr"])
+            .args(["--ro-bind", "/lib", "/lib"])
+            .args(["--ro-bind", "/lib64", "/lib64"])
+            .arg("--overlay-src")
+            .arg(&dir)
+            .arg("--tmp-overlay")
+            .arg(&dir)
+            .args(["--setenv", "PATH", "/usr/bin"])
+            .arg("--chdir")
+            .arg(&dir)
+            .arg("--")
+            .arg("/usr/bin/sh")
+            .arg("-c")
+            .arg("echo modified > existing.txt; echo new > brand-new.txt")
+            .status()
+            .expect("bwrap must be spawnable when the probe above succeeded");
+        assert!(status.success(), "the worker command itself must succeed");
+
+        let existing_after = fs::read_to_string(dir.join("existing.txt")).expect("file survives");
+        assert_eq!(
+            existing_after, "original\n",
+            "an overlay-mode worker's write to an existing file must never reach the real host"
+        );
+        assert!(
+            !dir.join("brand-new.txt").exists(),
+            "an overlay-mode worker's brand-new file must never appear on the real host"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

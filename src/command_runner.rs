@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::workbench::{
     apply_worker_rlimits, isolated_worker_command, validate_workspace_relative_path, CancelFlag,
-    WorkerLimits, WorkerStopReason,
+    WorkerLimits, WorkerStopReason, WorkspaceWriteMode,
 };
 
 /// (program, allowed first subcommand set). An empty subcommand set means "any single token
@@ -221,6 +221,9 @@ pub fn run_allowlisted_command(
     }
     let extra_binds = extra_read_only_binds(&resolved_program);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // F4 "Isolated worker bootstrap": an allowlisted test/build command's writes should never
+    // persist to the real workspace at all — `WorkspaceWriteMode::Overlay`, unlike `git apply`
+    // (`WorkspaceWriteMode::Direct`), whose entire purpose is that an approved write *does* land.
     let mut command = isolated_worker_command(
         workspace_root,
         subdir,
@@ -228,6 +231,7 @@ pub fn run_allowlisted_command(
         &resolved_program,
         &arg_refs,
         limits,
+        WorkspaceWriteMode::Overlay,
     )?;
     apply_worker_rlimits(&mut command, limits);
     let mut child = command
