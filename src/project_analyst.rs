@@ -169,26 +169,28 @@ pub fn draft_coding_plan_with_provider(
     };
     let prompt = format!(
         "/no_think You are a read-only coding planning assistant for a local repository. You never write files or run commands — you only propose a plan. \
-Given the repository's file list and a change request, output exactly four lines, in this order. \
+Given the repository's file list and a change request, output exactly five lines, in this order. \
 FILES: a comma-separated list of ONLY the files from the list below that are actually relevant to the request, copied exactly as they appear in the list — never invent a path that is not in the list. If none of the listed files seem relevant, or you are not confident, write exactly: FILES: NONE. \
 TESTS: a short, concrete description of how to verify the change (a command if you can infer one, or a short description otherwise). \
 ASSUMPTIONS: a semicolon-separated list of anything you are silently assuming about the request because it was not stated (e.g. which language, which existing convention to follow). If you are not assuming anything beyond what was stated, write exactly: ASSUMPTIONS: NONE. \
 QUESTIONS: a semicolon-separated list of things you would need to ask the user to be confident in this plan, if any. If the request is clear enough as given, write exactly: QUESTIONS: NONE. \
+RISK: one short, concrete sentence about what could realistically go wrong with THIS specific change (e.g. a widely-used function being changed, a security- or data-sensitive file, a behavior many other places likely depend on). Do not restate generic boilerplate about approval or sandboxing — only say something specific to this request and these files. If you see no notable specific risk, write exactly: RISK: NONE. \
 Repository languages: {languages}. \
 Repository files:\n{file_list}{truncated_note}\n\n\
 Change request: {request_summary}"
     );
-    // 400 tokens: FILES/TESTS/ASSUMPTIONS/QUESTIONS together. `complete()`'s default 8-token
+    // 450 tokens: FILES/TESTS/ASSUMPTIONS/QUESTIONS/RISK together. `complete()`'s default 8-token
     // budget (tuned for router/classification answers) used to silently truncate even the
     // original two-line form — confirmed live against the real model, 16 Ağustos 2026.
     let response = provider
-        .complete_with_budget(&prompt, 400)
+        .complete_with_budget(&prompt, 450)
         .map_err(|error| format!("coding plan draft failed: {error}"))?;
 
     let mut affected_files: Vec<PathBuf> = Vec::new();
     let mut test_plan: Vec<String> = Vec::new();
     let mut assumptions: Vec<String> = Vec::new();
     let mut open_questions: Vec<String> = Vec::new();
+    let mut model_risk: Option<String> = None;
     // Model yanıtındaki noktalı virgülle ayrılmış bir listeyi ayrıştırır; "NONE" ya da boş
     // yanıtta boş bir liste döner — ASSUMPTIONS/QUESTIONS için ortak, aynı ilkeyi paylaşan
     // (güvenilmez model çıktısını doğrulamadan asla kabul etme) küçük bir yardımcı.
@@ -233,6 +235,13 @@ Change request: {request_summary}"
             assumptions = parse_semicolon_list(rest);
         } else if let Some(rest) = line.strip_prefix("QUESTIONS:") {
             open_questions = parse_semicolon_list(rest);
+        } else if let Some(rest) = line.strip_prefix("RISK:") {
+            let rest = rest.trim();
+            if !rest.is_empty() && !rest.eq_ignore_ascii_case("NONE") {
+                // Uzunluk sınırı: güvenilmez model çıktısı, tek bir cümle beklerken sayfalarca
+                // metin üretmesin diye (mevcut sabit risk notlarıyla aynı ölçekte kalsın).
+                model_risk = Some(rest.chars().take(300).collect());
+            }
         }
     }
     if test_plan.is_empty() {
@@ -243,6 +252,13 @@ Change request: {request_summary}"
         create_read_only_coding_plan(&overview.root, request_summary, affected_files, test_plan)?;
     plan.assumptions = assumptions;
     plan.open_questions = open_questions;
+    // F4 "Coding plan UX" — "tahmini risk": sabit boilerplate notlarının (network kapalı, onay
+    // gerekiyor vb.) yanına, isteğe özgü bir risk değerlendirmesi ekleniyor — modelin ürettiği,
+    // yalnız BU değişiklikle ilgili somut bir cümle, genel bir tekrar değil.
+    if let Some(risk) = model_risk {
+        plan.risk_notes
+            .push(format!("Model risk değerlendirmesi: {risk}"));
+    }
     Ok(plan)
 }
 
@@ -484,6 +500,46 @@ mod tests {
             plan.open_questions,
             vec!["hangi fonksiyon hedefleniyor?".to_string()]
         );
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// F4 "Coding plan UX" — "tahmini risk": model isteğe özgü bir risk cümlesi üretirse, sabit
+    /// boilerplate notların yanına ayrı bir madde olarak ekleniyor.
+    #[test]
+    fn a_specific_model_risk_is_appended_to_the_fixed_boilerplate_notes() {
+        let (root, overview) = fixture_overview("plan-risk", &["src/lib.rs"]);
+        let provider = FixedReplyProvider(
+            "FILES: src/lib.rs\nTESTS: cargo test\nASSUMPTIONS: NONE\nQUESTIONS: NONE\nRISK: Bu fonksiyon birçok yerde çağrılıyor, geriye dönük uyumluluğu bozabilir.",
+        );
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert!(plan
+            .risk_notes
+            .iter()
+            .any(|note| note.contains("birçok yerde çağrılıyor")));
+        // Sabit boilerplate notlar hâlâ orada — model riski onların YERİNE geçmiyor, yanına ekleniyor.
+        assert!(plan.risk_notes.iter().any(|note| note.contains("approval")));
+
+        fs::remove_dir_all(&root).expect("test cleanup");
+    }
+
+    /// Model `RISK: NONE` derse (belirgin bir risk görmediyse), hiçbir hayali risk notu eklenmiyor
+    /// — yalnız sabit boilerplate notlar kalıyor.
+    #[test]
+    fn a_none_risk_reply_adds_nothing_beyond_the_fixed_boilerplate_notes() {
+        let (root, overview) = fixture_overview("plan-no-risk", &["src/lib.rs"]);
+        let provider = FixedReplyProvider(
+            "FILES: src/lib.rs\nTESTS: cargo test\nASSUMPTIONS: NONE\nQUESTIONS: NONE\nRISK: NONE",
+        );
+
+        let plan = draft_coding_plan_with_provider(&overview, "bir şey düzelt", &provider)
+            .expect("plan is produced");
+        assert!(!plan
+            .risk_notes
+            .iter()
+            .any(|note| note.contains("Model risk değerlendirmesi")));
 
         fs::remove_dir_all(&root).expect("test cleanup");
     }
