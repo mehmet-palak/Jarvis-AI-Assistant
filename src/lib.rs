@@ -1398,6 +1398,16 @@ trait LocalTool: Send + Sync {
     fn execute(&self, input: &str, task_id: &str) -> ToolResult;
 }
 
+/// Whether `input` actually carries real note content after a colon. Shared by `note_body` (what
+/// to save) and `Runtime`'s router guard (whether a `note.create` classification was even
+/// plausible) so the two can never disagree about what counts as "real content" — see the bug
+/// this closed, documented on the router guard in `runtime.rs`.
+pub(crate) fn note_body_is_present(input: &str) -> bool {
+    input
+        .split_once(':')
+        .is_some_and(|(_, text)| !text.trim().is_empty())
+}
+
 fn note_body(input: &str) -> &str {
     input
         .split_once(':')
@@ -2767,6 +2777,25 @@ mod tests {
         assert_eq!(task.state, TaskState::WaitingForUser);
     }
 
+    /// Real bug found live (2026-08-16): a casual chat continuation ("hadi yaz bekliyorum",
+    /// referring to a script the user was promised, not a note) got the local model to emit
+    /// `<jarvis-intent>note.create</jarvis-intent>` — `note.create`'s own content extraction
+    /// (`note_body`) needs a colon-delimited payload, which a genuine "not al: X" command always
+    /// has and casual conversation essentially never does, so this was silently creating an empty
+    /// placeholder note ("# JARVIS Note\n\nJARVIS note") while the user believed nothing had
+    /// happened yet. A `note.create` classification with no extractable content must now fall
+    /// back to an ordinary conversational task instead of ever reaching approval.
+    #[test]
+    fn a_note_create_misfire_with_no_extractable_content_falls_back_to_conversation() {
+        let mut runtime = Runtime::new();
+        let (task, _, _) = runtime.handle_with_provider(
+            request("model-note-misfire", "hadi yaz bekliyorum"),
+            &FixedModelProvider("<jarvis-intent>note.create</jarvis-intent>"),
+        );
+        assert_eq!(task.capability, "conversation.reply");
+        assert_ne!(task.state, TaskState::WaitingForUser);
+    }
+
     #[test]
     fn unknown_provider_input_becomes_data_only_conversation_not_a_denied_tool_request() {
         let mut runtime = Runtime::new();
@@ -3439,10 +3468,19 @@ mod tests {
             .expect("approved memory persists");
         // A model that (rightly or wrongly) picks "note.create" up from the profile text is
         // simulated directly here; the point of this test is what happens *after* that proposal,
-        // not whether a real model would actually be swayed by it.
+        // not whether a real model would actually be swayed by it. The request itself still needs
+        // real, colon-delimited content (`note_body_is_present`) — a separate, legitimate router
+        // guard added 2026-08-16 against a different bug (a colon-less message like "naber" now
+        // never reaches note.create at all, real router misfire or not) — so this uses a request
+        // that *would* carry real note content, keeping the two concerns independent.
         let provider = FixedModelProvider("note.create");
-        let (task, result, verification) =
-            runtime.handle_with_provider(request("profile-injection-1", "naber"), &provider);
+        let (task, result, verification) = runtime.handle_with_provider(
+            request(
+                "profile-injection-1",
+                "not oluştur: profil enjeksiyonu testi",
+            ),
+            &provider,
+        );
 
         // The proposal was accepted (profile context does not get the untrusted-suppression
         // treatment attachments/RAG/vision get) ...

@@ -1040,7 +1040,21 @@ impl Runtime {
                 &self.registry,
                 provider,
             ))
-            .filter(|resolution| resolution.capability != "unknown");
+            .filter(|resolution| resolution.capability != "unknown")
+            // Real bug found live (2026-08-16): a casual continuation like "hadi yaz bekliyorum"
+            // (referring to a script the user was promised in conversation, not a note) was
+            // getting classified as `note.create` — the router prompt *does* say coding
+            // discussion should stay conversational, but an 8B local model is not perfectly
+            // reliable at that distinction. `note.create`'s own content extraction (`note_body`)
+            // requires a colon-delimited payload after the trigger phrase; ordinary conversation
+            // essentially never has one, so a genuine `note.create` command ("not al: X") always
+            // has real content and a misfire almost never does — treating a content-less
+            // `note.create` exactly like `unknown` here (before the conversational reply is
+            // skipped for latency, see the comment above) makes a misfire fall through to a real
+            // conversational answer instead of silently creating an empty placeholder note.
+            .filter(|resolution| {
+                resolution.capability != "note.create" || note_body_is_present(&request.content)
+            });
             let response = if routed.is_none() {
                 provider
                     .converse_messages(&model_messages)
@@ -1066,6 +1080,12 @@ impl Runtime {
                 response
                     .as_ref()
                     .and_then(|response| model_capability_intent(&response.text, &self.registry))
+            })
+            // Same guard as the `routed_resolution` filter above, applied here too since this is
+            // a second, independent place a `note.create` classification can come from (an
+            // embedded `<jarvis-intent>` tag inside an otherwise-normal conversational reply).
+            .filter(|capability| {
+                capability != "note.create" || note_body_is_present(&request.content)
             });
         let proposed_source = routed_resolution
             .as_ref()
