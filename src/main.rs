@@ -505,12 +505,38 @@ fn event_loop(
             delete_previous_word(&mut app.input, &mut app.input_cursor);
             continue;
         }
+        // Terminal/readline-style shortcuts (2026-08-16) — the same bindings a shell, Claude
+        // Code, or Codex's own terminal session already uses, so a user's muscle memory carries
+        // straight over. Checked before the plain-char `match` below, since e.g. Ctrl+A must
+        // never fall through to "insert the letter a".
+        if is_move_to_start_shortcut(key) {
+            move_cursor_to_start(&mut app.input_cursor);
+            continue;
+        }
+        if is_move_to_end_shortcut(key) {
+            move_cursor_to_end(&app.input, &mut app.input_cursor);
+            continue;
+        }
+        if is_kill_to_end_shortcut(key) {
+            kill_to_end_from_cursor(&mut app.input, &mut app.input_cursor);
+            continue;
+        }
+        if is_kill_to_start_shortcut(key) {
+            kill_to_start_from_cursor(&mut app.input, &mut app.input_cursor);
+            continue;
+        }
+        if is_forward_delete_shortcut(key) {
+            delete_forward_at_cursor(&mut app.input, &mut app.input_cursor);
+            continue;
+        }
+        if is_insert_newline_shortcut(key) {
+            insert_char_at_cursor(&mut app.input, &mut app.input_cursor, '\n');
+            continue;
+        }
         if should_clear_draft(key) {
             app.input.clear();
             app.input_cursor = 0;
-            if is_clear_draft_shortcut(key) {
-                app.status = "Taslak temizlendi.".into();
-            }
+            app.status = "Taslak temizlendi.".into();
             continue;
         }
         match key.code {
@@ -548,12 +574,52 @@ fn is_delete_previous_word_shortcut(key: KeyEvent) -> bool {
         || matches!(key.code, KeyCode::Char('\u{17}'))
 }
 
-fn is_clear_draft_shortcut(key: KeyEvent) -> bool {
+/// Ctrl+A — jump to the start of the draft. Distinct from the plain `Home` key (message-history
+/// scroll, `apply_history_key_scroll`) so neither shortcut loses its existing meaning.
+fn is_move_to_start_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('a' | 'A'))
+}
+
+/// Ctrl+E — jump to the end of the draft (the `End` key equivalent, kept off `End` itself for
+/// the same reason as `is_move_to_start_shortcut`).
+fn is_move_to_end_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('e' | 'E'))
+}
+
+/// Ctrl+K — readline's "kill to end of line".
+fn is_kill_to_end_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('k' | 'K'))
+}
+
+/// Ctrl+U — readline's *real* meaning, "kill to start of line" (from the cursor backward), not
+/// "clear the whole draft" (that's `Esc`, `should_clear_draft`) — this used to be bound to the
+/// clear-everything behavior; changed to match actual shell/terminal muscle memory.
+fn is_kill_to_start_shortcut(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('u' | 'U'))
 }
 
+/// Ctrl+D as an alternate forward-delete, alongside the plain `Delete` key (`KeyCode::Delete` in
+/// the main match). Deliberately does **not** implement the other common terminal meaning of
+/// Ctrl+D on an empty line (send EOF, often exiting the shell) — an unexpected app-exit shortcut
+/// in a chat composer would be a real, surprising way to lose an in-progress draft; `Ctrl+C`
+/// already covers intentional exit.
+fn is_forward_delete_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('d' | 'D'))
+}
+
+/// Alt+Enter (and Shift+Enter, wherever the terminal actually reports the distinction — like
+/// Ctrl+Backspace earlier, some terminals can't tell Shift+Enter apart from plain Enter without
+/// an enhanced keyboard protocol; Alt+Enter is the more universally reliable one) inserts a
+/// literal newline instead of submitting — the same "Enter sends, Shift/Alt+Enter for a new line"
+/// convention Claude Code's own terminal session already uses.
+fn is_insert_newline_shortcut(key: KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+        && (key.modifiers.contains(KeyModifiers::ALT)
+            || key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 fn should_clear_draft(key: KeyEvent) -> bool {
-    is_clear_draft_shortcut(key) || key.code == KeyCode::Esc
+    key.code == KeyCode::Esc
 }
 
 fn should_close_tui_for_key(key: KeyEvent) -> bool {
@@ -764,6 +830,34 @@ fn move_cursor_word_left(input: &str, cursor: &mut usize) {
 
 fn move_cursor_word_right(input: &str, cursor: &mut usize) {
     *cursor = word_end_after_cursor(input, *cursor);
+}
+
+/// Terminal/readline-style shortcuts (2026-08-16): Ctrl+A, the same as every shell/Claude Code/
+/// Codex terminal session — jump to the very start of the draft (distinct from the plain `Home`
+/// key, which scrolls the *message history*, not the composer).
+fn move_cursor_to_start(cursor: &mut usize) {
+    *cursor = 0;
+}
+
+/// Ctrl+E mirror of `move_cursor_to_start` — jump to the very end of the draft.
+fn move_cursor_to_end(input: &str, cursor: &mut usize) {
+    *cursor = input.chars().count();
+}
+
+/// Ctrl+K ("kill to end of line" in every readline-based shell) — deletes from the cursor to the
+/// end of the draft; the cursor itself does not move.
+fn kill_to_end_from_cursor(input: &mut String, cursor: &mut usize) {
+    let start = char_index_to_byte_index(input, *cursor);
+    input.truncate(start);
+}
+
+/// Ctrl+U's *real* readline meaning ("kill to start of line") — not "clear the whole draft" (that
+/// stays on `Esc`, unchanged). Deletes from the start of the draft up to the cursor; the cursor
+/// moves to the new start (0).
+fn kill_to_start_from_cursor(input: &mut String, cursor: &mut usize) {
+    let end = char_index_to_byte_index(input, *cursor);
+    input.replace_range(0..end, "");
+    *cursor = 0;
 }
 
 fn clipboard_text() -> Result<String, String> {
@@ -2296,7 +2390,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar: Enter gönder • Ctrl+V yapıştır • Ctrl+Backspace veya Ctrl+W önceki kelimeyi sil • Ctrl+U taslağı temizle • Esc taslağı sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2741,57 +2835,102 @@ fn cancel_task(app: &mut App, runtime: &Arc<Mutex<Runtime>>, task_id: &str) {
 /// always-show-everything behavior). When it doesn't, the window slides just far enough that
 /// `cursor` stays inside it — which reduces to "always show the tail" exactly when `cursor` is at
 /// the end of the draft, matching the previous append-only behavior byte-for-byte.
-fn input_view(input: &str, cursor: usize, width: u16, rows: u16) -> (Vec<Line<'static>>, u16, u16) {
-    let width = usize::from(width.max(1));
-    let rows = usize::from(rows.max(1));
-    let capacity = width.saturating_mul(rows);
-    let chars: Vec<char> = input.chars().collect();
-    let char_len = chars.len();
-    let cursor = cursor.min(char_len);
-
-    let window_start = if char_len <= capacity {
-        0
-    } else {
-        cursor
-            .saturating_sub(capacity.saturating_sub(1))
-            .min(char_len - capacity)
-    };
-    let window_end = (window_start + capacity).min(char_len);
-    let mut visible: Vec<char> = chars[window_start..window_end].to_vec();
-    if window_start > 0 {
-        if let Some(first) = visible.first_mut() {
-            *first = '…';
-        }
-    }
-    if window_end < char_len {
-        if let Some(last) = visible.last_mut() {
-            *last = '…';
-        }
-    }
-
-    let lines = visible
-        .chunks(width)
-        .map(|chunk| Line::from(chunk.iter().collect::<String>()))
-        .collect::<Vec<_>>();
-    let cursor_in_window = (cursor - window_start).min(capacity);
-    let (cursor_row, cursor_column) = if cursor_in_window >= capacity {
-        ((rows - 1) as u16, (width - 1) as u16)
-    } else {
-        (
-            (cursor_in_window / width) as u16,
-            (cursor_in_window % width) as u16,
-        )
-    };
-    (lines, cursor_row, cursor_column)
+/// Splits `input` on `'\n'` into one `Line` per logical line — the same pattern `history_lines`
+/// already uses, letting Ratatui's own `Paragraph::wrap`/`line_count` do all within-line
+/// character-wrapping and row-counting (2026-08-16: multi-line drafts, `is_insert_newline_
+/// shortcut`), instead of a hand-rolled character grid that had no concept of an embedded
+/// newline at all.
+fn build_input_lines(input: &str) -> Vec<Line<'static>> {
+    input
+        .split('\n')
+        .map(|line| Line::from(line.to_string()))
+        .collect()
 }
 
+/// Rows a single *logical* line (no embedded `'\n'`) wraps into at `width` — an empty line still
+/// takes exactly one row, matching how a blank line looks in any real text editor.
 fn wrapped_rows(text: &str, width: u16) -> usize {
     let width = usize::from(width.max(1));
     text.chars().count().max(1).div_ceil(width)
 }
 
+/// The cursor's (row, column) among *all* visual rows the whole draft wraps into at `width`,
+/// before any vertical windowing — `cursor` is the char index `App::input_cursor` tracks,
+/// counting the `'\n'` characters that separate logical lines like any other character.
+fn cursor_visual_position(input: &str, cursor: usize, width: u16) -> (usize, usize) {
+    let width_usize = usize::from(width.max(1));
+    let mut remaining = cursor;
+    let mut visual_row = 0usize;
+    for line in input.split('\n') {
+        let line_len = line.chars().count();
+        if remaining <= line_len {
+            // Deliberately *not* clamped to the line's own last real cell: a cursor sitting
+            // right after exactly filling a row (`remaining` a nonzero multiple of `width`) lands
+            // one row below, column 0 — the same "wrapped to a fresh row, ready to keep typing"
+            // spot any real text editor shows there, even though Ratatui's own wrap (`wrapped_
+            // rows`) doesn't allocate that row until there is real content in it. `input_view`
+            // accounts for this when sizing its scroll window.
+            let row_in_line = remaining / width_usize;
+            let column = remaining % width_usize;
+            return (visual_row + row_in_line, column);
+        }
+        remaining -= line_len + 1; // the `'\n'` itself, consumed between this line and the next
+        visual_row += wrapped_rows(line, width);
+    }
+    // `cursor` was past the end of every line — should not happen if callers keep it clamped to
+    // `input.chars().count()`, but land at a sane spot rather than panic.
+    (visual_row, 0)
+}
+
+/// Builds the composer's `Line`s plus everything `draw` needs to render and scroll them: the
+/// cursor's (row, column) *within the visible window*, and the vertical `scroll` offset to hand
+/// `Paragraph::scroll` — mirroring exactly how the history pane already scrolls
+/// (`history_line_count` + `.scroll((scroll_position, 0))`), just anchored to "keep the cursor
+/// visible" instead of "follow the newest message".
+fn input_view(
+    input: &str,
+    cursor: usize,
+    width: u16,
+    rows: u16,
+) -> (Vec<Line<'static>>, u16, u16, u16) {
+    let rows_usize = usize::from(rows.max(1));
+    let lines = build_input_lines(input);
+    let total_rows = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    let (cursor_row, cursor_column) = cursor_visual_position(input, cursor, width);
+    // `cursor_row` can be one row past `total_rows` (see `cursor_visual_position`'s doc comment)
+    // when the cursor sits right after exactly filling a row — the window still needs to be tall
+    // enough to keep that "about to wrap" cursor visible even though Ratatui's own wrap hasn't
+    // allocated a row there yet.
+    let total_rows = total_rows.max(cursor_row + 1);
+
+    let window_start_row = if total_rows <= rows_usize {
+        0
+    } else {
+        cursor_row
+            .saturating_sub(rows_usize.saturating_sub(1))
+            .min(total_rows - rows_usize)
+    };
+    let cursor_row_in_window = cursor_row
+        .saturating_sub(window_start_row)
+        .min(rows_usize.saturating_sub(1));
+    (
+        lines,
+        cursor_row_in_window as u16,
+        cursor_column as u16,
+        window_start_row as u16,
+    )
+}
+
+/// Total visual rows the whole draft occupies at `width`, embedded `'\n'`s included — the single
+/// source of truth `draw` uses to size the composer box, computed the same way as
+/// `input_view`'s own `total_rows` so the two can never disagree.
 fn draft_rows(input: &str, width: u16) -> u16 {
-    wrapped_rows(input, width).min(u16::MAX as usize) as u16
+    Paragraph::new(build_input_lines(input))
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .min(u16::MAX as usize) as u16
 }
 
 fn history_lines(messages: &[Message]) -> Vec<Line<'static>> {
@@ -2943,12 +3082,13 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
     };
     let input_width = layout[2].width.saturating_sub(2);
     let input_rows = layout[2].height.saturating_sub(2);
-    let (input_lines, cursor_row, cursor_column) =
+    let (input_lines, cursor_row, cursor_column, input_scroll) =
         input_view(&app.input, app.input_cursor, input_width, input_rows);
     let input = Paragraph::new(input_lines)
         .block(Block::default().borders(Borders::ALL).title(input_title))
         .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((input_scroll, 0));
     frame.render_widget(input, layout[2]);
     let footer = Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, layout[3]);
@@ -2963,14 +3103,18 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
 mod tests {
     use super::{
         apply_history_key_scroll, apply_history_mouse_scroll, backspace_at_cursor,
-        delete_forward_at_cursor, delete_previous_word, draft_rows, history_line_count,
-        history_lines, input_view, insert_char_at_cursor, insert_pasted_text_at_cursor,
-        is_clear_draft_shortcut, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-        is_primary_selection_paste, move_cursor_left, move_cursor_right, move_cursor_word_left,
-        move_cursor_word_right, native_desktop_binary_path, notification_arguments,
-        notification_preview, parse_remember_namespace_prefix, return_to_latest,
-        should_clear_draft, should_close_tui_for_key, submit, try_notify_desktop, tui_exit_action,
-        tui_notification, App, Message, MessageRole, TuiExitAction, WorkerReply,
+        build_input_lines, cursor_visual_position, delete_forward_at_cursor, delete_previous_word,
+        draft_rows, history_line_count, history_lines, input_view, insert_char_at_cursor,
+        insert_pasted_text_at_cursor, is_clipboard_paste_shortcut,
+        is_delete_previous_word_shortcut, is_forward_delete_shortcut, is_insert_newline_shortcut,
+        is_kill_to_end_shortcut, is_kill_to_start_shortcut, is_move_to_end_shortcut,
+        is_move_to_start_shortcut, is_primary_selection_paste, kill_to_end_from_cursor,
+        kill_to_start_from_cursor, move_cursor_left, move_cursor_right, move_cursor_to_end,
+        move_cursor_to_start, move_cursor_word_left, move_cursor_word_right,
+        native_desktop_binary_path, notification_arguments, notification_preview,
+        parse_remember_namespace_prefix, return_to_latest, should_clear_draft,
+        should_close_tui_for_key, submit, try_notify_desktop, tui_exit_action, tui_notification,
+        App, Message, MessageRole, TuiExitAction, WorkerReply,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use jarvis_core::{
@@ -2998,59 +3142,85 @@ mod tests {
         (runtime, provider, vision, sender)
     }
 
+    /// `input_view` now returns the *whole* draft (never clipped) plus a `window_start_row` the
+    /// caller hands to `Paragraph::scroll` — the same pattern `history_line_count` +
+    /// `.scroll((scroll_position, 0))` already uses for the message pane, rather than the old
+    /// hand-rolled character grid that had to splice in its own "…" ellipsis markers.
     #[test]
-    fn long_draft_keeps_its_tail_visible() {
-        let (lines, _, _) = input_view("0123456789abcdef", 16, 5, 2);
-        let rendered = lines
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(rendered.starts_with('…'));
-        assert!(rendered.ends_with("bcdef"));
+    fn a_cursor_past_the_visible_capacity_scrolls_the_window_down_to_it() {
+        // "0123456789abcdef" (16 chars) at width=5, rows=2 → 10 visible cells; cursor at the very
+        // end (16) cannot fit in a window starting at row 0, so the view must scroll.
+        let (lines, cursor_row, _cursor_column, window_start_row) =
+            input_view("0123456789abcdefghijklmno", 26, 5, 2);
+        assert_eq!(
+            lines.len(),
+            1,
+            "no embedded newline, still one logical line"
+        );
+        assert!(
+            window_start_row > 0,
+            "must scroll to keep the cursor visible"
+        );
+        assert!(
+            (cursor_row as usize) < 2,
+            "cursor row must land inside the 2-row window"
+        );
     }
 
     #[test]
     fn cursor_advances_to_next_input_row() {
-        let (_, row, column) = input_view("12345", 5, 5, 3);
-        assert_eq!((row, column), (1, 0));
+        let (_, row, column, window_start_row) = input_view("12345", 5, 5, 3);
+        assert_eq!((row, column, window_start_row), (1, 0, 0));
     }
 
     /// TUI bug #4 (2026-08-16): the draft had no cursor concept at all — Left/Right did nothing.
-    /// A cursor placed in the middle of a long draft now scrolls the window to keep it visible,
-    /// with an ellipsis on whichever side is actually clipped.
+    /// A cursor placed in the middle of a long draft still scrolls the window to keep it visible.
     #[test]
-    fn a_cursor_in_the_middle_of_a_long_draft_scrolls_a_window_around_it_with_both_ellipses() {
-        let (lines, row, column) = input_view("0123456789abcdefghij", 10, 5, 2);
-        let rendered = lines
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(rendered.starts_with('…'));
-        assert!(rendered.ends_with('…'));
-        assert_eq!(rendered.chars().count(), 10);
-        // The cursor character itself must still land inside the rendered window.
-        assert!((row as usize * 5 + column as usize) < 10);
+    fn a_cursor_in_the_middle_of_a_long_draft_scrolls_a_window_around_it() {
+        let (_, cursor_row, _column, window_start_row) =
+            input_view("0123456789abcdefghij", 10, 5, 2);
+        assert!(window_start_row > 0, "past capacity, must have scrolled");
+        assert!(
+            (cursor_row as usize) < 2,
+            "cursor row must land inside the 2-row window"
+        );
     }
 
     #[test]
     fn a_cursor_at_the_very_start_shows_the_head_not_the_tail() {
-        let (lines, row, column) = input_view("0123456789abcdef", 0, 5, 2);
-        let rendered = lines
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("");
-        // The window's own last visible cell is sacrificed for the "more text below" ellipsis
-        // (same tradeoff the old tail-only version always made at the *start*), so only the head
-        // is asserted, not the exact clipped prefix.
-        assert!(!rendered.starts_with('…'), "cursor at 0 must show the head");
-        assert!(
-            rendered.ends_with('…'),
-            "tail must be clipped, draft doesn't fit"
+        let (_, row, column, window_start_row) = input_view("0123456789abcdefghij", 0, 5, 2);
+        assert_eq!(
+            window_start_row, 0,
+            "cursor at 0 must never scroll away from the head"
         );
         assert_eq!((row, column), (0, 0));
+    }
+
+    /// TUI usability fix (2026-08-16): Alt+Enter/Shift+Enter insert a literal newline
+    /// (`is_insert_newline_shortcut`) instead of submitting — the draft must actually render each
+    /// logical line on its own row, not as one long wrapped blob with an invisible control char.
+    #[test]
+    fn a_draft_with_an_embedded_newline_renders_as_two_separate_logical_lines() {
+        let lines = build_input_lines("ilk satır\nikinci satır");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].to_string(), "ilk satır");
+        assert_eq!(lines[1].to_string(), "ikinci satır");
+    }
+
+    #[test]
+    fn cursor_visual_position_counts_the_newline_itself_as_one_character() {
+        let input = "abc\ndefgh";
+        // Right at the start of the second logical line (just past the '\n').
+        let cursor = "abc\n".chars().count();
+        let (row, column) = cursor_visual_position(input, cursor, 80);
+        assert_eq!((row, column), (1, 0));
+    }
+
+    #[test]
+    fn draft_rows_counts_every_logical_line_an_embedded_newline_creates() {
+        assert_eq!(draft_rows("tek satır", 80), 1);
+        assert_eq!(draft_rows("iki\nsatır", 80), 2);
+        assert_eq!(draft_rows("üç\nayrı\nsatır", 80), 3);
     }
 
     #[test]
@@ -3118,7 +3288,7 @@ mod tests {
     fn history_measurement_uses_the_renderer_word_wrap_rules() {
         let messages = vec![Message {
             role: MessageRole::User,
-            content: "merhaba 👋 bu mesaj kaydırma alanında görünür kalmalı".into(),
+            content: "merhaba bu mesaj kaydırma alanında görünür kalmalı".into(),
         }];
         let lines = history_lines(&messages);
         assert_eq!(history_line_count(&lines, 80), 3);
@@ -3220,10 +3390,6 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
         )));
-        assert!(is_clear_draft_shortcut(KeyEvent::new(
-            KeyCode::Char('u'),
-            KeyModifiers::CONTROL,
-        )));
         assert!(should_clear_draft(KeyEvent::new(
             KeyCode::Esc,
             KeyModifiers::NONE,
@@ -3232,6 +3398,76 @@ mod tests {
             KeyCode::Backspace,
             KeyModifiers::NONE,
         )));
+    }
+
+    /// Terminal/readline-style shortcuts (2026-08-16): the same bindings a shell, Claude Code, or
+    /// Codex's own terminal session already uses.
+    #[test]
+    fn readline_style_shortcuts_are_recognized_by_their_real_keys_only() {
+        assert!(is_move_to_start_shortcut(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_move_to_end_shortcut(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_kill_to_end_shortcut(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        )));
+        // Ctrl+U's *real* readline meaning ("kill to start"), not the old "clear everything".
+        assert!(is_kill_to_start_shortcut(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_forward_delete_shortcut(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_insert_newline_shortcut(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+        )));
+        assert!(is_insert_newline_shortcut(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )));
+        // None of these fire for a plain, unmodified letter — must never shadow ordinary typing.
+        assert!(!is_move_to_start_shortcut(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        assert!(!is_insert_newline_shortcut(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+    }
+
+    #[test]
+    fn move_to_start_and_end_jump_the_cursor_past_any_word_boundary() {
+        let input = "merhaba dünya".to_owned();
+        let mut cursor = 3; // somewhere in the middle
+        move_cursor_to_start(&mut cursor);
+        assert_eq!(cursor, 0);
+        move_cursor_to_end(&input, &mut cursor);
+        assert_eq!(cursor, input.chars().count());
+    }
+
+    #[test]
+    fn kill_to_end_and_kill_to_start_split_the_draft_at_the_cursor() {
+        let mut input = "merhaba dünya".to_owned();
+        let mut cursor = "merhaba".chars().count(); // right after "merhaba"
+
+        let mut forward = input.clone();
+        let mut forward_cursor = cursor;
+        kill_to_end_from_cursor(&mut forward, &mut forward_cursor);
+        assert_eq!(forward, "merhaba");
+        assert_eq!(forward_cursor, cursor, "Ctrl+K must not move the cursor");
+
+        kill_to_start_from_cursor(&mut input, &mut cursor);
+        assert_eq!(input, " dünya");
+        assert_eq!(cursor, 0, "Ctrl+U leaves the cursor at the new start");
     }
 
     #[test]
