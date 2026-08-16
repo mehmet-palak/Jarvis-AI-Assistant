@@ -1004,25 +1004,32 @@ impl Runtime {
         // turn. This is learned routing—not a phrase/answer table—and policy/verifier authority
         // remains in the same pipeline. Untrusted attachment/RAG context never enters this pass.
         let (routed_resolution, response) = if !has_untrusted_model_context {
-            // Both calls are read-only model inference. Running them concurrently keeps a
-            // normal conversation from paying routing latency plus chat latency on CPU-only
-            // hosts; a governed route simply discards the unneeded conversational result.
-            std::thread::scope(|scope| {
-                let route =
-                    scope.spawn(|| route_with_provider(&request.content, &self.registry, provider));
-                let conversation = scope.spawn(|| {
-                    provider
-                        .converse_messages(&model_messages)
-                        .or_else(|_| provider.converse(&conversation))
-                        .ok()
-                });
-                let routed = route
-                    .join()
+            // Route first, then only generate a conversational reply if it's actually going to be
+            // used. Real latency finding (16 Ağustos 2026, gerçek `llama-server`'a karşı ölçüldü):
+            // `jarvis-llama.service` runs with `-np 1` (a single decode slot), so two client-side
+            // "concurrent" calls to it were never actually overlapping at the model — the server
+            // just queued the second one behind the first, and both full passes were paid for on
+            // every turn regardless of outcome. A routed capability's conversational reply is
+            // discarded below anyway (`task.capability != "conversation.reply"`), so skipping its
+            // generation here saves one full extra model pass (measured: ~3.5s of prompt prefill
+            // alone for the router call on this CPU-only 8B model) whenever a capability is
+            // actually routed, with no change in behavior for ordinary chat (still needs both the
+            // route check and the reply).
+            let routed = Some(route_with_provider(
+                &request.content,
+                &self.registry,
+                provider,
+            ))
+            .filter(|resolution| resolution.capability != "unknown");
+            let response = if routed.is_none() {
+                provider
+                    .converse_messages(&model_messages)
+                    .or_else(|_| provider.converse(&conversation))
                     .ok()
-                    .filter(|resolution| resolution.capability != "unknown");
-                let response = conversation.join().ok().flatten();
-                (routed, response)
-            })
+            } else {
+                None
+            };
+            (routed, response)
         } else {
             (
                 None,

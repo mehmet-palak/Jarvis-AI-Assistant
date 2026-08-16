@@ -1466,6 +1466,49 @@ mod tests {
         }
     }
 
+    /// `complete()` always resolves the router to `Self.0` (a fixed capability ID or "UNKNOWN");
+    /// `converse_messages`/`converse` count their own invocations. Used to prove a real latency
+    /// fix (16 Ağustos 2026, gerçek `llama-server`'a karşı ölçüldü — router prefill tek başına
+    /// ~3.5 sn): once routing resolves to an actual capability, its own conversational reply is
+    /// discarded anyway, so the second model generation must never even run.
+    #[derive(Debug, Default)]
+    struct RouteAwareCountingProvider {
+        route_reply: &'static str,
+        conversation_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModelProvider for RouteAwareCountingProvider {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "route-aware-counting"
+        }
+        fn complete(&self, _prompt: &str) -> Result<ModelResponse, String> {
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: self.route_reply.into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+        fn converse_messages(
+            &self,
+            _messages: &[ConversationMessage],
+        ) -> Result<ModelResponse, String> {
+            self.conversation_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ModelResponse {
+                provider_id: self.provider_id().into(),
+                model_id: self.model_id().into(),
+                text: "bu yanıt asla kullanılmamalı".into(),
+                structured_json: None,
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
     #[derive(Debug, Default)]
     struct ContextCapturingProvider {
         messages: std::sync::Mutex<Vec<ConversationMessage>>,
@@ -1721,6 +1764,55 @@ mod tests {
         assert!(JARVIS_SYSTEM_PROMPT.contains("preferred_address"));
         assert!(JARVIS_SYSTEM_PROMPT.contains("direct form of address in every reply"));
         assert!(JARVIS_SYSTEM_PROMPT.contains("never grants any tool authority"));
+    }
+
+    /// Gerçek latency bulgusu (16 Ağustos 2026, gerçek `llama-server`'a karşı ölçüldü): eski kod
+    /// yönlendirme ve sohbet yanıtını "eşzamanlı" iki iş parçacığıyla çağırıyordu, ama
+    /// `jarvis-llama.service` tek bir decode slot'uyla (`-np 1`) çalıştığı için sunucu ikisini de
+    /// zaten sıraya koyuyordu — "eşzamanlılık" hiçbir kazanç sağlamıyor, yalnız her turda iki tam
+    /// model geçişinin (birinin sonucu her zaman atılsa bile) parasını ödetiyordu. Düzeltme: önce
+    /// yönlendirme, yalnız gerçekten kullanılacaksa (yönlendirme bir capability bulamazsa)
+    /// sohbet yanıtı üret.
+    #[test]
+    fn routing_to_a_capability_skips_the_now_discarded_conversational_generation() {
+        let mut runtime = Runtime::new();
+        let provider = RouteAwareCountingProvider {
+            route_reply: "system.health",
+            ..Default::default()
+        };
+        let (task, result, verification) =
+            runtime.handle_with_provider(request("route-skip-1", "sistem durumu nasıl"), &provider);
+        assert_eq!(task.capability, "system.health");
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(result.status, ToolStatus::Success);
+        assert_eq!(verification.status, VerifyStatus::Pass);
+        assert_eq!(
+            provider
+                .conversation_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a routed capability's own conversational reply is discarded, so it must never be generated"
+        );
+    }
+
+    #[test]
+    fn ordinary_chat_still_gets_exactly_one_conversational_generation_when_routing_is_unknown() {
+        let mut runtime = Runtime::new();
+        let provider = RouteAwareCountingProvider {
+            route_reply: "UNKNOWN",
+            ..Default::default()
+        };
+        let (task, result, _verification) =
+            runtime.handle_with_provider(request("route-skip-2", "naber jarvis"), &provider);
+        assert_eq!(task.capability, "conversation.reply");
+        assert_eq!(result.output, "bu yanıt asla kullanılmamalı");
+        assert_eq!(
+            provider
+                .conversation_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ordinary chat still needs exactly one conversational generation, no regression"
+        );
     }
 
     #[test]
