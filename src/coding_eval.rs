@@ -1,9 +1,12 @@
 //! F4 "Coding evaluation seti". Unlike the other test modules in this crate — which each prove
 //! one function's contract in isolation — this module strings the *whole* F4 pipeline together
 //! (plan → patch draft → approve → apply → test/verify → keep-or-rollback, through `Runtime`,
-//! exactly as `/plan`/`/patch`/`/approve-patch` drive it in the TUI) for each of the six scenario
+//! exactly as `/plan`/`/patch`/`/approve-patch` drive it in the TUI) for each of the scenario
 //! categories the F4 checklist names by name: "küçük hata düzeltme, test ekleme, yanlış patch
-//! reddi, timeout/cancel, secret exposure ve mevcut-test regression senaryoları."
+//! reddi, timeout/cancel, secret exposure ve mevcut-test regression senaryoları" — the last
+//! category gets two scenarios (a pre-existing failure correctly tolerated, and a genuine
+//! regression correctly caught), since `apply_coding_patch_with_regression_check`'s pre-patch
+//! baseline is what tells the two apart.
 //!
 //! Deterministic and offline throughout — no live model calls (a `ScriptedProvider`, mirroring
 //! `patch_generator`'s own test mock, stands in for the model), but every process the pipeline
@@ -83,7 +86,7 @@ mod tests {
         Runtime::with_store(SqliteStore::in_memory().expect("sqlite schema"))
     }
 
-    /// Senaryo 1/6 — küçük hata düzeltme: bir fonksiyon yanlış değer döndürüyor, model doğru
+    /// Senaryo 1/7 — küçük hata düzeltme: bir fonksiyon yanlış değer döndürüyor, model doğru
     /// değeri üretiyor, gerçek bir "test" komutu (Python syntax kontrolü, F4'ün allowlist command
     /// runner'ı üzerinden) değişikliği doğruluyor, sonuç kalıcı kalıyor.
     #[test]
@@ -104,17 +107,16 @@ mod tests {
         let approval = approve_patch(&proposal, true).expect("approved");
 
         let mut runtime = eval_runtime();
-        let application = runtime
-            .apply_coding_patch(&plan, &proposal, &approval)
-            .expect("apply succeeds");
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
         assert_eq!(
             fs::read_to_string(root.join("calc.py")).unwrap(),
             "def add(a, b):\n    return a + b\n"
         );
-        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
         assert!(
-            report.all_ran_passed(),
-            "syntax check must pass: {report:?}"
+            outcome.kept,
+            "syntax check must pass on both sides: {outcome:?}"
         );
         assert!(finalize.is_ok());
         assert!(runtime
@@ -125,7 +127,7 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Senaryo 2/6 — test ekleme: model dosyaya yeni bir test fonksiyonu ekliyor; doğrulama
+    /// Senaryo 2/7 — test ekleme: model dosyaya yeni bir test fonksiyonu ekliyor; doğrulama
     /// yalnız sözdiziminin hâlâ geçerli olduğunu kontrol ediyor (gerçek bir `pytest` kurulumu
     /// garanti edilemediği için — dürüst bir sınır, bkz. modül dokümantasyonu).
     #[test]
@@ -149,17 +151,16 @@ mod tests {
         let approval = approve_patch(&proposal, true).expect("approved");
 
         let mut runtime = eval_runtime();
-        let application = runtime
-            .apply_coding_patch(&plan, &proposal, &approval)
-            .expect("apply succeeds");
-        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
-        assert!(report.all_ran_passed());
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
+        assert!(outcome.kept);
         assert!(finalize.is_ok());
 
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Senaryo 3/6 — yanlış patch reddi: plan dışı bir dosyayı değiştirmeye çalışan bir diff,
+    /// Senaryo 3/7 — yanlış patch reddi: plan dışı bir dosyayı değiştirmeye çalışan bir diff,
     /// hem `create_patch_proposal` seviyesinde hem de kurcalanmış bir hash `validate_patch_
     /// proposal` seviyesinde reddedilmeli — hiçbir aşamada diske hiçbir şey yazılmamalı.
     #[test]
@@ -208,7 +209,7 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Senaryo 4/6 — timeout/cancel: kullanıcı bir test çalışırken `/abort` eşdeğeri bir
+    /// Senaryo 4/7 — timeout/cancel: kullanıcı bir test çalışırken `/abort` eşdeğeri bir
     /// `CancelFlag` ile iptal ederse, patch **otomatik geri alınır** — hiçbir yarı-uygulanmış
     /// durum kalmaz. Gerçek bir uzun süren komut (`python3 -m timeit`) ve gerçek bir arka plan
     /// thread'den gelen iptal kullanılıyor (mock değil).
@@ -230,24 +231,16 @@ mod tests {
         let approval = approve_patch(&proposal, true).expect("approved");
 
         let mut runtime = eval_runtime();
-        let application = runtime
-            .apply_coding_patch(&plan, &proposal, &approval)
-            .expect("apply succeeds");
-        assert_eq!(
-            fs::read_to_string(root.join("calc.py")).unwrap(),
-            "def add(a, b):\n    return a + b\n",
-            "the fix must be live on disk before the test run starts"
-        );
-
         let cancel = new_cancel_flag();
         let cancel_for_thread = cancel.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(80));
             cancel_for_thread.store(true, Ordering::SeqCst);
         });
-        let (report, finalize) =
-            runtime.run_coding_tests_and_finalize(&plan, application, Some(&cancel));
-        assert!(!report.all_ran_passed());
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, Some(&cancel))
+            .expect("regression check runs even when cancelled mid-way");
+        assert!(!outcome.kept, "a cancelled run must never be kept");
         assert!(finalize.is_ok());
         assert_eq!(
             fs::read_to_string(root.join("calc.py")).unwrap(),
@@ -262,7 +255,7 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Senaryo 5/6 — secret exposure, iki savunma katmanı ayrı ayrı: (a) modelin bir dosyayı
+    /// Senaryo 5/7 — secret exposure, iki savunma katmanı ayrı ayrı: (a) modelin bir dosyayı
     /// yeniden yazarken enjekte ettiği bir secret patch taslağı seviyesinde reddediliyor
     /// (`patch_generator`), (b) zaten gizli-bilgi benzeri isimli bir dosya `analyze_repository`
     /// taramasına hiç girmiyor, dolayısıyla bir `CodingPlan`'ın hedefi bile olamıyor.
@@ -306,27 +299,25 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Senaryo 6/6 — mevcut-test regresyonu: bir dosya patch'ten ÖNCE de bozuk bir test komutuna
-    /// sahipse (ör. `.env`'siz bir modül aranıyor), patch'in kendisi doğru olsa bile test adımı
-    /// başarısız olur ve değişiklik geri alınır. **Bu, F4'ün dürüstçe belgelenmiş bilinen
-    /// sınırını kanıtlıyor**: sistemin şu anda patch-öncesi bir taban çizgisi yok, bu yüzden
-    /// önceden var olan bir başarısızlığı patch'in kendi hatasından ayırt edemiyor
-    /// (DEVELOPMENT_PLAN.md, "Test/verifier runner" notu). Bu test, davranışı belgeliyor ve
-    /// gelecekte bir taban çizgisi karşılaştırması eklenirse bilinçli olarak güncellenmesi
-    /// gereken bir regresyon testi olarak duruyor.
+    /// Senaryo 6/7 — mevcut-test regresyonu, doğru şekilde tolere ediliyor: bir test komutu
+    /// patch'ten TAMAMEN bağımsız olarak zaten bozuksa (ör. var olmayan bir modülü arıyor), doğru
+    /// bir patch artık bu yüzden geri alınmıyor. **Bu, önceki turda dürüstçe belgelenen bilinen
+    /// bir sınırın gerçek düzeltmesini kanıtlıyor**: `apply_coding_patch_with_regression_check`
+    /// artık patch'ten önce aynı test planını bir "taban çizgisi" olarak çalıştırıyor; taban
+    /// çizgisinde de başarısız olan bir komut artık patch'e karşı kullanılmıyor.
     #[test]
-    fn scenario_a_pre_existing_broken_test_still_rolls_back_an_otherwise_correct_patch() {
+    fn scenario_a_pre_existing_broken_test_no_longer_blocks_an_otherwise_correct_patch() {
         let root = eval_fixture(
-            "regression",
+            "pre-existing",
             &[("calc.py", "def add(a, b):\n    return a - b\n")],
         );
         let plan = create_read_only_coding_plan(
             &root,
             "add fonksiyonunu düzelt",
             vec![PathBuf::from("calc.py")],
-            // Bilerek var olmayan bir dosyaya işaret ediyor — patch'ten TAMAMEN bağımsız, zaten
-            // önceden bozuk bir "test".
-            vec!["python3 -m py_compile does_not_exist_before_or_after.py".to_string()],
+            // Bilerek var olmayan bir modülü arıyor — patch'ten TAMAMEN bağımsız, hem patch
+            // öncesi hem sonrası aynı şekilde başarısız olacak bir "test".
+            vec!["python3 -m jarvis_eval_module_that_never_exists".to_string()],
         )
         .expect("valid plan");
         let provider = ScriptedProvider::new(vec!["def add(a, b):\n    return a + b\n"]);
@@ -334,21 +325,64 @@ mod tests {
         let approval = approve_patch(&proposal, true).expect("approved");
 
         let mut runtime = eval_runtime();
-        let application = runtime
-            .apply_coding_patch(&plan, &proposal, &approval)
-            .expect("apply succeeds");
-        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
         assert!(
-            !report.all_ran_passed(),
-            "the pre-existing broken test command must fail regardless of the patch's own correctness"
+            outcome.kept,
+            "a failure present both before and after the patch must not be blamed on it"
         );
+        assert!(outcome.regressions.is_empty());
         assert!(finalize.is_ok());
         assert_eq!(
             fs::read_to_string(root.join("calc.py")).unwrap(),
-            "def add(a, b):\n    return a - b\n",
-            "known limitation: a correct patch is still rolled back when the configured test \
-             command was already broken before the patch — no pre-patch baseline exists yet"
+            "def add(a, b):\n    return a + b\n",
+            "the correct fix must be kept even though the configured test was already broken"
         );
+        assert!(runtime
+            .audit
+            .iter()
+            .any(|event| event.event == "coding.tests.pre_existing_failure_tolerated"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Senaryo 7/7 — gerçek regresyon: patch, patch-öncesi çalışan bir test komutunu bozarsa
+    /// (yeni sözdizimi hatası), bu artık genuine bir regresyon olarak ayırt ediliyor ve geri
+    /// alınıyor — bir önceki senaryonun tam tersi, aynı taban çizgisi mekanizmasının doğru
+    /// tarafı da yakaladığının kanıtı.
+    #[test]
+    fn scenario_a_genuine_regression_introduced_by_the_patch_is_rolled_back() {
+        let root = eval_fixture("genuine-regression", &[("calc.py", "x = 1\n")]);
+        let plan = create_read_only_coding_plan(
+            &root,
+            "calc.py'ı değiştir",
+            vec![PathBuf::from("calc.py")],
+            vec!["python3 -m py_compile calc.py".to_string()],
+        )
+        .expect("valid plan");
+        // Model geçerli Python'u kasıtlı olarak sözdizimi hatalı bir şeye "düzeltiyor" — gerçek
+        // dünyada bir modelin üretebileceği türden bir regresyon.
+        let provider = ScriptedProvider::new(vec!["x = (\n"]);
+        let proposal = draft_patch_with_provider(&plan, &provider).expect("patch drafts");
+        let approval = approve_patch(&proposal, true).expect("approved");
+
+        let mut runtime = eval_runtime();
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
+        assert!(!outcome.kept, "a genuine regression must not be kept");
+        assert_eq!(outcome.regressions.len(), 1);
+        assert!(finalize.is_ok());
+        assert_eq!(
+            fs::read_to_string(root.join("calc.py")).unwrap(),
+            "x = 1\n",
+            "a genuine regression must restore the pre-patch content"
+        );
+        assert!(runtime
+            .audit
+            .iter()
+            .any(|event| event.event == "coding.tests.regression_detected"));
 
         fs::remove_dir_all(&root).ok();
     }

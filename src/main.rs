@@ -1598,84 +1598,108 @@ fn submit(
                 return;
             }
         };
-        let application = {
-            let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
-            runtime_guard.apply_coding_patch(&plan, &proposal, &approval)
-        };
-        let application = match application {
-            Ok(application) => application,
-            Err(error) => {
-                app.push_system(format!("Patch uygulanamadı: {error}"));
-                return;
-            }
-        };
-        let changed = application
-            .changed_files
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        app.push_system(format!(
-            "Patch uygulandı: {changed}\nDoğrulama kanıtı:\n{}",
-            application.verifier_evidence.join("\n")
-        ));
         if plan.test_plan.is_empty() {
-            app.push_system(
-                "Bu plan için test komutu yok; değişiklik kalıcı (otomatik geri alma tetiklenmeyecek).",
-            );
+            // Test planı yoksa taban çizgisi/regresyon karşılaştırması anlamsız — doğrudan,
+            // senkron uygulama (git apply hızlı, arka plan thread'i gerektirmiyor).
+            let application = {
+                let mut runtime_guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+                runtime_guard.apply_coding_patch(&plan, &proposal, &approval)
+            };
+            match application {
+                Ok(application) => {
+                    let changed = application
+                        .changed_files
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    app.push_system(format!(
+                        "Patch uygulandı: {changed}\nDoğrulama kanıtı:\n{}\nBu plan için test komutu yok; değişiklik kalıcı.",
+                        application.verifier_evidence.join("\n")
+                    ));
+                }
+                Err(error) => app.push_system(format!("Patch uygulanamadı: {error}")),
+            }
             return;
         }
+        // Test planı varsa taban çizgisi (patch ÖNCESİ) → uygula → test (patch SONRASI) → karşılaştır
+        // zinciri tek bir arka plan thread'inde çalışıyor — taban çizgisi patch'ten önce
+        // ölçülmeli, bu yüzden uygulama artık senkron adım değil.
         let cancel = new_cancel_flag();
         app.active_cancel = Some(cancel.clone());
         let message_index = app.messages.len();
         app.messages.push(Message {
             role: MessageRole::Jarvis,
-            content: "Testler izole ortamda çalıştırılıyor (iptal için /abort)…".into(),
+            content: "Taban çizgisi ölçülüyor, ardından patch izole uygulanıp testler tekrar çalıştırılacak (iptal için /abort)…".into(),
         });
         app.pending = true;
-        app.status = "Testler çalıştırılıyor…".into();
+        app.status = "Taban çizgisi + patch + testler çalıştırılıyor…".into();
         let runtime = Arc::clone(runtime);
         let sender = sender.clone();
         std::thread::spawn(move || {
-            let (report, finalize) = runtime
+            let outcome = runtime
                 .lock()
                 .expect("JARVIS runtime lock poisoned")
-                .run_coding_tests_and_finalize(&plan, application, Some(&cancel));
-            let ran_summary = report
-                .ran
-                .iter()
-                .map(|run| {
-                    format!(
-                        "  • {} → {}{}",
-                        run.command_line(),
-                        run.exit_code
-                            .map(|code| code.to_string())
-                            .unwrap_or_else(|| "?".into()),
-                        run.stopped
-                            .map(|reason| format!(" ({reason:?})"))
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let skipped_summary = if report.skipped.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\nAtlanan (komut olarak ayrıştırılamadı): {}",
-                    report.skipped.join("; ")
-                )
-            };
-            let content = match finalize {
-                Ok(()) if report.all_ran_passed() => format!(
-                    "Testler geçti; değişiklik kalıcı:\n{ran_summary}{skipped_summary}"
-                ),
-                Ok(()) => format!(
-                    "Testler geçmedi veya iptal edildi — değişiklik otomatik geri alındı (dosyalar patch öncesi hâline döndü):\n{ran_summary}{skipped_summary}"
-                ),
-                Err(error) => format!(
-                    "Testler tamamlandı ama geri alma sırasında sorun oldu: {error}\n{ran_summary}{skipped_summary}"
-                ),
+                .apply_coding_patch_with_regression_check(
+                    &plan,
+                    &proposal,
+                    &approval,
+                    Some(&cancel),
+                );
+            let content = match outcome {
+                Err(error) => format!("Patch uygulanamadı: {error}"),
+                Ok((outcome, finalize)) => {
+                    let render = |report: &jarvis_core::TestRunReport| {
+                        report
+                            .ran
+                            .iter()
+                            .map(|run| {
+                                format!(
+                                    "  • {} → {}{}",
+                                    run.command_line(),
+                                    run.exit_code
+                                        .map(|code| code.to_string())
+                                        .unwrap_or_else(|| "?".into()),
+                                    run.stopped
+                                        .map(|reason| format!(" ({reason:?})"))
+                                        .unwrap_or_default(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    let baseline_summary = render(&outcome.baseline);
+                    let post_summary = render(&outcome.post_patch);
+                    let changed = outcome
+                        .changed_files
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    match finalize {
+                        Err(error) => format!(
+                            "Testler tamamlandı ama geri alma sırasında sorun oldu: {error}\nTaban çizgisi:\n{baseline_summary}\nPatch sonrası:\n{post_summary}"
+                        ),
+                        Ok(()) if outcome.kept => {
+                            let pre_existing_note = if outcome.baseline.ran.iter().any(|run| !run.succeeded()) {
+                                "\n(Not: taban çizgisinde zaten başarısız olan komut(lar) vardı — bunlar bu patch'e karşı kullanılmadı.)"
+                            } else {
+                                ""
+                            };
+                            format!(
+                                "Patch uygulandı ve kalıcı: {changed}\nDoğrulama kanıtı:\n{}\nTaban çizgisi:\n{baseline_summary}\nPatch sonrası:\n{post_summary}{pre_existing_note}",
+                                outcome.verifier_evidence.join("\n")
+                            )
+                        }
+                        Ok(()) if !outcome.regressions.is_empty() => format!(
+                            "Gerçek regresyon tespit edildi, değişiklik otomatik geri alındı: {}\nTaban çizgisi:\n{baseline_summary}\nPatch sonrası:\n{post_summary}",
+                            outcome.regressions.join(", ")
+                        ),
+                        Ok(()) => format!(
+                            "Testler geçmedi veya iptal edildi — değişiklik otomatik geri alındı (dosyalar patch öncesi hâline döndü):\nTaban çizgisi:\n{baseline_summary}\nPatch sonrası:\n{post_summary}"
+                        ),
+                    }
+                }
             };
             let _ = sender.send(WorkerReply {
                 message_index,

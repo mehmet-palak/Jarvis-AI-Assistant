@@ -1367,42 +1367,83 @@ impl Runtime {
         Ok(application)
     }
 
-    /// F4 "Test/verifier runner" tied to "Isolated worker bootstrap": runs `plan.test_plan`
-    /// against the just-applied change (`cancel`: an unrelated, distinct mechanism from
-    /// `Runtime::cancel` above — that one stops a *task before its side effect starts*; this
-    /// `CancelFlag` stops an *already-running* isolated test process mid-flight, F4 "Gerçek
-    /// cancellation"). If every command that actually ran passed, the pre-apply snapshot is
-    /// discarded and the change stands. Otherwise — a real failure, or the run was cancelled —
-    /// the snapshot is restored automatically: the workspace ends up exactly as it was before the
-    /// patch, not silently left half-applied. Either outcome is audited under a distinct event
-    /// name so the audit trail alone tells the story without reading application logs.
-    pub fn run_coding_tests_and_finalize(
+    /// F4 "Test/verifier runner", `application`/`baseline`/`post_patch`/`regressions`/`kept`
+    /// display fields kept together for the caller (originally `PatchApplication` itself, but its
+    /// `snapshot` is consumed internally by finalize — see below).
+    pub fn apply_coding_patch_with_regression_check(
         &mut self,
         plan: &CodingPlan,
-        application: PatchApplication,
+        proposal: &PatchProposal,
+        approval: &ApprovedPatch,
         cancel: Option<&CancelFlag>,
-    ) -> (TestRunReport, Result<(), String>) {
-        let report = run_test_plan(&plan.workspace_root, &plan.test_plan, &plan.limits, cancel);
-        let cancelled = report
+    ) -> Result<(RegressionCheckedPatch, Result<(), String>), String> {
+        // F4 "Test/verifier runner"'ın belgelenmiş bilinen sınırı (16 Ağustos 2026 ilk turda): bir
+        // test komutu patch'ten TAMAMEN bağımsız olarak zaten bozuksa, sistem bunu patch'in kendi
+        // hatasıyla ayırt edemiyordu — her ikisi de "testler geçmedi, geri al" olarak işleniyordu.
+        // Düzeltme: patch uygulanmadan ÖNCE aynı test planı bir kez "taban çizgisi" olarak
+        // çalıştırılıyor; yalnız taban çizgisinde GEÇEN ama patch sonrası BAŞARISIZ olan komutlar
+        // gerçek bir "regresyon" sayılıyor. Taban çizgisinde zaten başarısız olan bir komut patch
+        // sonrası da başarısızsa, bu artık patch'e karşı kullanılmıyor — değişiklik kalıcı kalır
+        // (audit'e "önceden var olan hata tolere edildi" olarak dürüstçe yazılır).
+        let baseline = run_test_plan(&plan.workspace_root, &plan.test_plan, &plan.limits, cancel);
+        let application = self.apply_coding_patch(plan, proposal, approval)?;
+        let post_patch = run_test_plan(&plan.workspace_root, &plan.test_plan, &plan.limits, cancel);
+
+        let mut regressions = Vec::new();
+        for post_run in &post_patch.ran {
+            if post_run.succeeded() {
+                continue;
+            }
+            let was_passing_before = baseline
+                .ran
+                .iter()
+                .find(|baseline_run| baseline_run.command_line() == post_run.command_line())
+                .map(CommandRun::succeeded)
+                // Taban çizgisinde hiç eşleşen bir komut yoksa (ör. skip edildiyse) temkinli
+                // davranılıyor: "zaten bozuktu" varsayılmıyor, patch sonrası başarısızlık
+                // regresyon sayılıyor — güvenlik tarafı hataya düşsün, sessizce tolere etmesin.
+                .unwrap_or(true);
+            if was_passing_before {
+                regressions.push(post_run.command_line());
+            }
+        }
+        let cancelled = post_patch
             .ran
             .iter()
             .any(|run| run.stopped == Some(WorkerStopReason::UserCancelled));
-        let passed = report.all_ran_passed() && !cancelled;
+        // `TestRunReport::all_ran_passed`'ın kendi kuralıyla aynı: hiçbir komut gerçekten
+        // çalışmadıysa (`ran` boş — hepsi skip edildiyse ya da test planı boşsa) "doğrulandı"
+        // sayılmıyor, temkinli varsayılan geri almaktır.
+        let anything_ran = !post_patch.ran.is_empty();
+        let kept = anything_ran && regressions.is_empty() && !cancelled;
+
         let proposal_id = application.proposal_id.clone();
-        let finalize = if passed {
+        let changed_files = application.changed_files.clone();
+        let verifier_evidence = application.verifier_evidence.clone();
+        let baseline_had_failures = baseline.ran.iter().any(|run| !run.succeeded());
+        let finalize = if kept {
             self.record_audit(AuditEvent::pending(
                 format!("patch-{proposal_id}"),
                 "coding.tests.passed",
             ));
+            if baseline_had_failures {
+                self.record_audit(AuditEvent::pending(
+                    format!("patch-{proposal_id}"),
+                    "coding.tests.pre_existing_failure_tolerated",
+                ));
+            }
             discard_patch_snapshot(application.snapshot)
         } else {
+            let event_name = if cancelled {
+                "coding.tests.cancelled"
+            } else if !regressions.is_empty() {
+                "coding.tests.regression_detected"
+            } else {
+                "coding.tests.failed"
+            };
             self.record_audit(AuditEvent::pending(
                 format!("patch-{proposal_id}"),
-                if cancelled {
-                    "coding.tests.cancelled"
-                } else {
-                    "coding.tests.failed"
-                },
+                event_name,
             ));
             let restore = restore_patch_snapshot(&application.snapshot);
             let cleanup = discard_patch_snapshot(application.snapshot);
@@ -1420,6 +1461,33 @@ impl Runtime {
                 _ => Ok(()),
             }
         };
-        (report, finalize)
+        Ok((
+            RegressionCheckedPatch {
+                proposal_id,
+                changed_files,
+                verifier_evidence,
+                baseline,
+                post_patch,
+                regressions,
+                kept,
+            },
+            finalize,
+        ))
     }
+}
+
+/// Display-oriented result of `Runtime::apply_coding_patch_with_regression_check` — not
+/// `PatchApplication` itself, because its `snapshot` field is consumed internally by the
+/// keep-or-rollback decision before this is ever returned.
+#[derive(Debug, Clone)]
+pub struct RegressionCheckedPatch {
+    pub proposal_id: String,
+    pub changed_files: Vec<PathBuf>,
+    pub verifier_evidence: Vec<String>,
+    pub baseline: TestRunReport,
+    pub post_patch: TestRunReport,
+    /// Command lines that passed at the pre-patch baseline but failed after the patch was
+    /// applied — the only failures actually attributed to the patch itself.
+    pub regressions: Vec<String>,
+    pub kept: bool,
 }

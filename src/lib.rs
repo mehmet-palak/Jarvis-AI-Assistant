@@ -60,7 +60,7 @@ pub use profile_files::{
     read_profile_file, ABOUT_JARVIS_FILE_NAME, ABOUT_USER_FILE_NAME, MAX_PROFILE_FILE_CHARS,
 };
 pub use project_analyst::{analyze_repository, draft_coding_plan_with_provider, RepoOverview};
-pub use runtime::Runtime;
+pub use runtime::{RegressionCheckedPatch, Runtime};
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{
@@ -2997,12 +2997,70 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// F4 "Test/verifier runner" + rollback: a test command that genuinely fails must restore
-    /// the file to its pre-patch content automatically, not leave a half-applied change behind —
-    /// and the audit trail must say so under a distinct event name.
+    /// F4 "Test/verifier runner" with a real pre-patch baseline: a test command that PASSES
+    /// before the patch and FAILS after it is a genuine regression, caused by the patch itself —
+    /// it must restore the file automatically and audit a distinct "regression_detected" event
+    /// (not the older, less precise "failed").
     #[test]
-    fn a_failing_test_after_apply_rolls_back_the_file_and_is_audited() {
-        let root = coding_patch_fixture("rollback");
+    fn a_genuine_regression_after_apply_rolls_back_the_file_and_is_audited() {
+        let root = coding_patch_fixture("regression");
+        fs::write(root.join("demo.py"), "x = 1\n").expect("fixture file");
+        let store = SqliteStore::in_memory().expect("sqlite schema");
+        let mut runtime = Runtime::with_store(store);
+        let plan = create_read_only_coding_plan(
+            &root,
+            "demo.py içeriğini değiştir",
+            vec![PathBuf::from("demo.py")],
+            vec!["python3 -m py_compile demo.py".to_string()],
+        )
+        .expect("valid plan");
+        let proposal = create_patch_proposal(
+            &plan,
+            // Patch geçerli Python'u kasıtlı olarak sözdizimi hatalı hale getiriyor — gerçek bir
+            // regresyon, patch'ten önce de var olan bir hata değil.
+            "diff --git a/demo.py b/demo.py\n--- a/demo.py\n+++ b/demo.py\n@@ -1 +1 @@\n-x = 1\n+x = (\n",
+            vec![PathBuf::from("demo.py")],
+        )
+        .expect("valid proposal");
+        let approval = approve_patch(&proposal, true).expect("explicit approval");
+
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
+        assert!(!outcome.kept, "a genuine regression must not be kept");
+        assert_eq!(
+            outcome.regressions.len(),
+            1,
+            "regressions were: {:?}",
+            outcome.regressions
+        );
+        assert!(
+            finalize.is_ok(),
+            "rollback itself must succeed: {finalize:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("demo.py")).unwrap(),
+            "x = 1\n",
+            "a genuine regression must restore the file to its pre-patch content"
+        );
+        assert!(runtime.audit.iter().any(|event| {
+            event.task_id == format!("patch-{}", proposal.proposal_id)
+                && event.event == "coding.tests.regression_detected"
+        }));
+        assert!(runtime.audit.iter().any(|event| {
+            event.task_id == format!("patch-{}", proposal.proposal_id)
+                && event.event == "coding.patch.rolled_back_after_test_outcome"
+        }));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// F4 "Test/verifier runner"'ın düzeltilen bilinen sınırı: bir test komutu patch'ten TAMAMEN
+    /// bağımsız olarak zaten bozuksa (taban çizgisinde de başarısız), bu artık patch'e karşı
+    /// kullanılmıyor — değişiklik kalıcı kalır, audit "önceden var olan hata tolere edildi" der.
+    #[test]
+    fn a_pre_existing_test_failure_does_not_block_an_otherwise_correct_patch() {
+        let root = coding_patch_fixture("pre-existing");
         let store = SqliteStore::in_memory().expect("sqlite schema");
         let mut runtime = Runtime::with_store(store);
         let plan = create_read_only_coding_plan(
@@ -3019,35 +3077,30 @@ mod tests {
         )
         .expect("valid proposal");
         let approval = approve_patch(&proposal, true).expect("explicit approval");
-        let application = runtime
-            .apply_coding_patch(&plan, &proposal, &approval)
-            .expect("patch applies");
-        assert_eq!(fs::read_to_string(root.join("demo.txt")).unwrap(), "new\n");
 
-        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
-        assert!(!report.all_ran_passed());
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
         assert!(
-            finalize.is_ok(),
-            "rollback itself must succeed: {finalize:?}"
+            outcome.kept,
+            "a failure that predates the patch must not be blamed on it"
         );
+        assert!(outcome.regressions.is_empty());
+        assert!(finalize.is_ok());
         assert_eq!(
             fs::read_to_string(root.join("demo.txt")).unwrap(),
-            "old\n",
-            "a failing test must restore the file to its pre-patch content"
+            "new\n",
+            "the correct patch must be kept even though the configured test was already broken"
         );
         assert!(runtime.audit.iter().any(|event| {
             event.task_id == format!("patch-{}", proposal.proposal_id)
-                && event.event == "coding.tests.failed"
-        }));
-        assert!(runtime.audit.iter().any(|event| {
-            event.task_id == format!("patch-{}", proposal.proposal_id)
-                && event.event == "coding.patch.rolled_back_after_test_outcome"
+                && event.event == "coding.tests.pre_existing_failure_tolerated"
         }));
 
         fs::remove_dir_all(&root).ok();
     }
 
-    /// The success mirror of the rollback test: every configured test command actually passing
+    /// The success mirror: every configured test command genuinely passing both before and after
     /// keeps the change, discards the snapshot, and audits a distinct "passed" event.
     #[test]
     fn passing_tests_after_apply_keep_the_change_and_audit_passed() {
@@ -3068,12 +3121,11 @@ mod tests {
         )
         .expect("valid proposal");
         let approval = approve_patch(&proposal, true).expect("explicit approval");
-        let application = runtime
-            .apply_coding_patch(&plan, &proposal, &approval)
-            .expect("patch applies");
 
-        let (report, finalize) = runtime.run_coding_tests_and_finalize(&plan, application, None);
-        assert!(report.all_ran_passed());
+        let (outcome, finalize) = runtime
+            .apply_coding_patch_with_regression_check(&plan, &proposal, &approval, None)
+            .expect("regression check runs");
+        assert!(outcome.kept);
         assert!(finalize.is_ok());
         assert_eq!(
             fs::read_to_string(root.join("demo.txt")).unwrap(),
