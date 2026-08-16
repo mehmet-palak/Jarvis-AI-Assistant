@@ -509,8 +509,15 @@ Bu turda kanıtlanan alt dilim:
   - **Bilinçli kapsam sınırı**: yalnız kök dizindeki manifest'lere bakıyor (monorepo alt paketlerini taramıyor); "bu isteğe göre hangi dosyalar etkilenir" gibi isteğe özgü bir karar vermiyor — bu, henüz yapılmamış "Coding plan UX" maddesinin (model akıl yürütmesi gerektiren) işi.
   - TUI: `/analyze [proje-içi-göreli-klasör]` (klasör verilmezse proje kökü) — gerçek bu repo'nun kendisi üzerinde çalıştırılıp Rust/Cargo.toml/`cargo test`'in doğru tespit edildiği kanıtlandı.
   - Kanıt: 5 `project_analyst` testi (Rust tespiti, çoklu dil + Python tekilleştirme, bilinmeyen manifest risk notu, gizli-bilgi dosyası risk notu, geçersiz kök reddi) + 1 uçtan uca TUI testi (`analyze_command_detects_this_repos_own_rust_manifest_and_reports_unknown_subfolders` — bu repo'nun kendi `Cargo.toml`'unu gerçekten tespit ediyor). Tam paket: `cargo fmt`, `cargo test --offline` (205 lib + 45 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS).
-
 Tamamlanma ölçütü: JARVIS bir değişikliği önce gösterir, kullanıcı onayı olmadan yazmaz; onay sonrası yalnız scope içindeki patch'i uygular ve test kanıtını döndürür.
+
+**"OS izolasyonu"/"Resource kontrolü" maddelerinde kısmi ilerleme (16 Ağustos 2026, ikisi de hâlâ `[ ]` — tam bitmiş sayılmıyor):**
+ADR-0001'in "henüz tamamlanmamış" diye işaretlediği maddelerden ikisi kapatıldı, üçü hâlâ açık (bkz.
+[ADR-0001 Ek](docs/adr/0001-isolated-coding-worker.md#ek--runtime-quota-ve-ek-namespace-izolasyonu-16-ağustos-2026)).
+- **Kapatıldı**: `WorkerLimits.max_runtime_seconds`/`max_output_bytes` alanları vardı ama hiç okunmuyordu — gerçek bir watchdog yoktu. Yeni `wait_with_timeout` fonksiyonu `git apply`'i artık gerçekten süreyle sınırlıyor (kota aşılınca `kill()`); `sleep` ile (gerçek "asılı" bir süreç, `git apply`'in kendi davranışına bağlı olmayan doğrudan bir watchdog testi) doğrulandı. Bubblewrap çağrısına `--unshare-pid`/`--unshare-ipc`/`--unshare-uts` eklendi (F4 tehdit modelinin "process tree" maddesi).
+- **Hâlâ açık**: gerçek CPU/RAM/disk kotası (cgroups gerekir), seccomp filtresi, snapshot/overlay worker (şu an doğrudan workspace'e yazıp snapshot+rollback ile geri alıyor, gerçek bir copy-on-write overlay değil), gerçek cancellation.
+- **Doğrulama sınırı**: bu geliştirme ortamı `CLONE_NEWNET` izni vermediği için gerçek `bwrap` çağrısı burada uçtan uca çalıştırılamadı (ADR-0001'in kendi bilinen sınırı) — yalnız derlendiği (release profili dahil) doğrulandı, gerçek doğrulama hedef makinede release smoke ile yapılmalı.
+- Kanıt: yeni testler `wait_with_timeout_kills_a_process_that_outlives_its_quota`, `wait_with_timeout_succeeds_for_a_process_that_finishes_in_time`. Tam paket: `cargo fmt`, `cargo test --offline` (207 lib + 45 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz), `scripts/release_check.sh --offline` (PASS, gerçek release profili derlemesi dahil).
 
 ### F5 — Sesli etkileşim ve algı arayüzü
 

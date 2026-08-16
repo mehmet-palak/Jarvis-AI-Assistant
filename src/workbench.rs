@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -202,11 +202,21 @@ pub fn apply_approved_patch(
         return Err("patch proposal does not belong to this coding plan".into());
     }
     let snapshot = snapshot_files(plan, &proposal.affected_files)?;
-    if let Err(error) = run_git_apply(&plan.workspace_root, &proposal.unified_diff, true) {
+    if let Err(error) = run_git_apply(
+        &plan.workspace_root,
+        &proposal.unified_diff,
+        true,
+        &plan.limits,
+    ) {
         let _ = fs::remove_dir_all(&snapshot.snapshot_root);
         return Err(error);
     }
-    if let Err(error) = run_git_apply(&plan.workspace_root, &proposal.unified_diff, false) {
+    if let Err(error) = run_git_apply(
+        &plan.workspace_root,
+        &proposal.unified_diff,
+        false,
+        &plan.limits,
+    ) {
         let restore = restore_patch_snapshot(&snapshot);
         let cleanup = fs::remove_dir_all(&snapshot.snapshot_root);
         return Err(match (restore, cleanup) {
@@ -413,7 +423,12 @@ fn snapshot_files(plan: &CodingPlan, files: &[PathBuf]) -> Result<PatchSnapshot,
     })
 }
 
-fn run_git_apply(workspace_root: &Path, diff: &str, check_only: bool) -> Result<(), String> {
+fn run_git_apply(
+    workspace_root: &Path,
+    diff: &str,
+    check_only: bool,
+    limits: &WorkerLimits,
+) -> Result<(), String> {
     let mut command = isolated_git_apply_command(workspace_root, check_only)?;
     let mut child = command
         .spawn()
@@ -424,6 +439,11 @@ fn run_git_apply(workspace_root: &Path, diff: &str, check_only: bool) -> Result<
         .ok_or_else(|| "isolated patch worker stdin is unavailable".to_string())?
         .write_all(diff.as_bytes())
         .map_err(|error| format!("isolated patch worker could not receive diff: {error}"))?;
+    // stdin is dropped here (its handle was a temporary above) — the child sees EOF and can run
+    // to completion. F4 "Resource kontrolü": `WorkerLimits.max_runtime_seconds` used to be a
+    // struct field nobody ever read — a hung or pathological `git apply` inside the sandbox could
+    // block forever with no watchdog.
+    wait_with_timeout(&mut child, limits.max_runtime_seconds)?;
     let output = child
         .wait_with_output()
         .map_err(|error| format!("isolated patch worker did not complete: {error}"))?;
@@ -431,8 +451,48 @@ fn run_git_apply(workspace_root: &Path, diff: &str, check_only: bool) -> Result<
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let preview = stderr.chars().take(2_000).collect::<String>();
+    // `max_output_bytes` bounds the preview surfaced to the caller (a display-only cap, not a
+    // live kill-on-overflow while the process is still running). git's own stderr for a rejected
+    // `apply` is inherently small and already indirectly bounded by `max_diff_bytes` (a 256 KiB
+    // diff cannot itself provoke a multi-megabyte error) — a live streaming cap would only matter
+    // once an *arbitrary* command runner exists (F4 "Allowlist command runner", not built yet).
+    let preview_chars = (limits.max_output_bytes as usize).clamp(200, 2_000);
+    let preview: String = stderr.chars().take(preview_chars).collect();
     Err(format!("isolated patch worker rejected diff: {preview}"))
+}
+
+/// Polls `child` for exit instead of blocking on it (`Child::wait`/`wait_with_output` would block
+/// indefinitely), killing it once `max_runtime_seconds` elapses. Factored out from `run_git_apply`
+/// so the watchdog itself — not `git apply`'s specific behavior — is what a test exercises
+/// (a real process that intentionally outlives its quota, e.g. `sleep`, proves the kill actually
+/// happens; `git apply` is fast and would never naturally hit a short test timeout on its own).
+/// Returns `Ok(())` once the child has genuinely exited (its output can then still be read via
+/// `wait_with_output`); `Err` only when the quota was exceeded and the child was killed.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    max_runtime_seconds: u32,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(u64::from(max_runtime_seconds));
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => return Ok(()),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "isolated patch worker exceeded its {max_runtime_seconds}s runtime quota and was terminated"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "isolated patch worker status check failed: {error}"
+                ));
+            }
+        }
+    }
 }
 
 /// The release worker sees only the approved workspace, read-only runtime libraries, a private
@@ -460,6 +520,13 @@ fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result
         .arg("--die-with-parent")
         .arg("--new-session")
         .arg("--unshare-net")
+        // F4 threat model'in "process tree" maddesi (ADR-0001): worker'ın host'taki başka
+        // süreçleri görmesi/sinyallemesi/PID'lerini keşfetmesi mümkün olmamalı. Bu üçü de
+        // bwrap'ın standart, blob/derleme gerektirmeyen namespace bayrakları — `--proc /proc`
+        // zaten var olduğu için yeni PID namespace'i doğru `/proc` görünümüyle çalışır.
+        .arg("--unshare-pid")
+        .arg("--unshare-ipc")
+        .arg("--unshare-uts")
         .arg("--clearenv")
         .args(["--ro-bind", "/usr", "/usr"])
         .args(["--ro-bind", "/lib", "/lib"])
@@ -521,6 +588,42 @@ fn hash_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F4 "Resource kontrolü": `WorkerLimits.max_runtime_seconds` bir alan olarak vardı ama
+    /// hiçbir yerde okunmuyordu — gerçek bir watchdog yoktu. `sleep` gerçekten `git apply`'den
+    /// çok daha uzun süren, kasıtlı bir "asılı" süreç — `max_runtime_seconds=0` ile neredeyse
+    /// anında öldürüldüğünü kanıtlar (testin kendisi birkaç saniye değil, birkaç on milisaniye
+    /// sürer).
+    #[test]
+    fn wait_with_timeout_kills_a_process_that_outlives_its_quota() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("sleep must be available to run this test");
+        let started = Instant::now();
+        let result = wait_with_timeout(&mut child, 0);
+        assert!(
+            result.is_err(),
+            "a hung process must be reported as an error, not silently waited out"
+        );
+        assert!(
+            result.unwrap_err().contains("runtime quota"),
+            "the error must explain why the process was killed"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the watchdog must actually kill the process, not wait for it to finish on its own"
+        );
+    }
+
+    /// Sıradan durum: süreç kotanın içinde kendiliğinden bitiyorsa hiçbir hata dönmemeli.
+    #[test]
+    fn wait_with_timeout_succeeds_for_a_process_that_finishes_in_time() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("the `true` coreutil must be available to run this test");
+        assert!(wait_with_timeout(&mut child, 5).is_ok());
+    }
 
     #[test]
     fn coding_plan_is_read_only_bounded_and_network_denied() {
