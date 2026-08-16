@@ -96,7 +96,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
-| F4 | Onaylı, izole coding ve yerel iş workbench'i | İLERLİYOR (8/15 madde `[x]`: plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışıyor; eval seti/genel tool framework/workflow runner hâlâ açık) | F2 + OS-isolated worker |
+| F4 | Onaylı, izole coding ve yerel iş workbench'i | İLERLİYOR (9/15 madde `[x]`: plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışıyor, 6 senaryolu eval seti geçiyor; genel tool framework/workflow runner hâlâ açık) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
@@ -477,7 +477,7 @@ Tamamlanma ölçütü: Kullanıcı bir klasörü izinle indeksleyip kaynak göst
 
 ### F4 — Güvenli coding ve yerel iş workbench'i
 
-Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi (8/15 madde `[x]`).
+Durum: İLERLİYOR — F3 exit gate 16 Ağustos 2026'da kapandı; aynı gün "Read-only project analyst" maddesiyle F4 işi fiilen başladı, aynı günün ikinci turunda plan→patch→onay→uygula→test zinciri uçtan uca TUI'de çalışır hâle geldi, üçüncü turunda 6 senaryolu bir coding eval seti eklendi (9/15 madde `[x]`).
 
 Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız onayla izole ortamda doğrulaması.
 
@@ -493,7 +493,7 @@ Amaç: JARVIS'in kod tabanını anlaması, değişiklik önermesi ve yalnız ona
 - [ ] Patch preview/review: satır bazlı görünüm, seçilebilir dosya scope'u, kullanıcı değişiklik notu ve explicit approve/reject.
 - [x] Patch apply transaction: approval'a bağlı diff hash, snapshot/backup, atomic write, başarısızlıkta rollback ve audit.
 - [ ] Test/verifier runner: allowlisted test komutu, exit code/log özeti, değiştirilen dosya hash'i ve mevcut test regresyon raporu.
-- [ ] Coding evaluation seti: küçük hata düzeltme, test ekleme, yanlış patch reddi, timeout/cancel, secret exposure ve mevcut-test regression senaryoları.
+- [x] Coding evaluation seti: küçük hata düzeltme, test ekleme, yanlış patch reddi, timeout/cancel, secret exposure ve mevcut-test regression senaryoları.
 - [ ] Yerel üretkenlik tool framework: takvim, not, dosya düzenleme gibi her yeni tool için capability manifest, minimum scope, preview, approval ve verifier.
 - [ ] Çok-adımlı workflow runner: planı kullanıcıya gösterme, her yan etkili adımdan önce policy/approval, retry/idempotency, iptalde cleanup ve audit özeti.
 
@@ -574,8 +574,20 @@ ADR-0001'in "henüz tamamlanmamış" diye işaretlediği maddelerden ikisi kapat
 - **Resource kontrolü**: `RLIMIT_AS`/`RLIMIT_FSIZE`/`RLIMIT_NPROC`/`RLIMIT_CPU` gerçek ve test edildi, ama bu "disk" için yalnız tek-dosya boyutu sınırı — toplam workspace disk kullanımı için gerçek bir kota (cgroups gerektirir) yok. Bu yüzden checklist'te hâlâ `[ ]`.
 - **Coding plan UX**: "varsayımlar"/"kullanıcı soruları" hâlâ ayrı üretilmiyor.
 - **Patch preview/review**: diff önizlemesi var (satır bazlı, okunabilir) ama seçilebilir dosya scope'u (çok-dosyalı bir patch'in yalnız bir kısmını onaylama) ve kullanıcı değişiklik notu yok — all-or-nothing.
-- **Test/verifier runner**: exit code/log özeti ve değiştirilen dosya hash'i var, ama "mevcut test regresyon raporu" yok — patch öncesi testlerin zaten başarısız olup olmadığına dair bir taban çizgi karşılaştırması yapılmıyor; bir test patch'ten önce de kırıksa, bu hâlâ "testler geçmedi" olarak raporlanıp değişiklik geri alınır (yanlış "suçlama" riski, dürüstçe not edildi).
-- **Coding evaluation seti / Yerel üretkenlik tool framework / Çok-adımlı workflow runner**: hiç başlanmadı — üçü de kendi başına büyük, açık uçlu mühendislik/tasarım işleri (bkz. `jarvis-f4-progress.md` kalıcı hafıza notu).
+- **Test/verifier runner**: exit code/log özeti ve değiştirilen dosya hash'i var, ama "mevcut test regresyon raporu" yok — patch öncesi testlerin zaten başarısız olup olmadığına dair bir taban çizgi karşılaştırması yapılmıyor; bir test patch'ten önce de kırıksa, bu hâlâ "testler geçmedi" olarak raporlanıp değişiklik geri alınır (yanlış "suçlama" riski, dürüstçe not edildi — bu bilinen sınır aşağıdaki "Coding evaluation seti"nin 6. senaryosu tarafından kasıtlı olarak kanıtlanıp regresyon testi altına alındı).
+- **Yerel üretkenlik tool framework / Çok-adımlı workflow runner**: hiç başlanmadı — ikisi de kendi başına büyük, açık uçlu mühendislik/tasarım işleri (bkz. `jarvis-f4-progress.md` kalıcı hafıza notu).
+
+**"Coding evaluation seti" (16 Ağustos 2026, F4 tamamlama oturumu — artık `[x]`):**
+- Yeni `src/coding_eval.rs` — diğer test modüllerinden farklı olarak tek bir fonksiyonu değil, **tüm F4 zincirini** (plan → patch taslağı → onay → uygula → test/doğrula → tut-ya-da-geri-al, `Runtime` üzerinden, TUI'nin `/plan`/`/patch`/`/approve-patch` ile sürdüğü aynı yol) uçtan uca test ediyor. Çevrimdışı ve deterministik (`ScriptedProvider`, gerçek model çağrısı yok) ama zincirin kendi başlattığı her süreç gerçek (`git apply`, `python3`).
+- Checklist'in isimlendirdiği 6 senaryonun hepsi ayrı ayrı test edildi:
+  1. **Küçük hata düzeltme**: yanlış işaretli bir toplama fonksiyonu düzeltiliyor, gerçek bir Python syntax kontrolüyle doğrulanıyor, kalıcı kalıyor.
+  2. **Test ekleme**: model dosyaya yeni bir test fonksiyonu ekliyor, sözdizimi geçerliliği korunuyor (gerçek bir `pytest` kurulumu garanti edilemediği için syntax kontrolü kullanıldı — dürüst bir sınır, modülün kendi dokümantasyonunda not edildi).
+  3. **Yanlış patch reddi**: plan dışı bir dosyayı hedefleyen diff `create_patch_proposal`'da, onaydan sonra kurcalanmış bir diff `apply_coding_patch`'te reddediliyor — hiçbir aşamada diske bir şey yazılmıyor.
+  4. **Timeout/cancel**: gerçek bir arka plan thread'den gelen bir `CancelFlag` ile kasıtlı uzun süren gerçek bir komut (`python3 -m timeit`) iptal ediliyor, patch **otomatik geri alınıyor** — yarı-uygulanmış bir durum kalmıyor.
+  5. **Secret exposure, iki bağımsız katmanda**: (a) modelin enjekte ettiği gerçekçi bir secret işaretçisi (`ghp_...`) patch taslağı seviyesinde reddediliyor — bu turda bulunan gerçek bir boşluğun (aşağıya bkz.) kanıtı; (b) `.env` gibi gizli-bilgi benzeri isimli bir dosya zaten `analyze_repository` taramasına hiç girmiyor, bir `CodingPlan`'ın hedefi bile olamıyor.
+  6. **Mevcut-test regresyonu**: patch'in kendisi doğru olsa bile, test komutu patch'ten bağımsız olarak zaten bozuksa (var olmayan bir modülü arıyor), sistem hâlâ "testler geçmedi" deyip geri alıyor — bu, yukarıda dürüstçe belgelenen bilinen sınırı (taban çizgisi karşılaştırması yok) kasıtlı olarak kanıtlayan ve gelecekte biri eklenirse bilinçli güncellenmesi gereken bir regresyon testi.
+- **Bu turda bulunan gerçek bir güvenlik boşluğu, eval seti yazılırken ortaya çıktı ve düzeltildi**: gizli-bilgi filtresi (`reject_secret_like_workspace_document_content`, F3'ten beri var) şimdiye kadar yalnız *okuma* tarafında (RAG indeksleme) çalışıyordu — model bir dosyayı yeniden yazarken üretebileceği içerik hiç taranmıyordu. `draft_patch_with_provider`'a artık aynı filtre uygulanıyor: model bir secret enjekte ederse (PEM private key bloğu, `AKIA`/`ghp_`/`xoxb-` gibi yüksek-güven token önekleri), **tüm taslak** reddediliyor (yalnız o dosya sessizce atlanmıyor — kullanıcının bunu görmesi gerekiyor).
+- Kanıt: 6 senaryo testi + 1 yeni `patch_generator` testi (secret enjeksiyonunun reddi). Tam paket: `cargo fmt`, `cargo test --offline` (240 lib + 53 main + 9 desktop, hepsi PASS), `cargo clippy --all-targets -D warnings` (temiz).
 
 ### F5 — Sesli etkileşim ve algı arayüzü
 

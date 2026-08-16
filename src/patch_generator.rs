@@ -16,6 +16,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::workbench::generate_unified_diff_for_file;
+use crate::workspace::reject_secret_like_workspace_document_content;
 use crate::{create_patch_proposal, CodingPlan, ModelProvider, PatchProposal};
 
 /// A model response of exactly this (trimmed) is treated as "no change needed in this file",
@@ -133,6 +134,19 @@ pub fn draft_patch_with_provider(
         // every rewrite silently strip the file's original POSIX text-file convention.
         if current_content.ends_with('\n') && !candidate.ends_with('\n') {
             candidate.push('\n');
+        }
+        // F4 "Coding evaluation seti" güvenlik senaryosu: gizli-bilgi filtresi şimdiye kadar
+        // yalnız *okuma* tarafında (RAG indeksleme) çalışıyordu — model bir dosyayı yeniden
+        // yazarken üretebileceği içerik hiç taranmıyordu. Aynı yüksek-güven, düşük-yanlış-pozitif
+        // işaretçi listesi (PEM private key blokları, bilinen token önekleri) burada da
+        // uygulanıyor. Bir dosyada secret-benzeri içerik bulunursa **tüm taslak** reddediliyor
+        // (yalnız o dosya sessizce atlanmıyor) — kullanıcının bunu görmesi ve neden hiçbir patch
+        // üretilmediğini anlaması gerekiyor, kısmi bir patch'i sessizce onun yerine geçirmek yerine.
+        if let Err(error) = reject_secret_like_workspace_document_content(&candidate) {
+            return Err(format!(
+                "patch draft for {} was rejected: {error}",
+                relative_path.display()
+            ));
         }
         let Some(diff) =
             generate_unified_diff_for_file(relative_path, &current_content, &candidate)?
@@ -272,6 +286,28 @@ mod tests {
         let result = draft_patch_with_provider(&plan, &provider);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no actual changes"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// F4 "Coding evaluation seti" güvenlik senaryosu: model bir dosyayı yeniden yazarken bir
+    /// secret enjekte ederse (ör. gerçekçi bir AWS anahtar öneki), tüm taslak sessizce kabul
+    /// edilmek yerine reddedilmeli.
+    #[test]
+    fn a_model_reply_that_injects_a_secret_like_marker_is_rejected_not_silently_applied() {
+        let root = fixture_workspace("secret-inject", &[("src/config.rs", "// placeholder\n")]);
+        let plan = create_read_only_coding_plan(
+            &root,
+            "config dosyasına örnek kimlik bilgisi ekle",
+            vec![PathBuf::from("src/config.rs")],
+            vec![],
+        )
+        .expect("valid plan");
+        let provider = ScriptedProvider::new(vec!["const KEY: &str = \"AKIAABCDEFGHIJKLMNOP\";\n"]);
+
+        let result = draft_patch_with_provider(&plan, &provider);
+        let error = result.expect_err("a secret-like rewrite must never become a valid patch");
+        assert!(error.contains("rejected"), "error was: {error}");
 
         fs::remove_dir_all(&root).ok();
     }

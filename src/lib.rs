@@ -2,6 +2,8 @@
 
 pub mod attachments;
 mod capabilities;
+#[cfg(test)]
+mod coding_eval;
 pub mod command_runner;
 pub mod desktop_config;
 pub mod embedding;
