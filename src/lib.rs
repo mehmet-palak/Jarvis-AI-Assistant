@@ -2,6 +2,7 @@
 
 pub mod attachments;
 mod capabilities;
+pub mod command_runner;
 pub mod desktop_config;
 pub mod embedding;
 mod memory_intent;
@@ -23,6 +24,9 @@ pub use attachments::{
     AttachmentReceipt, AttachmentRef,
 };
 pub use capabilities::{capability_manifest, CapabilityRegistry};
+pub use command_runner::{
+    run_allowlisted_command, run_test_plan, validate_command_line, CommandRun, TestRunReport,
+};
 pub use desktop_config::{
     default_desktop_preferences_path, load_desktop_preferences, save_desktop_preferences,
     DesktopPreferences, ThemePreference,
@@ -57,8 +61,9 @@ pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{
     apply_approved_patch, approve_patch, create_patch_proposal, create_read_only_coding_plan,
-    discard_patch_snapshot, restore_patch_snapshot, ApprovedPatch, CodingPlan, PatchApplication,
-    PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork,
+    discard_patch_snapshot, new_cancel_flag, restore_patch_snapshot, ApprovedPatch, CancelFlag,
+    CodingPlan, PatchApplication, PatchProposal, PatchSnapshot, WorkerLimits, WorkerNetwork,
+    WorkerStopReason,
 };
 pub(crate) use workspace::{
     chunk_workspace_text, configured_retrieval_candidate_multiplier, configured_rrf_k,

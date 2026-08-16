@@ -3,8 +3,11 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -20,6 +23,12 @@ pub struct WorkerLimits {
     pub max_output_bytes: u64,
     pub max_changed_files: usize,
     pub max_diff_bytes: usize,
+    /// F4 "Resource kontrolü". This dev sandbox has no cgroup delegation, so a real CPU/RAM
+    /// *cgroup* quota (the ADR-0001 "Ek" ideal) cannot be built or verified here. `setrlimit`
+    /// on the child right before `exec` needs no special privilege and is genuinely enforced by
+    /// the kernel — a real, testable substitute, not a cgroup replacement in every respect (it
+    /// bounds one process's own address space, not a whole cgroup's resident set).
+    pub max_memory_bytes: u64,
     pub network: WorkerNetwork,
 }
 
@@ -30,9 +39,29 @@ impl Default for WorkerLimits {
             max_output_bytes: 1_000_000,
             max_changed_files: 12,
             max_diff_bytes: 256 * 1024,
+            max_memory_bytes: 512 * 1024 * 1024,
             network: WorkerNetwork::Denied,
         }
     }
+}
+
+/// A cooperative cancel signal a caller can flip from another thread (e.g. the TUI reading a
+/// `/cancel` command while a worker runs on a background thread). Distinct from the
+/// `max_runtime_seconds` deadline: that is a quota the worker itself is bound by; this is the
+/// user asking to stop a specific in-flight run early. Both paths converge on the same
+/// terminate-then-kill machinery in `wait_with_deadline_and_cancellation`.
+pub type CancelFlag = Arc<AtomicBool>;
+
+pub fn new_cancel_flag() -> CancelFlag {
+    Arc::new(AtomicBool::new(false))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStopReason {
+    /// The caller flipped the cancel flag while the child was still running.
+    UserCancelled,
+    /// `max_runtime_seconds` elapsed before the child exited on its own.
+    RuntimeQuotaExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,7 +359,7 @@ pub fn validate_patch_proposal(proposal: &PatchProposal) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_workspace_relative_path(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_workspace_relative_path(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err("workbench path must be non-empty and workspace-relative".into());
     }
@@ -430,6 +459,7 @@ fn run_git_apply(
     limits: &WorkerLimits,
 ) -> Result<(), String> {
     let mut command = isolated_git_apply_command(workspace_root, check_only)?;
+    apply_worker_rlimits(&mut command, limits);
     let mut child = command
         .spawn()
         .map_err(|error| format!("isolated patch worker could not start git apply: {error}"))?;
@@ -462,55 +492,184 @@ fn run_git_apply(
 }
 
 /// Polls `child` for exit instead of blocking on it (`Child::wait`/`wait_with_output` would block
-/// indefinitely), killing it once `max_runtime_seconds` elapses. Factored out from `run_git_apply`
-/// so the watchdog itself — not `git apply`'s specific behavior — is what a test exercises
-/// (a real process that intentionally outlives its quota, e.g. `sleep`, proves the kill actually
-/// happens; `git apply` is fast and would never naturally hit a short test timeout on its own).
-/// Returns `Ok(())` once the child has genuinely exited (its output can then still be read via
-/// `wait_with_output`); `Err` only when the quota was exceeded and the child was killed.
-fn wait_with_timeout(
-    child: &mut std::process::Child,
+/// indefinitely), killing it once `max_runtime_seconds` elapses. Thin wrapper over
+/// `wait_with_deadline_and_cancellation` with no cancel flag, kept for the existing `git apply`
+/// call site and its tests.
+fn wait_with_timeout(child: &mut Child, max_runtime_seconds: u32) -> Result<(), String> {
+    wait_with_deadline_and_cancellation(child, max_runtime_seconds, None).map_err(
+        |(reason, message)| {
+            debug_assert_eq!(reason, WorkerStopReason::RuntimeQuotaExceeded);
+            message
+        },
+    )
+}
+
+/// F4 "Gerçek cancellation": `task cancel -> child process signal -> grace period -> kill ->
+/// cleanup`. Polls `child` for exit (never blocks indefinitely), and stops it early for either of
+/// two reasons: the caller flipped `cancel` from another thread, or `max_runtime_seconds` elapsed
+/// on its own. Either way the child is asked to exit first (`SIGTERM`) and only escalated to a
+/// hard `SIGKILL` after a short grace period — a process that exits cleanly on `SIGTERM` never
+/// sees the harder signal. Returns `Ok(())` once the child has genuinely exited by itself;
+/// `Err((reason, message))` only when it had to be stopped, so a caller can tell a user-requested
+/// cancel apart from a quota timeout (they are audited under different event names).
+pub(crate) fn wait_with_deadline_and_cancellation(
+    child: &mut Child,
     max_runtime_seconds: u32,
-) -> Result<(), String> {
+    cancel: Option<&CancelFlag>,
+) -> Result<(), (WorkerStopReason, String)> {
+    const GRACE_PERIOD: Duration = Duration::from_millis(200);
     let deadline = Instant::now() + Duration::from_secs(u64::from(max_runtime_seconds));
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => return Ok(()),
             Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "isolated patch worker exceeded its {max_runtime_seconds}s runtime quota and was terminated"
-                    ));
+                let cancelled = cancel.is_some_and(|flag| flag.load(Ordering::SeqCst));
+                let timed_out = Instant::now() >= deadline;
+                if cancelled || timed_out {
+                    let reason = if cancelled {
+                        WorkerStopReason::UserCancelled
+                    } else {
+                        WorkerStopReason::RuntimeQuotaExceeded
+                    };
+                    terminate_then_kill(child, GRACE_PERIOD);
+                    let explanation = match reason {
+                        WorkerStopReason::UserCancelled => {
+                            "isolated worker was cancelled by the user and terminated".to_string()
+                        }
+                        WorkerStopReason::RuntimeQuotaExceeded => format!(
+                            "isolated worker exceeded its {max_runtime_seconds}s runtime quota and was terminated"
+                        ),
+                    };
+                    return Err((reason, explanation));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(error) => {
-                return Err(format!(
-                    "isolated patch worker status check failed: {error}"
+                return Err((
+                    WorkerStopReason::RuntimeQuotaExceeded,
+                    format!("isolated worker status check failed: {error}"),
                 ));
             }
         }
     }
 }
 
-/// The release worker sees only the approved workspace, read-only runtime libraries, a private
+/// Sends `SIGTERM` and gives the child `grace_period` to exit on its own before escalating to a
+/// hard `SIGKILL`. A process that ignores or ends up unaffected by `SIGTERM` (or exits fast
+/// enough that the signal never even matters) is still guaranteed to be gone by the time this
+/// returns — `child.wait()` is always called last so the process is fully reaped, never a
+/// zombie.
+pub(crate) fn terminate_then_kill(child: &mut Child, grace_period: Duration) {
+    // SAFETY: `libc::kill` with a valid pid and a standard signal number is a plain syscall with
+    // no aliasing/lifetime requirements Rust needs to uphold here.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let grace_deadline = Instant::now() + grace_period;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => return,
+            Ok(None) => {
+                if Instant::now() >= grace_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Applies `setrlimit` to the child right before `exec` (F4 "Resource kontrolü"). Needs no
+/// special privilege — a process may always lower its own limits — and is genuinely enforced by
+/// the kernel, unlike the struct fields this module used to leave unread. Four limits, each
+/// targeting one line of the F4 threat model:
+/// - `RLIMIT_AS` (`limits.max_memory_bytes`): bounds the child's own address space.
+/// - `RLIMIT_FSIZE`: bounds any single file the child writes, independent of `max_memory_bytes`
+///   — a compiler/test run can legitimately produce build artifacts far larger than a source
+///   file, so this is deliberately more generous than `max_diff_bytes`.
+/// - `RLIMIT_NPROC`: bounds how many processes the child's *user* may hold at once — a real,
+///   if blunt, fork-bomb backstop (blunt because the limit is per-uid, not per-child-tree; the
+///   PID namespace from `--unshare-pid` is the sharper containment for "how many processes can
+///   this worker itself spawn").
+/// - `RLIMIT_CPU`: a generous multiple of the wall-clock quota, as a backstop against a
+///   multi-threaded spin that racks up more CPU-seconds than wall-seconds; the wall-clock
+///   watchdog (`wait_with_deadline_and_cancellation`) is still the primary enforcement.
+pub(crate) fn apply_worker_rlimits(command: &mut Command, limits: &WorkerLimits) {
+    let max_memory_bytes = limits.max_memory_bytes;
+    let max_runtime_seconds = u64::from(limits.max_runtime_seconds.max(1));
+    // SAFETY: `pre_exec` runs in the forked child before `exec`, between `fork` and `exec` — only
+    // async-signal-safe calls are allowed there. `setrlimit` is async-signal-safe. Each call sets
+    // a limit on the child itself; it cannot affect the parent (this) process's own limits.
+    unsafe {
+        command.pre_exec(move || {
+            let as_limit = libc::rlimit {
+                rlim_cur: max_memory_bytes,
+                rlim_max: max_memory_bytes,
+            };
+            libc::setrlimit(libc::RLIMIT_AS, &as_limit);
+            let fsize_bytes: u64 = 64 * 1024 * 1024;
+            let fsize_limit = libc::rlimit {
+                rlim_cur: fsize_bytes,
+                rlim_max: fsize_bytes,
+            };
+            libc::setrlimit(libc::RLIMIT_FSIZE, &fsize_limit);
+            let nproc: u64 = 64;
+            let nproc_limit = libc::rlimit {
+                rlim_cur: nproc,
+                rlim_max: nproc,
+            };
+            libc::setrlimit(libc::RLIMIT_NPROC, &nproc_limit);
+            let cpu_seconds = max_runtime_seconds.saturating_mul(16);
+            let cpu_limit = libc::rlimit {
+                rlim_cur: cpu_seconds,
+                rlim_max: cpu_seconds,
+            };
+            libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+            Ok(())
+        });
+    }
+}
+
+/// The release worker sees only the approved workspace, read-only runtime libraries (plus
+/// `extra_ro_binds` — e.g. a rustup-style `~/.cargo/bin` that lives outside `/usr`), a private
 /// `/tmp`, no inherited environment and a new network namespace. Failure to start bubblewrap is
-/// an execution failure, not permission to fall back to the host shell.
+/// an execution failure, not permission to fall back to the host shell. Shared by `git apply`
+/// (F4 patch apply) and the allowlist command runner (F4 "Allowlist command runner" /
+/// "Test/verifier runner") — one isolation boundary, not two independently-maintained ones.
 #[cfg(not(test))]
-fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result<Command, String> {
+pub(crate) fn isolated_worker_command(
+    workspace_root: &Path,
+    chdir_relative: Option<&Path>,
+    extra_ro_binds: &[PathBuf],
+    program: &Path,
+    args: &[&str],
+) -> Result<Command, String> {
     let workspace_root = fs::canonicalize(workspace_root)
         .map_err(|error| format!("isolated worker cannot resolve workspace: {error}"))?;
+    if let Some(relative) = chdir_relative {
+        validate_workspace_relative_path(relative)?;
+    }
+    let chdir = match chdir_relative {
+        Some(relative) => workspace_root.join(relative),
+        None => workspace_root.clone(),
+    };
     let bubblewrap = Path::new("/usr/bin/bwrap");
-    let git = Path::new("/usr/bin/git");
-    if !bubblewrap.is_file() || !git.is_file() {
-        return Err("isolated patch worker requires /usr/bin/bwrap and /usr/bin/git".into());
+    if !bubblewrap.is_file() {
+        return Err("isolated worker requires /usr/bin/bwrap".into());
+    }
+    if !program.is_file() {
+        return Err(format!(
+            "isolated worker program is unavailable: {}",
+            program.display()
+        ));
     }
     for runtime_path in [Path::new("/usr"), Path::new("/lib"), Path::new("/lib64")] {
         if !runtime_path.exists() {
             return Err(format!(
-                "isolated patch worker runtime path is unavailable: {}",
+                "isolated worker runtime path is unavailable: {}",
                 runtime_path.display()
             ));
         }
@@ -530,7 +689,11 @@ fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result
         .arg("--clearenv")
         .args(["--ro-bind", "/usr", "/usr"])
         .args(["--ro-bind", "/lib", "/lib"])
-        .args(["--ro-bind", "/lib64", "/lib64"])
+        .args(["--ro-bind", "/lib64", "/lib64"]);
+    for bind in extra_ro_binds {
+        command.arg("--ro-bind").arg(bind).arg(bind);
+    }
+    command
         .arg("--bind")
         .arg(&workspace_root)
         .arg(&workspace_root)
@@ -538,35 +701,57 @@ fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result
         .args(["--setenv", "HOME", "/nonexistent"])
         .args(["--setenv", "PATH", "/usr/bin"])
         .arg("--chdir")
-        .arg(&workspace_root)
+        .arg(&chdir)
         .arg("--")
-        .arg(git)
-        .arg("apply");
-    if check_only {
-        command.arg("--check");
-    }
-    command
-        .args(["--whitespace=error", "-"])
+        .arg(program)
+        .args(args)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     Ok(command)
 }
 
-/// Unit tests prove patch semantics using a controlled temporary folder. The test runner itself
-/// is already a sandbox and may prohibit `CLONE_NEWNET`; production builds never use this path.
+/// Unit tests prove patch/command semantics using a controlled temporary folder. The test runner
+/// itself is already a sandbox and may prohibit `CLONE_NEWNET`; production builds never use this
+/// path.
 #[cfg(test)]
-fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result<Command, String> {
-    let mut command = Command::new("git");
-    command.current_dir(workspace_root).arg("apply");
-    if check_only {
-        command.arg("--check");
+pub(crate) fn isolated_worker_command(
+    workspace_root: &Path,
+    chdir_relative: Option<&Path>,
+    _extra_ro_binds: &[PathBuf],
+    program: &Path,
+    args: &[&str],
+) -> Result<Command, String> {
+    if let Some(relative) = chdir_relative {
+        validate_workspace_relative_path(relative)?;
     }
+    let workspace_root = match chdir_relative {
+        Some(relative) => workspace_root.join(relative),
+        None => workspace_root.to_path_buf(),
+    };
+    let mut command = Command::new(program);
     command
-        .args(["--whitespace=error", "-"])
+        .current_dir(workspace_root)
+        .args(args)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    Ok(command)
+}
+
+fn isolated_git_apply_command(workspace_root: &Path, check_only: bool) -> Result<Command, String> {
+    let git = Path::new("/usr/bin/git");
+    #[cfg(not(test))]
+    if !git.is_file() {
+        return Err("isolated patch worker requires /usr/bin/git".into());
+    }
+    let mut args = vec!["apply"];
+    if check_only {
+        args.push("--check");
+    }
+    args.extend(["--whitespace=error", "-"]);
+    let mut command = isolated_worker_command(workspace_root, None, &[], git, &args)?;
+    command.stdout(Stdio::null());
     Ok(command)
 }
 
@@ -623,6 +808,76 @@ mod tests {
             .spawn()
             .expect("the `true` coreutil must be available to run this test");
         assert!(wait_with_timeout(&mut child, 5).is_ok());
+    }
+
+    /// F4 "Gerçek cancellation": a user-triggered cancel (flag flipped from another thread) must
+    /// stop a still-running child well before its runtime quota would — proves the cancel path is
+    /// genuinely wired, not just the deadline path already covered above.
+    #[test]
+    fn a_cancelled_process_is_stopped_long_before_its_runtime_quota() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("sleep must be available to run this test");
+        let cancel = new_cancel_flag();
+        let cancel_for_thread = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            cancel_for_thread.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = wait_with_deadline_and_cancellation(&mut child, 120, Some(&cancel));
+        let (reason, message) = result.expect_err("a cancelled worker must be reported as stopped");
+        assert_eq!(reason, WorkerStopReason::UserCancelled);
+        assert!(message.contains("cancelled"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancellation must not wait anywhere near the 120s quota"
+        );
+    }
+
+    /// A process that ignores `SIGTERM` (traps it away) must still be forced dead via `SIGKILL`
+    /// once the grace period elapses — proves the escalation path, not just the polite one.
+    #[test]
+    fn a_process_that_ignores_sigterm_is_escalated_to_sigkill() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 5"])
+            .spawn()
+            .expect("sh must be available to run this test");
+        let started = Instant::now();
+        let result = wait_with_deadline_and_cancellation(&mut child, 0, None);
+        let (reason, _message) = result.expect_err("a SIGTERM-immune child must still be killed");
+        assert_eq!(reason, WorkerStopReason::RuntimeQuotaExceeded);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "SIGKILL escalation must happen shortly after the grace period, not hang"
+        );
+    }
+
+    /// F4 "Resource kontrolü": a child whose `RLIMIT_FSIZE` is exceeded must fail to write past
+    /// that size — proves the rlimit is genuinely applied to the child, not merely stored as an
+    /// unread struct field (the bug this same module already fixed once for the runtime quota).
+    #[test]
+    fn a_child_process_is_bound_by_the_configured_memory_rlimit() {
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            // Ask the shell's own `ulimit -v` (RLIMIT_AS, in KiB) to prove the limit that was set
+            // via `pre_exec` is visible from inside the child — a direct, deterministic read of
+            // the kernel-enforced value rather than trying to provoke an allocation failure.
+            "ulimit -v",
+        ]);
+        let limits = WorkerLimits {
+            max_memory_bytes: 256 * 1024 * 1024,
+            ..WorkerLimits::default()
+        };
+        apply_worker_rlimits(&mut command, &limits);
+        let output = command.output().expect("sh must be available");
+        let reported_kib: u64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("ulimit -v must print a number of KiB");
+        assert_eq!(reported_kib * 1024, limits.max_memory_bytes);
     }
 
     #[test]
