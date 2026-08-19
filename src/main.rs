@@ -117,6 +117,14 @@ struct App {
     hold_to_talk_supported: bool,
     /// F5: seslendirme tercihleri (otomatik oynatma, hız, sessiz mod).
     speech: jarvis_core::SpeechSettings,
+    /// F6: bu oturumda işaretlenmiş dataset örnekleri (silinmiş/zehirli). Export'a veriliyor;
+    /// marker uygunluğu ezdiği için işaretli bir örnek hiçbir export'a giremiyor.
+    dataset_markers: Vec<jarvis_core::DatasetMarker>,
+    /// F5 köken: en son transkriptin ham metni. Gönderilen taslak buna birebir eşitse istek
+    /// `InputType::Voice` olarak işaretlenir; kullanıcı metni düzenlediyse artık yazılı girdidir.
+    /// Ayrı bir "düzenlendi mi" bayrağı yerine metni karşılaştırmak, her tuş vuruşuna kanca
+    /// takmadan doğru cevabı veriyor.
+    voice_draft: Option<String>,
     /// F4 "Patch preview/review": en son `/patch`'in ürettiği, henüz onaylanmamış teklif.
     pending_patch: Option<(CodingPlan, PatchProposal)>,
     /// F4 "Patch preview/review": kullanıcının `/patch-note` ile eklediği serbest metin —
@@ -156,6 +164,8 @@ impl App {
             voice_recording: None,
             hold_to_talk_supported: false,
             speech: jarvis_core::SpeechSettings::default(),
+            dataset_markers: Vec::new(),
+            voice_draft: None,
             pending_patch: None,
             pending_patch_note: None,
             active_cancel: None,
@@ -496,6 +506,79 @@ fn run_tui(
 ///
 /// Ortak fonksiyon, çünkü iki çağıran var: açık `/speak` komutu ve yanıt bittiğinde otomatik
 /// oynatma. İkisinin ayrı ayrı yazılması, sessiz modun bir yolda unutulması demek olurdu.
+/// Golden set'i arka planda koşar ve raporu döndürür.
+///
+/// Ayrı fonksiyon çünkü iki şeyi doğru yapması gerekiyor: (1) korpusu geçici bir dizine kurup
+/// koşum bitince temizlemek, (2) *ayrı* bir in-memory store kullanmak — sınav, kullanıcının
+/// gerçek çalışma alanını indekslememeli ve gerçek sohbet geçmişini bozmamalı.
+fn run_golden_set_offline_safe(
+    runtime: &Arc<Mutex<Runtime>>,
+    provider: &LlamaServerProvider,
+) -> String {
+    use jarvis_core::quality_eval;
+    use jarvis_core::ModelProvider as _;
+
+    let root = quality_eval::eval_corpus_dir();
+    if let Err(error) = quality_eval::write_eval_corpus(&root) {
+        return format!("Golden set korpusu kurulamadı: {error}");
+    }
+
+    // Sınav kendi izole store'unda koşar; kullanıcının gerçek DB'sine hiçbir şey yazılmaz.
+    let store = match SqliteStore::in_memory() {
+        Ok(store) => store,
+        Err(error) => return format!("Golden set store'u açılamadı: {error}"),
+    };
+    let mut eval_runtime = Runtime::with_store(store);
+    // Embedding sağlayıcısını gerçek runtime'dan değil, doğrudan yerelden alıyoruz: kilidi
+    // uzun süre tutmamak için (sınav dakikalarca sürüyor).
+    let embedding = jarvis_core::LlamaEmbeddingProvider::local_default();
+    let corpus_indexed = if embedding.is_reachable() {
+        eval_runtime.set_embedding_provider(Some(Box::new(embedding)));
+        quality_eval::index_eval_corpus(&mut eval_runtime, &root).is_ok()
+    } else {
+        false
+    };
+
+    let report = quality_eval::run_golden_set(&mut eval_runtime, provider, corpus_indexed);
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Sonucu registry'ye kaydet: bir ölçüm kaydedilmezse karşılaştırılamaz, F6'nın tüm amacı bu.
+    let recorded = {
+        let guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+        let previous = guard
+            .model_config_runs(1)
+            .ok()
+            .and_then(|runs| runs.first().map(|run| run.run_id.clone()));
+        let run = jarvis_core::ModelConfigRun {
+            schema_version: 1,
+            run_id: format!("eval-{}", jarvis_core::now_epoch()),
+            recorded_at: jarvis_core::now_epoch(),
+            provider_id: "llama-server".into(),
+            model_id: provider.model_id().to_string(),
+            model_fingerprint: provider.model_id().to_string(),
+            prompt_fingerprint: Runtime::active_prompt_fingerprint(),
+            server_settings: "TUI /eval".into(),
+            scenarios_passed: report.passed(),
+            scenarios_failed: report.failed(),
+            median_latency_ms: report.median_latency_ms(),
+            notes: "TUI /eval koşumu".into(),
+            rollback_target: previous,
+        };
+        guard.record_model_config_run(&run).is_ok()
+    };
+
+    let mut summary = report.summary();
+    if !corpus_indexed {
+        summary.push_str("\n  Not: embedding servisi kapalı olduğu için RAG senaryoları atlandı.");
+    }
+    if recorded {
+        summary.push_str(
+            "\n  Sonuç registry'ye kaydedildi — `/model-runs compare` ile öncekiyle karşılaştır.",
+        );
+    }
+    summary
+}
+
 fn speak_text(app: &mut App, text: &str) {
     if app.speech.muted {
         return;
@@ -575,6 +658,7 @@ fn finish_voice_recording(app: &mut App) {
                 Ok(transcript) => {
                     app.input = transcript.text.clone();
                     app.input_cursor = app.input.chars().count();
+                    app.voice_draft = Some(transcript.text.clone());
                     app.push_system(format!(
                         "Çevrildi: \"{}\" — gözden geçir, düzelt, göndermek için Enter. {}",
                         transcript.text,
@@ -1263,6 +1347,12 @@ fn submit(
     sender: &mpsc::Sender<WorkerReply>,
 ) {
     let input = app.input.trim().to_owned();
+    // Köken, taslak temizlenmeden önce belirlenmeli: transkript birebir korunmuşsa ses,
+    // kullanıcı dokunduysa yazılı girdi.
+    let origin = match app.voice_draft.take() {
+        Some(transcript) if transcript.trim() == input => InputType::Voice,
+        _ => InputType::Gui,
+    };
     app.input.clear();
     app.input_cursor = 0;
     if input.is_empty() {
@@ -1357,7 +1447,7 @@ fn submit(
         .map(str::trim)
         .filter(|task_id| !task_id.is_empty())
     {
-        approve_task(app, runtime, task_id);
+        approve_task(app, runtime, task_id, origin);
         return;
     }
     if let Some(task_id) = input
@@ -1367,6 +1457,112 @@ fn submit(
         .filter(|task_id| !task_id.is_empty())
     {
         cancel_task(app, runtime, task_id);
+        return;
+    }
+    if let Some(rest) = input.strip_prefix("/dataset ").map(str::trim) {
+        let (word, args) = rest.split_once(' ').unwrap_or((rest, ""));
+        match word {
+            "export" => {
+                let mut parts = args.split_whitespace();
+                let version: u32 = match parts.next().map(str::parse::<u32>) {
+                    Some(Ok(version)) => version,
+                    _ => {
+                        app.push_system(
+                            "Kullanım: /dataset export <sürüm-no> [dosya-yolu] — sürüm numarası, eğitilen modelin atıf yapacağı kimliktir."
+                                .to_string(),
+                        );
+                        return;
+                    }
+                };
+                let destination = parts.next().map(std::path::PathBuf::from);
+                let markers = app.dataset_markers.clone();
+                let export = runtime
+                    .lock()
+                    .expect("JARVIS runtime lock poisoned")
+                    .export_dataset(version, &markers);
+                match export {
+                    Ok(export) => {
+                        let mut lines = vec![format!(
+                            "Dataset v{} • {} kayıt • {} dışlandı • {} marker\n  manifest: {}",
+                            export.dataset_version,
+                            export.records.len(),
+                            export.excluded.len(),
+                            export.markers.len(),
+                            export.manifest_hash
+                        )];
+                        for item in export.excluded.iter().take(10) {
+                            lines.push(format!("  dışlandı: {} — {}", item.example_id, item.reason));
+                        }
+                        if let Some(path) = destination {
+                            match std::fs::write(&path, export.to_manifest_text()) {
+                                Ok(()) => lines.push(format!("  manifest yazıldı: {}", path.display())),
+                                Err(error) => lines.push(format!("  manifest yazılamadı: {error}")),
+                            }
+                        } else {
+                            lines.push("  (dosya yolu verilmedi — manifest diske yazılmadı)".to_string());
+                        }
+                        app.push_system(lines.join("\n"));
+                    }
+                    Err(error) => app.push_system(format!("Dataset export edilemedi: {error}")),
+                }
+            }
+            "mark" => {
+                let mut parts = args.splitn(3, ' ');
+                match (parts.next(), parts.next(), parts.next()) {
+                    (Some(example_id), Some(kind), reason)
+                        if !example_id.is_empty()
+                            && matches!(kind, "poisoned" | "deleted") =>
+                    {
+                        let reason = reason.unwrap_or("").trim();
+                        if reason.is_empty() {
+                            app.push_system(
+                                "Gerekçe zorunlu: /dataset mark <örnek-id> poisoned|deleted <gerekçe>"
+                                    .to_string(),
+                            );
+                            return;
+                        }
+                        // Marker'lar oturum içinde tutuluyor ve export'a veriliyor; silmek yerine
+                        // işaretlemek bilinçli — silinen bir id sonradan yeniymiş gibi dönebilirdi.
+                        app.dataset_markers.retain(|marker| marker.example_id != example_id);
+                        app.dataset_markers.push(jarvis_core::DatasetMarker {
+                            example_id: example_id.to_string(),
+                            kind: if kind == "poisoned" {
+                                jarvis_core::DatasetMarkerKind::Poisoned
+                            } else {
+                                jarvis_core::DatasetMarkerKind::Deleted
+                            },
+                            reason: reason.to_string(),
+                        });
+                        app.push_system(format!(
+                            "{example_id} → {kind} olarak işaretlendi. Bu örnek artık hiçbir export'a giremez."
+                        ));
+                    }
+                    _ => app.push_system(
+                        "Kullanım: /dataset mark <örnek-id> poisoned|deleted <gerekçe>".to_string(),
+                    ),
+                }
+            }
+            "markers" => {
+                if app.dataset_markers.is_empty() {
+                    app.push_system("İşaretlenmiş örnek yok.");
+                } else {
+                    let mut lines = vec![format!("Marker'lar ({}):", app.dataset_markers.len())];
+                    for marker in &app.dataset_markers {
+                        lines.push(format!(
+                            "  {} • {} • {}",
+                            marker.example_id,
+                            marker.kind.as_str(),
+                            marker.reason
+                        ));
+                    }
+                    app.push_system(lines.join("\n"));
+                }
+            }
+            _ => app.push_system(
+                "Kullanım: /dataset export <sürüm> [yol] • /dataset mark <id> poisoned|deleted <gerekçe> • /dataset markers"
+                    .to_string(),
+            ),
+        }
         return;
     }
     if let Some(rest) = input.strip_prefix("/voice-settings ").map(str::trim) {
@@ -1438,10 +1634,36 @@ fn submit(
                 }
                 return;
             }
+            "terfi" => {
+                // Onaylanmış bir adayı eğitim verisine dönüştürür. Politika kapısı
+                // (`feedback_candidate_is_promotable`) burada değil Runtime'da uygulanıyor —
+                // bu komut yalnız onu çağırıyor, kendi kararını vermiyor.
+                let mut parts = correction.split_whitespace();
+                match (parts.next(), parts.next()) {
+                    (Some(candidate_id), Some(capability)) => {
+                        let result = runtime
+                            .lock()
+                            .expect("JARVIS runtime lock poisoned")
+                            .promote_feedback_candidate(candidate_id, capability);
+                        match result {
+                            Ok(example) => app.push_system(format!(
+                                "{candidate_id} eğitim verisine terfi etti: {} ({}). `/dataset export <sürüm>` ile paketleyebilirsin.",
+                                example.example_id, example.expected_capability
+                            )),
+                            Err(error) => app.push_system(format!("Terfi reddedildi: {error}")),
+                        }
+                    }
+                    _ => app.push_system(
+                        "Kullanım: /feedback terfi <aday-id> <capability> — önce `/feedback onayla <id>` gerekir."
+                            .to_string(),
+                    ),
+                }
+                return;
+            }
             "iyi" | "kotu" | "duzelt" => {}
             _ => {
                 app.push_system(
-                    "Kullanım: `/feedback iyi` • `/feedback kotu` • `/feedback duzelt <doğru yanıt>` • `/feedback list` • `/feedback onayla|reddet <id>`"
+                    "Kullanım: `/feedback iyi` • `/feedback kotu` • `/feedback duzelt <doğru yanıt>` • `/feedback list` • `/feedback onayla|reddet <id>` • `/feedback terfi <id> <capability>`"
                         .to_string(),
                 );
                 return;
@@ -2735,7 +2957,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /model-runs (kayıtlı model/prompt konfigürasyonları ve ölçüm sonuçları), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** (bırakınca çevrilir); desteklemiyorsa /voice ile başlat-bitir. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Çevrilen metin doğrudan gönderilmez, taslağa yazılır — gönderilmeden önce görüp düzeltirsin. Ham ses hiçbir zaman saklanmaz. Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** (bırakınca çevrilir); desteklemiyorsa /voice ile başlat-bitir. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Çevrilen metin doğrudan gönderilmez, taslağa yazılır — gönderilmeden önce görüp düzeltirsin. Ham ses hiçbir zaman saklanmaz. Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2745,7 +2967,7 @@ fn submit(
         "/approve" | "approve" => {
             let task_id = single_pending_task_id(runtime);
             match task_id {
-                Ok(task_id) => approve_task(app, runtime, &task_id),
+                Ok(task_id) => approve_task(app, runtime, &task_id, origin),
                 Err(message) => app.push_system(message),
             }
             return;
@@ -2842,6 +3064,70 @@ fn submit(
                     .to_string(),
             );
             app.push_system(lines.join("\n"));
+            return;
+        }
+        "/eval" => {
+            // Golden set ~1 dakika sürer ve canlı model gerektirir; arayüzü kilitlememek için
+            // arka planda koşuyor. Sonuç geldiğinde sistem mesajı olarak düşüyor.
+            if app.pending {
+                app.push_system("Şu an bir işlem sürüyor; bitince tekrar dene.");
+                return;
+            }
+            app.push_system(
+                "Golden set koşuluyor (canlı model, ~1 dakika sürebilir)… sonuç burada görünecek."
+                    .to_string(),
+            );
+            let runtime_handle = Arc::clone(runtime);
+            let eval_provider = provider.clone();
+            let sender = sender.clone();
+            let index = app.messages.len();
+            app.messages.push(Message {
+                role: MessageRole::System,
+                content: "⏳ Golden set koşuluyor…".into(),
+            });
+            app.pending = true;
+            std::thread::spawn(move || {
+                let content = run_golden_set_offline_safe(&runtime_handle, &eval_provider);
+                let _ = sender.send(WorkerReply {
+                    message_index: index,
+                    content,
+                    status: "Hazır".into(),
+                    task_id: String::new(),
+                    approval_pending: false,
+                    notification: None,
+                    sources: Vec::new(),
+                    citations: Vec::new(),
+                    attachment_receipts: Vec::new(),
+                    memory_proposal: None,
+                    coding_plan: None,
+                    patch_proposal: None,
+                });
+            });
+            return;
+        }
+        "/model-runs compare" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .model_config_regression()
+            {
+                Ok(None) => app.push_system(
+                    "Karşılaştırılacak bir konfigürasyon çifti yok. En yeni kaydın bir `rollback_target`'ı olmalı."
+                        .to_string(),
+                ),
+                Ok(Some(comparison)) => app.push_system(format!(
+                    "{} → {} • {:?}\n  {}\n  senaryo: {} → {} • medyan: {} ms → {} ms",
+                    comparison.previous_run_id,
+                    comparison.current_run_id,
+                    comparison.verdict,
+                    comparison.reason,
+                    comparison.previous_passed,
+                    comparison.current_passed,
+                    comparison.previous_median_latency_ms,
+                    comparison.current_median_latency_ms
+                )),
+                Err(error) => app.push_system(format!("Karşılaştırma yapılamadı: {error}")),
+            }
             return;
         }
         "/model-runs" => {
@@ -3079,7 +3365,12 @@ fn submit(
                     .expect("system clock must be after UNIX epoch")
                     .as_nanos()
             ),
-            input_type: InputType::Gui,
+            // F5 köken (provenance): sesten gelen bir istek `Voice` olarak işaretleniyor.
+            // Bu bir etiket değil, audit kaydının doğruluğu ve `approval_channel_requirement`
+            // için dayanak. Kullanıcı transkripti düzenlediyse artık yazılı girdi sayılıyor —
+            // düzenleme, sesin taşıdığı belirsizliği (yanlış duyulma, başkasının sesi) ortadan
+            // kaldıran şeyin ta kendisi.
+            input_type: origin,
             content: input,
             attachments,
         };
@@ -3266,11 +3557,23 @@ fn show_pending_approvals(app: &mut App, runtime: &Arc<Mutex<Runtime>>) {
     }
 }
 
-fn approve_task(app: &mut App, runtime: &Arc<Mutex<Runtime>>, task_id: &str) {
+/// F5 sesli onay sınırının **gerçek akıştaki** uygulama noktası.
+///
+/// `origin`, onayın hangi kanaldan geldiğini taşıyor. Kullanıcı `/approve` yazdıysa bu yazılı
+/// bir doğrulamadır; ama transkripti *düzenlemeden* gönderdiyse komut sesle verilmiş sayılır ve
+/// `approve_from` onay gerektiren bir capability için reddeder. Bu ayrım olmadan sınır yalnız
+/// kâğıt üstünde kalırdı: sesli bir "/approve ..." yazılı onay gibi işlenirdi.
+fn approve_task(app: &mut App, runtime: &Arc<Mutex<Runtime>>, task_id: &str, origin: InputType) {
     let result = runtime
         .lock()
         .expect("JARVIS runtime lock poisoned")
-        .approve(task_id);
+        .approve_from(task_id, origin);
+    if result.is_none() && origin == InputType::Voice {
+        app.push_system(
+            "Bu işlem sesle onaylanamaz — ses yanlış duyulabilir, başkası söylemiş veya bir kayıttan oynatılmış olabilir. Onaylamak için komutu klavyeden yaz (veya çevrilen metni düzenle).".to_string(),
+        );
+        return;
+    }
     match result {
         Some((task, tool, verification)) => {
             let content = tool.error.unwrap_or(tool.output);

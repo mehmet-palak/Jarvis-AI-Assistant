@@ -5064,3 +5064,106 @@ fn voice_is_not_restricted_for_actions_that_never_needed_approval() {
         ApprovalChannelRequirement::WrittenConfirmationRequired
     );
 }
+
+/// F5 sesli onay sınırının **gerçek akışta** uygulandığının kanıtı. Daha önce kural yalnız
+/// Runtime içinde vardı ama hiçbir çağıran `Voice` geçirmiyordu — yani sınır kâğıt üstündeydi.
+/// Bu test, sesli kökenli bir onayın gerçekten reddedildiğini ve yazılı olanın geçtiğini
+/// aynı görev üzerinde doğruluyor.
+#[test]
+fn a_voice_originated_approval_is_refused_while_the_typed_one_succeeds() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut runtime = Runtime::with_store(store);
+
+    let (task, _tool, _verify) = runtime.handle(Request {
+        schema_version: 1,
+        request_id: "vo-1".into(),
+        input_type: InputType::Voice,
+        content: "not oluştur: sesli onay gerçek akış testi".into(),
+        attachments: Vec::new(),
+    });
+    assert_eq!(task.state, TaskState::WaitingForUser);
+
+    assert!(
+        runtime
+            .approve_from(&task.task_id, InputType::Voice)
+            .is_none(),
+        "sesle verilen onay reddedilmeli"
+    );
+    // Reddedilen deneme iz bırakmalı: sonradan inceleyen biri bunu görebilmeli.
+    assert!(runtime
+        .audit
+        .iter()
+        .any(|event| event.event == "approval.channel_insufficient"));
+
+    // Aynı görev klavyeden onaylanabilmeli — kural kanalla ilgili, eylemi yasaklamıyor.
+    assert!(
+        runtime
+            .approve_from(&task.task_id, InputType::Gui)
+            .is_some(),
+        "yazılı onay aynı eylemi tamamlayabilmeli"
+    );
+}
+
+/// F6 erişilebilirlik: golden set artık üretim kodunda tanımlı, yani hem test hem `/eval`
+/// aynı senaryoları koşuyor. Tanımın kendisi tutarlı olmalı — boş prompt, çakışan id veya
+/// korpus gerektirdiği hâlde işaretlenmemiş bir senaryo sessiz bir ölçüm hatasıdır.
+#[test]
+fn the_shared_golden_set_definition_is_internally_consistent() {
+    use crate::quality_eval::GOLDEN_SET;
+
+    assert!(GOLDEN_SET.len() >= 10, "golden set daraltılmamalı");
+
+    let mut ids: Vec<&str> = GOLDEN_SET.iter().map(|scenario| scenario.id).collect();
+    ids.sort_unstable();
+    let unique = ids.len();
+    ids.dedup();
+    assert_eq!(unique, ids.len(), "senaryo id'leri benzersiz olmalı");
+
+    for scenario in GOLDEN_SET {
+        assert!(
+            !scenario.prompt.trim().is_empty(),
+            "{} boş prompt taşıyor",
+            scenario.id
+        );
+        assert!(
+            !scenario.description.trim().is_empty(),
+            "{} açıklamasız",
+            scenario.id
+        );
+        // RAG senaryoları korpus gerektirdiğini bildirmeli; aksi halde korpus indekslenmemişken
+        // sessizce koşulur ve kaçınılmaz olarak düşerler.
+        if scenario.id.starts_with('R') {
+            assert!(
+                scenario.needs_corpus,
+                "{} korpus gerektirdiğini bildirmeli",
+                scenario.id
+            );
+        }
+    }
+}
+
+/// Korpus indekslenmemişken RAG senaryoları **atlanmalı**, sessizce "düştü" sayılmamalı:
+/// eksik altyapıyı model kalitesizliği gibi raporlamak, ölçümü yanlış yönlendirir.
+#[test]
+fn rag_scenarios_are_skipped_rather_than_failed_when_no_corpus_is_indexed() {
+    use crate::quality_eval::{run_golden_set, GOLDEN_SET};
+
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut runtime = Runtime::with_store(store);
+    let provider = DeterministicModelProvider;
+
+    let report = run_golden_set(&mut runtime, &provider, false);
+    let coding_count = GOLDEN_SET
+        .iter()
+        .filter(|scenario| !scenario.needs_corpus)
+        .count();
+    assert_eq!(
+        report.outcomes.len(),
+        coding_count,
+        "korpus yokken yalnız korpussuz senaryolar koşulmalı"
+    );
+    assert!(
+        report.outcomes.iter().all(|item| !item.id.starts_with('R')),
+        "RAG senaryoları atlanmalıydı"
+    );
+}

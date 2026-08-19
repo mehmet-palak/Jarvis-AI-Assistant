@@ -17,6 +17,7 @@ mod policy;
 mod profile;
 pub mod profile_files;
 pub mod project_analyst;
+pub mod quality_eval;
 mod runtime;
 mod seccomp_filter;
 pub mod vision;
@@ -122,7 +123,7 @@ use model::JARVIS_SYSTEM_PROMPT;
 use model::{model_capability_intent, UNTRUSTED_MODEL_INTENT_SUPPRESSED};
 use persistence::audit_hash;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputType {
     Cli,
     Voice,

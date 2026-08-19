@@ -674,7 +674,7 @@ Tam paket: `cargo fmt`, `cargo test --offline` (272 lib + 66 main + 9 desktop, h
 
 ### F5 — Sesli etkileşim ve algı arayüzü
 
-Durum: TAMAMLANDI — 11/11 madde, 19 Ağustos 2026. Ses yığını kuruldu ve gerçek donanımda (mikrofon + modeller) uçtan uca kanıtlandı. Mimari kararlar: [ADR-0007](docs/adr/0007-voice-audio-stack.md).
+Durum: TAMAMLANDI — 11/11 madde, 19 Ağustos 2026. **Erişilebilirlik boşlukları 20 Ağustos'ta kapatıldı** (aşağıya bak). Ses yığını kuruldu ve gerçek donanımda (mikrofon + modeller) uçtan uca kanıtlandı. Mimari kararlar: [ADR-0007](docs/adr/0007-voice-audio-stack.md).
 
 Amaç: Her zaman dinleyen bir sistem yerine açık, mahremiyeti koruyan push-to-talk ses akışı.
 
@@ -709,9 +709,25 @@ Seçilen yığın — üçü de **alt süreç**, projeye tek bir yeni Rust bağ�
 
 Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek transkripti görür/onaylar ve yanıtı isterse sesli duyar.
 
+**Erişilebilirlik düzeltmesi — 20 Ağustos 2026.** İki gerçek boşluk kapatıldı:
+
+- **Sesli onay sınırı gerçek akışta uygulanmıyordu.** `approve_from` hiçbir yerden çağrılmıyordu;
+  TUI istekleri `Gui` olarak kuruyor, onay `approve()` üzerinden `Cli` gidiyordu — yani sınır
+  kâğıt üstündeydi. Artık **köken (provenance) taşınıyor**: transkript *düzenlenmeden*
+  gönderildiyse istek `InputType::Voice` oluyor (kullanıcı metni düzenlediyse artık yazılı girdi
+  — düzenleme, sesin taşıdığı belirsizliği ortadan kaldıran şeyin ta kendisi). Ayrı bir
+  "düzenlendi mi" bayrağı yerine metin karşılaştırılıyor: her tuş vuruşuna kanca takmadan doğru
+  cevabı veriyor. `approve_task` kökeni `approve_from`'a geçiriyor, böylece **sesle verilmiş bir
+  `/approve` reddediliyor** ve kullanıcıya nedeni açıklanıyor.
+- **Masaüstü istemcisinde hiç ses yoktu.** Eklendi ve TUI ile aynı çekirdek fonksiyonları
+  çağırıyor — iki istemcinin ayrı ses mantığı yazması, birinde düzeltilen bir gizlilik kuralının
+  diğerinde eksik kalması demek olurdu. Masaüstünde **gerçek bas-tut** doğrudan mümkün (egui
+  buton basılı durumunu bildiriyor, terminalin aksine); canlı seviye göstergesi, seslendirme,
+  sessize alma ve otomatik oynatma da var.
+
 ### F6 — Model kalite, dataset governance ve adaptasyon
 
-Durum: TAMAMLANDI — 7/7 madde, 19 Ağustos 2026. Hiçbir model indirilmedi: "model karşılaştırması" maddesi, makinede F2'de zaten indirilmiş olan Qwen2.5-VL-3B aday olarak kullanılarak tamamlandı.
+Durum: TAMAMLANDI — 7/7 madde, 19 Ağustos 2026. **Erişilebilirlik boşlukları 20 Ağustos'ta kapatıldı** (aşağıya bak). Hiçbir model indirilmedi: "model karşılaştırması" maddesi, makinede F2'de zaten indirilmiş olan Qwen2.5-VL-3B aday olarak kullanılarak tamamlandı.
 
 **F6'nın en önemli çıktısı bir özellik değil, bir uyarı:** golden set iki bağımsız kanıtla (madde 1 kalite değerlendirmesi + madde 3 model karşılaştırması) **ayrım gücü yetersiz** çıktı — 3B CPU modeli, 8B GPU modeliyle berabere kalıyor. Bir sonraki tur zor/çok adımlı senaryolarla genişletme olmalı; aksi halde ne model seçimi ne de fine-tuning kararı bu setle desteklenemez.
 
@@ -757,6 +773,24 @@ değil — sıralama buna göre revize edildi.
   - `ModelConfigRun` + migration 11. Registry bilinçli olarak bir **log**, anahtar değil: satır yazmak hangi modelin/prompt'un kullanıldığını değiştirmez. Prompt sürümü olarak commit hash'i değil **prompt metninin SHA-256'sı** saklanır — commit hash'i commit edilmemiş bir düzenlemeyi kaçırırdı.
   - Golden set koşumu artık kaydı **otomatik** üretiyor (elle doldurma bitti). TUI: `/model-runs`.
   - Kanıt: 3 birim testi + canlı koşum (4/4 senaryo, medyan 13.5 s, prompt parmak izi `93140771…`) PASS.
+
+**Erişilebilirlik düzeltmesi — 20 Ağustos 2026.** F6'nın maddeleri tamamlanmıştı ama yaptığımız
+şeylerin bir kısmına TUI'den ulaşılamıyordu: kod vardı, test edilmişti, ama kullanıcı için
+pratikte yoktu. Bu, "çağrılmayan bir kural sadece belgedir" hatasının bir başka biçimiydi ve
+kapatıldı:
+
+- Golden set, test modülünden **üretim koduna** taşındı ([src/quality_eval.rs](src/quality_eval.rs)).
+  Artık hem `model_quality_eval` testleri hem TUI'nin `/eval` komutu **aynı tanımı** koşuyor —
+  ikisinin birbirinden sapması mümkün değil. `/eval` arka planda çalışıyor (arayüzü kilitlemiyor),
+  izole bir in-memory store kullanıyor (kullanıcının gerçek çalışma alanını indekslemiyor) ve
+  sonucu otomatik olarak registry'ye kaydediyor.
+- `/model-runs compare` — eski/yeni verdict'i artık görülebiliyor.
+- `/feedback terfi <id> <capability>` — onaylı aday artık gerçekten eğitim verisine dönüşebiliyor.
+  Bu olmadan zincirin son adımı gerçek kullanımda erişilemezdi.
+- `/dataset export <sürüm> [yol]`, `/dataset mark <id> poisoned|deleted <gerekçe>`,
+  `/dataset markers` — export ve marker'lar artık kullanılabilir.
+- Korpus indekslenmemişken RAG senaryoları **atlanıyor**, sessizce "düştü" sayılmıyor: eksik
+  altyapıyı model kalitesizliği gibi raporlamak ölçümü yanlış yönlendirirdi.
 
 Tamamlanma ölçütü: Her model veya adapter değişikliği, sürümlü eval'de hedef metriği iyileştirir ve güvenlik/latency regresyonu üretmez; aksi halde kullanılmaz.
 

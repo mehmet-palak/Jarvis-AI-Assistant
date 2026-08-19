@@ -128,6 +128,10 @@ struct JarvisDesktop {
     message_search: String,
     role_filter: Option<MessageRole>,
     draft: String,
+    /// F5: süren sesli kayıt (gerçek bas-tut — egui buton basılı durumunu bildiriyor).
+    voice_recording: Option<jarvis_core::VoiceRecording>,
+    /// F5: seslendirme tercihleri; TUI ile aynı tip, aynı varsayılanlar (otomatik oynatma kapalı).
+    speech: jarvis_core::SpeechSettings,
     queued_attachments: Vec<AttachmentRef>,
     sent_attachment_receipts: Vec<AttachmentReceipt>,
     previews: HashMap<String, TextureHandle>,
@@ -261,6 +265,8 @@ impl JarvisDesktop {
             message_search: String::new(),
             role_filter: None,
             draft: String::new(),
+            voice_recording: None,
+            speech: jarvis_core::SpeechSettings::default(),
             queued_attachments: vec![],
             sent_attachment_receipts: vec![],
             previews: HashMap::new(),
@@ -297,6 +303,11 @@ impl JarvisDesktop {
             }
             self.pending = false;
             self.scroll_to_latest = true;
+            // F5 opt-in otomatik seslendirme — TUI ile aynı kural: varsayılan kapalı, sessiz mod
+            // her şeyi bastırır (`speak_last_reply` kontrolü kendi içinde yapıyor).
+            if self.speech.should_speak_reply() {
+                self.speak_last_reply();
+            }
             self.close_requested |= reply.close_window;
             self.status = reply.status;
             self.record_attachment_receipts(reply.attachment_receipts);
@@ -803,6 +814,145 @@ impl JarvisDesktop {
         }
     }
 
+    /// Sistem mesajı ekler. Ses akışı hata/uyarı bildirmek zorunda ve masaüstü istemcisinde
+    /// TUI'nin `push_system`'inin karşılığı yoktu.
+    fn push_system_message(&mut self, content: String) {
+        self.messages.push(Message {
+            role: MessageRole::System,
+            content,
+        });
+    }
+
+    /// F5: masaüstü istemcisinde sesli giriş/çıkış kontrolleri.
+    ///
+    /// TUI'deki `/voice` ve `/speak` komutlarıyla **aynı çekirdek fonksiyonları** çağırır; iki
+    /// istemcinin ayrı ses mantığı yazması, birinde düzeltilen bir gizlilik kuralının diğerinde
+    /// eksik kalması demek olurdu. Burada gerçek bas-TUT mümkün: egui buton basılı/bırakıldı
+    /// durumunu doğrudan bildiriyor, terminalin aksine.
+    fn show_voice_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        voice: &jarvis_core::VoiceStackAvailability,
+    ) {
+        if !voice.voice_input_ready() && !voice.speech {
+            return;
+        }
+        egui::Frame::group(ui.style())
+            .fill(COLOR_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
+            .show(ui, |ui| {
+                ui.label(RichText::new("SES").size(12.0).color(COLOR_TEAL));
+                if voice.voice_input_ready() {
+                    let button = ui.button(if self.voice_recording.is_some() {
+                        "🎙 KAYITTA — bırak"
+                    } else {
+                        "🎙 Bas ve konuş"
+                    });
+                    // Gerçek bas-tut: basılı tutulduğu sürece kayıt sürer.
+                    if button.is_pointer_button_down_on() && self.voice_recording.is_none() {
+                        self.start_voice_recording();
+                    }
+                    if !button.is_pointer_button_down_on() && self.voice_recording.is_some() {
+                        self.finish_voice_recording();
+                    }
+                    if let Some(recording) = self.voice_recording.as_ref() {
+                        let level = jarvis_core::recent_audio_level(recording.path());
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {}",
+                                jarvis_core::level_meter(level, 12),
+                                jarvis_core::level_description(level)
+                            ))
+                            .size(12.0)
+                            .color(COLOR_TEAL_DIM),
+                        );
+                    }
+                    ui.label(
+                        RichText::new("Ham ses saklanmaz; çevrilen metin gönderilmeden önce yazı kutusunda görünür.")
+                            .size(11.0)
+                            .color(COLOR_TEAL_DIM),
+                    );
+                }
+                if voice.speech {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("🔊 Son yanıtı seslendir").clicked() {
+                            self.speak_last_reply();
+                        }
+                        let mute_label = if self.speech.muted { "Sesi aç" } else { "Sessize al" };
+                        if ui.small_button(mute_label).clicked() {
+                            self.speech.muted = !self.speech.muted;
+                        }
+                    });
+                    ui.checkbox(&mut self.speech.auto_play, "Yanıt bitince otomatik seslendir");
+                }
+            });
+    }
+
+    fn start_voice_recording(&mut self) {
+        let paths = jarvis_core::VoiceStackPaths::local_default();
+        match jarvis_core::VoiceRecording::start(
+            &paths,
+            &format!("desktop-{}", jarvis_core::now_epoch()),
+        ) {
+            Ok(recording) => self.voice_recording = Some(recording),
+            Err(error) => self.push_system_message(format!("Kayıt başlatılamadı: {error}")),
+        }
+    }
+
+    fn finish_voice_recording(&mut self) {
+        let Some(recording) = self.voice_recording.take() else {
+            return;
+        };
+        let paths = jarvis_core::VoiceStackPaths::local_default();
+        match recording.stop() {
+            Ok(wav) => match jarvis_core::transcribe_recording(
+                &paths,
+                &wav,
+                jarvis_core::RecordingRetention::DiscardImmediately,
+                "desktop",
+            ) {
+                Ok(transcript) if transcript.text.trim().is_empty() => {
+                    self.push_system_message(
+                        jarvis_core::TranscriptRejection::Empty
+                            .user_message()
+                            .to_string(),
+                    );
+                }
+                // Transkript doğrudan gönderilmiyor: yazı kutusuna yazılıyor, kullanıcı görüp
+                // düzeltebiliyor — TUI ile aynı sözleşme.
+                Ok(transcript) => self.draft = transcript.text,
+                Err(error) => self.push_system_message(format!("Çeviri başarısız: {error}")),
+            },
+            Err(error) => self.push_system_message(format!("Kayıt durdurulamadı: {error}")),
+        }
+    }
+
+    fn speak_last_reply(&mut self) {
+        if self.speech.muted {
+            self.push_system_message("Sessiz mod açık.".to_string());
+            return;
+        }
+        let Some(text) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::Jarvis)
+            .map(|message| message.content.clone())
+        else {
+            self.push_system_message("Seslendirilecek bir yanıt yok.".to_string());
+            return;
+        };
+        let paths = jarvis_core::VoiceStackPaths::local_default();
+        let wav = paths.scratch_dir.join("desktop-speak.wav");
+        match jarvis_core::synthesize_speech_with(&paths, &text, &wav, &self.speech) {
+            Ok(()) => {
+                let _ = std::process::Command::new("pw-play").arg(&wav).status();
+                let _ = std::fs::remove_file(&wav);
+            }
+            Err(error) => self.push_system_message(format!("Seslendirme başarısız: {error}")),
+        }
+    }
+
     fn show_approval_controls(&mut self, ui: &mut egui::Ui) {
         if self.pending_approval_tasks.is_empty() {
             return;
@@ -839,6 +989,23 @@ impl JarvisDesktop {
         hud_status_row(ui, "MODEL", &self.model_status, model_color);
         hud_status_row(ui, "DONANIM", "GPU (VULKAN) 28/36", COLOR_TEAL_DIM);
         hud_status_row(ui, "ERİŞİM", "LOOPBACK", COLOR_TEAL_DIM);
+        let voice = jarvis_core::VoiceStackPaths::local_default().availability();
+        hud_status_row(
+            ui,
+            "SES",
+            if voice.voice_input_ready() {
+                "HAZIR"
+            } else {
+                "KURULU DEĞİL"
+            },
+            if voice.voice_input_ready() {
+                COLOR_TEAL_DIM
+            } else {
+                COLOR_GOLD
+            },
+        );
+        ui.add_space(10.0);
+        self.show_voice_controls(ui, &voice);
         ui.add_space(10.0);
 
         egui::Frame::group(ui.style())

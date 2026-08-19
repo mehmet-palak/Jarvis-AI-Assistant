@@ -851,4 +851,50 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    /// F6 golden set'inin tamamı, **üretim kodundaki tek tanımdan** koşulur
+    /// (`crate::quality_eval::GOLDEN_SET`). Bu test ile TUI'nin `/eval` komutu aynı senaryoları
+    /// çalıştırır; ikisinin birbirinden sapması mümkün değil.
+    #[test]
+    #[ignore = "canlı model + embedding sunucusu gerektirir"]
+    fn the_whole_golden_set_passes_from_the_single_shared_definition() {
+        let provider = live_provider();
+        let root = crate::quality_eval::eval_corpus_dir();
+        crate::quality_eval::write_eval_corpus(&root).expect("korpus");
+
+        let mut runtime = eval_runtime();
+        runtime.set_embedding_provider(Some(Box::new(LlamaEmbeddingProvider::local_default())));
+        crate::quality_eval::index_eval_corpus(&mut runtime, &root).expect("indeksleme");
+
+        let report = crate::quality_eval::run_golden_set(&mut runtime, &provider, true);
+        for outcome in &report.outcomes {
+            println!(
+                "{} {} • {} • {} ms{}",
+                if outcome.passed { "PASS" } else { "FAIL" },
+                outcome.id,
+                outcome.capability,
+                outcome.latency_ms,
+                if outcome.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", outcome.detail)
+                }
+            );
+        }
+        println!("\n{}", report.summary());
+
+        assert_eq!(
+            report.outcomes.len(),
+            crate::quality_eval::GOLDEN_SET.len(),
+            "korpus indekslendiğinde hiçbir senaryo atlanmamalı"
+        );
+        assert_eq!(
+            report.failed(),
+            0,
+            "golden set düştü:\n{}",
+            report.summary()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
