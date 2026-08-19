@@ -1,16 +1,17 @@
 use super::{
     apply_history_key_scroll, apply_history_mouse_scroll, backspace_at_cursor, build_input_lines,
     cursor_visual_position, delete_forward_at_cursor, delete_previous_word, draft_rows,
-    history_line_count, history_lines, input_view, insert_char_at_cursor,
-    insert_pasted_text_at_cursor, is_clipboard_paste_shortcut, is_delete_previous_word_shortcut,
-    is_forward_delete_shortcut, is_insert_newline_shortcut, is_kill_to_end_shortcut,
-    is_kill_to_start_shortcut, is_move_to_end_shortcut, is_move_to_start_shortcut,
-    is_primary_selection_paste, kill_to_end_from_cursor, kill_to_start_from_cursor,
-    move_cursor_left, move_cursor_right, move_cursor_to_end, move_cursor_to_start,
-    move_cursor_word_left, move_cursor_word_right, native_desktop_binary_path,
-    notification_arguments, notification_preview, parse_remember_namespace_prefix,
-    return_to_latest, should_clear_draft, should_close_tui_for_key, submit, try_notify_desktop,
-    tui_exit_action, tui_notification, App, Message, MessageRole, TuiExitAction, WorkerReply,
+    embedding_attach_decision, history_line_count, history_lines, input_view,
+    insert_char_at_cursor, insert_pasted_text_at_cursor, is_clipboard_paste_shortcut,
+    is_delete_previous_word_shortcut, is_forward_delete_shortcut, is_insert_newline_shortcut,
+    is_kill_to_end_shortcut, is_kill_to_start_shortcut, is_move_to_end_shortcut,
+    is_move_to_start_shortcut, is_primary_selection_paste, kill_to_end_from_cursor,
+    kill_to_start_from_cursor, move_cursor_left, move_cursor_right, move_cursor_to_end,
+    move_cursor_to_start, move_cursor_word_left, move_cursor_word_right,
+    native_desktop_binary_path, notification_arguments, notification_preview,
+    parse_remember_namespace_prefix, return_to_latest, should_clear_draft,
+    should_close_tui_for_key, submit, try_notify_desktop, tui_exit_action, tui_notification, App,
+    EmbeddingAttach, Message, MessageRole, TuiExitAction, WorkerReply,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use jarvis_core::{
@@ -1824,4 +1825,30 @@ fn memory_export_then_import_round_trips_through_the_tui_commands() {
     assert_eq!(restored[0].value, "Mehmet");
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// F6 19 Ağustos 2026: hibrit RAG'ın embedding servisi ne boot'ta açılıyordu ne de uygulama
+/// tarafından başlatılıyordu, dolayısıyla pratikte hiç çalışmıyordu — retrieval sessizce
+/// FTS-only'ye düşüyordu. Bu test o davranışın geri gelmemesini garanti eder: indekslenmiş
+/// belge varken servis kapalıysa artık başlatılmalı, ama hiç belge yokken hâlâ hiçbir maliyet
+/// ödenmemeli (özgün "kullanılmayan servise RAM harcama" niyeti korunuyor).
+#[test]
+fn embedding_service_is_started_on_demand_only_when_rag_is_actually_in_use() {
+    assert_eq!(
+        embedding_attach_decision(true, 0),
+        EmbeddingAttach::Attach,
+        "servis zaten ayaktaysa doğrudan kullanılmalı"
+    );
+    assert_eq!(
+        embedding_attach_decision(false, 0),
+        EmbeddingAttach::Skip,
+        "hiç indekslenmiş belge yokken RAM harcanmamalı"
+    );
+    assert_eq!(
+        embedding_attach_decision(false, 12),
+        EmbeddingAttach::StartThenAttach,
+        "REGRESYON: indekslenmiş belge varken embedding servisi başlatılmalı, \
+         yoksa hibrit retrieval sessizce hiç çalışmaz"
+    );
+    assert_eq!(embedding_attach_decision(true, 12), EmbeddingAttach::Attach);
 }

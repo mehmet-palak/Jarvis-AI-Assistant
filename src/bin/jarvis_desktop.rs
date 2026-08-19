@@ -1738,6 +1738,32 @@ where
     ])
 }
 
+/// Mirrors the TUI's embedding attach contract (`attach_embedding_provider_if_reachable` in
+/// `main.rs`) so both clients behave identically: attach immediately when the service is already
+/// up; otherwise start it on demand *only* when the workspace actually has indexed documents
+/// (RAG in real use), then attach unconditionally — retrieval retries per query and falls back to
+/// FTS until the model finishes loading, so nothing blocks startup and no restart is needed.
+/// Before 19 Ağustos 2026 neither client ever started this service, so hybrid retrieval silently
+/// never ran.
+fn attach_embedding_provider(runtime: &mut Runtime) {
+    let provider = LlamaEmbeddingProvider::local_default();
+    if provider.is_reachable() {
+        runtime.set_embedding_provider(Some(Box::new(provider)));
+        return;
+    }
+    let indexed_documents = runtime
+        .rag_status()
+        .map(|status| status.document_count)
+        .unwrap_or(0);
+    if indexed_documents == 0 {
+        return;
+    }
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "start", "jarvis-embedding.service"])
+        .status();
+    runtime.set_embedding_provider(Some(Box::new(provider)));
+}
+
 fn main() -> eframe::Result<()> {
     let _instance_lock = match acquire_desktop_instance_lock(default_desktop_lock_path()) {
         Ok(lock) => lock,
@@ -1755,10 +1781,7 @@ fn main() -> eframe::Result<()> {
     )
     .expect("JARVIS SQLite store açılamadı");
     let mut runtime = Runtime::with_store(store);
-    let embedding_provider = LlamaEmbeddingProvider::local_default();
-    if embedding_provider.is_reachable() {
-        runtime.set_embedding_provider(Some(Box::new(embedding_provider)));
-    }
+    attach_embedding_provider(&mut runtime);
     if let Some(profile_files_dir) = default_profile_files_dir() {
         ensure_profile_files_exist(&profile_files_dir);
         runtime.set_profile_files_dir(Some(profile_files_dir));

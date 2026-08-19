@@ -19,11 +19,13 @@ use crate::{
     cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query, now_epoch,
     reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
     reject_secret_like_workspace_document_name, serialize_embedding, sha256_hex,
-    validate_memory_record, validate_teacher_example, validate_workspace_document_content,
+    validate_feedback_candidate, validate_memory_record, validate_model_config_run,
+    validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
-    EmbeddingProvider, MemoryNamespace, MemoryProposal, MemoryRecord, Task, TeacherExample,
-    TrustLevel, WorkspaceCitation, WorkspaceIngestionReport,
-    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
+    EmbeddingProvider, FeedbackCandidate, FeedbackReview, FeedbackSignal, MemoryNamespace,
+    MemoryProposal, MemoryRecord, ModelConfigRun, Task, TeacherExample, TrustLevel, VerifyStatus,
+    WorkspaceCitation, WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
+    MIN_RELEVANT_SIMILARITY,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -48,7 +50,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -184,6 +186,33 @@ impl SqliteStore {
                 source TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS model_config_runs (
+                run_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                recorded_at INTEGER NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_fingerprint TEXT NOT NULL,
+                prompt_fingerprint TEXT NOT NULL,
+                server_settings TEXT NOT NULL,
+                scenarios_passed INTEGER NOT NULL,
+                scenarios_failed INTEGER NOT NULL,
+                median_latency_ms INTEGER NOT NULL,
+                notes TEXT NOT NULL,
+                rollback_target TEXT
+            );
+            CREATE TABLE IF NOT EXISTS feedback_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                recorded_at INTEGER NOT NULL,
+                prompt TEXT NOT NULL,
+                response TEXT NOT NULL,
+                signal TEXT NOT NULL,
+                correction TEXT NOT NULL,
+                sensitivity TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                review TEXT NOT NULL
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -253,6 +282,14 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (10, 'memory trust_level/scope_id, secret manager')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (11, 'F6 model/prompt config registry')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (12, 'F6 feedback review queue')",
             [],
         )?;
         Ok(())
@@ -544,6 +581,211 @@ impl SqliteStore {
             rusqlite::Error::QueryReturnedNoRows => Ok((0, "GENESIS".into())),
             error => Err(error),
         })
+    }
+
+    /// Every stored teacher example, oldest-first so an export is reproducible: the same
+    /// database always produces the same ordering, and therefore the same manifest hash.
+    pub fn teacher_examples(&self) -> Result<Vec<TeacherExample>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT example_id, schema_version, prompt, expected_capability, response,
+                        evidence, verifier_status, provenance, human_reviewed, sensitivity
+                 FROM teacher_examples ORDER BY example_id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                let evidence: String = row.get(5)?;
+                let verifier_status: String = row.get(6)?;
+                let sensitivity: String = row.get(9)?;
+                Ok(TeacherExample {
+                    example_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    prompt: row.get(2)?,
+                    expected_capability: row.get(3)?,
+                    response: row.get(4)?,
+                    evidence: evidence
+                        .split('\n')
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                    verifier_status: match verifier_status.as_str() {
+                        "PASS" => VerifyStatus::Pass,
+                        "FAIL" => VerifyStatus::Fail,
+                        _ => VerifyStatus::Uncertain,
+                    },
+                    provenance: row.get(7)?,
+                    human_reviewed: row.get::<_, i64>(8)? != 0,
+                    sensitivity: DataSensitivity::from_str(&sensitivity)
+                        .unwrap_or(DataSensitivity::Internal),
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// F6 feedback intake write path. Stores a *pending* signal; nothing here can create
+    /// training data — see `promote_feedback_candidate` for the only path that can, and the
+    /// policy gate it must pass.
+    pub fn record_feedback_candidate(&self, candidate: &FeedbackCandidate) -> Result<(), String> {
+        validate_feedback_candidate(candidate)?;
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO feedback_candidates(
+                    candidate_id, schema_version, recorded_at, prompt, response,
+                    signal, correction, sensitivity, provenance, review
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    candidate.candidate_id,
+                    candidate.schema_version,
+                    candidate.recorded_at as i64,
+                    candidate.prompt,
+                    candidate.response,
+                    candidate.signal.as_str(),
+                    candidate.correction,
+                    candidate.sensitivity.as_str(),
+                    candidate.provenance,
+                    candidate.review.as_str(),
+                ],
+            )
+            .map_err(|error| format!("feedback candidate persist failed: {error}"))?;
+        Ok(())
+    }
+
+    pub fn feedback_candidates(
+        &self,
+        review: Option<FeedbackReview>,
+        limit: usize,
+    ) -> Result<Vec<FeedbackCandidate>, String> {
+        let (sql, filter) = match review {
+            Some(review) => (
+                "SELECT candidate_id, schema_version, recorded_at, prompt, response, signal,
+                        correction, sensitivity, provenance, review
+                 FROM feedback_candidates WHERE review = ?2
+                 ORDER BY recorded_at DESC, candidate_id DESC LIMIT ?1",
+                review.as_str().to_string(),
+            ),
+            None => (
+                "SELECT candidate_id, schema_version, recorded_at, prompt, response, signal,
+                        correction, sensitivity, provenance, review
+                 FROM feedback_candidates WHERE ?2 = ?2
+                 ORDER BY recorded_at DESC, candidate_id DESC LIMIT ?1",
+                String::new(),
+            ),
+        };
+        let mut statement = self
+            .connection
+            .prepare(sql)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params![limit as i64, filter], |row| {
+                let signal: String = row.get(5)?;
+                let sensitivity: String = row.get(7)?;
+                let review: String = row.get(9)?;
+                Ok(FeedbackCandidate {
+                    candidate_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    recorded_at: row.get::<_, i64>(2)? as u64,
+                    prompt: row.get(3)?,
+                    response: row.get(4)?,
+                    signal: FeedbackSignal::parse(&signal).unwrap_or(FeedbackSignal::Negative),
+                    correction: row.get(6)?,
+                    sensitivity: DataSensitivity::from_str(&sensitivity)
+                        .unwrap_or(DataSensitivity::Internal),
+                    provenance: row.get(8)?,
+                    review: FeedbackReview::parse(&review).unwrap_or(FeedbackReview::Pending),
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_feedback_review(
+        &self,
+        candidate_id: &str,
+        review: FeedbackReview,
+    ) -> Result<(), String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE feedback_candidates SET review = ?2 WHERE candidate_id = ?1",
+                rusqlite::params![candidate_id, review.as_str()],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err(format!("feedback candidate not found: {candidate_id}"));
+        }
+        Ok(())
+    }
+
+    /// F6 registry write path. Validation happens here (through the single policy-gate
+    /// validator) rather than at the call site so no future caller can persist an
+    /// unattributable run row by skipping the check.
+    pub fn record_model_config_run(&self, run: &ModelConfigRun) -> Result<(), String> {
+        validate_model_config_run(run)?;
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO model_config_runs(
+                    run_id, schema_version, recorded_at, provider_id, model_id,
+                    model_fingerprint, prompt_fingerprint, server_settings,
+                    scenarios_passed, scenarios_failed, median_latency_ms, notes, rollback_target
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    run.run_id,
+                    run.schema_version,
+                    run.recorded_at as i64,
+                    run.provider_id,
+                    run.model_id,
+                    run.model_fingerprint,
+                    run.prompt_fingerprint,
+                    run.server_settings,
+                    run.scenarios_passed,
+                    run.scenarios_failed,
+                    run.median_latency_ms as i64,
+                    run.notes,
+                    run.rollback_target,
+                ],
+            )
+            .map_err(|error| format!("model config run persist failed: {error}"))?;
+        Ok(())
+    }
+
+    /// Newest-first so the most recent configuration — the one a rollback decision is about — is
+    /// always the first row a caller sees.
+    pub fn model_config_runs(&self, limit: usize) -> Result<Vec<ModelConfigRun>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT run_id, schema_version, recorded_at, provider_id, model_id,
+                        model_fingerprint, prompt_fingerprint, server_settings,
+                        scenarios_passed, scenarios_failed, median_latency_ms, notes, rollback_target
+                 FROM model_config_runs ORDER BY recorded_at DESC, run_id DESC LIMIT ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok(ModelConfigRun {
+                    run_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    recorded_at: row.get::<_, i64>(2)? as u64,
+                    provider_id: row.get(3)?,
+                    model_id: row.get(4)?,
+                    model_fingerprint: row.get(5)?,
+                    prompt_fingerprint: row.get(6)?,
+                    server_settings: row.get(7)?,
+                    scenarios_passed: row.get(8)?,
+                    scenarios_failed: row.get(9)?,
+                    median_latency_ms: row.get::<_, i64>(10)? as u64,
+                    notes: row.get(11)?,
+                    rollback_target: row.get(12)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
     }
 
     pub fn teacher_example_count(&self) -> SqlResult<i64> {

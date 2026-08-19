@@ -5,6 +5,7 @@ mod capabilities;
 #[cfg(test)]
 mod coding_eval;
 pub mod command_runner;
+pub mod dataset;
 pub mod desktop_config;
 pub mod embedding;
 mod memory_intent;
@@ -33,6 +34,10 @@ pub use capabilities::{capability_manifest, CapabilityRegistry};
 pub use command_runner::{
     run_allowlisted_command, run_test_plan, validate_command_line, CommandRun, TestRunReport,
 };
+pub use dataset::{
+    build_dataset_export, compare_model_config_runs, DatasetExclusion, DatasetExport,
+    DatasetMarker, DatasetMarkerKind, ModelConfigComparison, ModelConfigVerdict,
+};
 pub use desktop_config::{
     default_desktop_preferences_path, load_desktop_preferences, save_desktop_preferences,
     DesktopPreferences, ThemePreference,
@@ -52,8 +57,9 @@ pub use model::{
 pub use patch_generator::draft_patch_with_provider;
 pub use persistence::SqliteStore;
 pub use policy::{
-    authorize_pentest_target, classify, policy_for, validate_pentest_scope, validate_request,
-    validate_teacher_example,
+    authorize_pentest_target, classify, feedback_candidate_is_promotable, policy_for,
+    validate_feedback_candidate, validate_model_config_run, validate_pentest_scope,
+    validate_request, validate_teacher_example,
 };
 pub use profile::{
     profile_manifest, propose_profile_field, validate_profile_value, ProfileField, ProfileSnapshot,
@@ -781,7 +787,7 @@ impl DataSensitivity {
         }
     }
 
-    fn from_str(value: &str) -> Result<Self, String> {
+    pub(crate) fn from_str(value: &str) -> Result<Self, String> {
         match value {
             "PUBLIC" => Ok(Self::Public),
             "INTERNAL" => Ok(Self::Internal),
@@ -833,6 +839,115 @@ pub struct TeacherExample {
     pub sensitivity: DataSensitivity,
 }
 
+/// F6 "Kullanıcı geri bildirimi intake'i". A raw signal from the user about one conversation
+/// turn. Deliberately a *separate* type from `TeacherExample`: the plan's rule is that feedback
+/// "doğrudan eğitim verisi olmaz" — it must pass sensitivity, provenance and human review first.
+/// Modelling it as its own pending record is what makes that rule structural instead of a
+/// convention someone can forget: there is no code path that turns a signal into training data
+/// without an explicit review step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackCandidate {
+    pub schema_version: u16,
+    pub candidate_id: String,
+    pub recorded_at: u64,
+    pub prompt: String,
+    pub response: String,
+    pub signal: FeedbackSignal,
+    /// For `Correction`, what the user says the answer should have been. Empty otherwise.
+    pub correction: String,
+    pub sensitivity: DataSensitivity,
+    pub provenance: String,
+    /// Set once a human has decided; an unreviewed candidate can never be exported or promoted.
+    pub review: FeedbackReview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackSignal {
+    Positive,
+    Negative,
+    Correction,
+}
+
+impl FeedbackSignal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeedbackSignal::Positive => "positive",
+            FeedbackSignal::Negative => "negative",
+            FeedbackSignal::Correction => "correction",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "positive" => Some(FeedbackSignal::Positive),
+            "negative" => Some(FeedbackSignal::Negative),
+            "correction" => Some(FeedbackSignal::Correction),
+            _ => None,
+        }
+    }
+}
+
+/// Where a candidate stands in the human review queue. `Rejected` is kept rather than deleted so
+/// a bad or poisoned example stays *known-bad* — deleting it would let the same content be
+/// re-submitted later and silently re-enter the queue as if it were new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackReview {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl FeedbackReview {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeedbackReview::Pending => "pending",
+            FeedbackReview::Approved => "approved",
+            FeedbackReview::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "pending" => Some(FeedbackReview::Pending),
+            "approved" => Some(FeedbackReview::Approved),
+            "rejected" => Some(FeedbackReview::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// F6 "Prompt/model konfigürasyon registry'si": one recorded experiment — which model and which
+/// system prompt produced which benchmark result, and what to roll back to if it turns out worse.
+///
+/// This is deliberately a *record*, not a switch: writing a row never changes which model or
+/// prompt the running system uses. It exists so a model or prompt change is never an unmeasured,
+/// unattributable, irreversible event — F6's completion criterion is exactly that every model
+/// change either improves the versioned eval or is not adopted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelConfigRun {
+    pub schema_version: u16,
+    pub run_id: String,
+    pub recorded_at: u64,
+    pub provider_id: String,
+    pub model_id: String,
+    /// Identifies the exact weights: SHA-256 of the GGUF when known, otherwise a provider-
+    /// reported identifier. Two runs with different fingerprints are never comparable as
+    /// "same model".
+    pub model_fingerprint: String,
+    /// SHA-256 of the exact system prompt text used, so a prompt edit is detectable even when
+    /// no commit or model changed.
+    pub prompt_fingerprint: String,
+    /// Free-form runtime settings that materially affect the result (`-ngl 28`, context size).
+    pub server_settings: String,
+    pub scenarios_passed: u32,
+    pub scenarios_failed: u32,
+    pub median_latency_ms: u64,
+    pub notes: String,
+    /// `run_id` of the configuration to return to if this one regresses. `None` for a baseline
+    /// that has nothing earlier to fall back to.
+    pub rollback_target: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityManifest {
     pub capability_id: String,
@@ -850,7 +965,9 @@ pub struct CapabilityManifest {
 // dominating a new request or adding avoidable CPU prompt-processing latency.
 const MAX_COMPLETED_CHAT_HISTORY_TURNS: usize = 8;
 
-pub(crate) fn now_epoch() -> u64 {
+/// Current unix epoch seconds. Public because clients (TUI/desktop) construct timestamped
+/// records — F6 feedback candidates, for one — and must use the same clock the core does.
+pub fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

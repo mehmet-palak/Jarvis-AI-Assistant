@@ -34,7 +34,7 @@ use ratatui::{
     Terminal,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageRole {
     User,
     Jarvis,
@@ -157,6 +157,21 @@ impl App {
         });
     }
 
+    /// F6 geri bildirim intake'i, en son tamamlanmış turu (kullanıcı istemi + asistan yanıtı)
+    /// bulur. Geri bildirim her zaman *belirli bir tura* aittir; "son yanıt" belirsiz bırakılırsa
+    /// inceleme kuyruğuna neyi değerlendirdiği belli olmayan bir kayıt düşer.
+    fn last_exchange(&self) -> Option<(String, String)> {
+        let assistant_index = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == MessageRole::Jarvis)?;
+        let prompt = self.messages[..assistant_index]
+            .iter()
+            .rposition(|message| message.role == MessageRole::User)
+            .map(|index| self.messages[index].content.clone())?;
+        Some((prompt, self.messages[assistant_index].content.clone()))
+    }
+
     fn record_attachment_receipts(&mut self, receipts: Vec<AttachmentReceipt>) {
         const MAX_SESSION_ATTACHMENT_RECEIPTS: usize = 50;
         self.sent_attachment_receipts.extend(receipts);
@@ -274,15 +289,62 @@ fn ensure_local_model_server(provider: &LlamaServerProvider) -> String {
 /// Starts the separate CPU-only image server on demand. It stays loopback-only and is never
 /// needed for a text-only turn. A caller that receives `Err` still routes through Runtime so
 /// the user gets the standard path-safe vision failure instead of a fabricated answer.
-/// Best-effort: attaches the local embedding adapter for hybrid RAG retrieval only if it is
-/// already reachable. Unlike the text/vision services, this is never started on demand — hybrid
-/// retrieval is an enhancement on top of already-working FTS, not something worth spending RAM
-/// on for a session that never uses it. If unreachable, `Runtime` simply stays FTS-only, exactly
-/// as it always has.
+/// Best-effort: attaches the local embedding adapter for hybrid RAG retrieval.
+///
+/// The original contract ("attach only if already reachable, never start on demand") kept a
+/// session that never uses RAG from paying for ~1 GB of embedding-model RAM. That intent is
+/// preserved, but 19 Ağustos 2026 F6 golden-set work exposed its practical failure mode: the
+/// embedding service is neither `enabled` at boot nor started by the app, so it was effectively
+/// *never* running — hybrid retrieval silently degraded to FTS-only with no visible signal,
+/// meaning the semantic half of F3's RAG could never actually run in real use.
+///
+/// The fix keeps the "don't pay for what you don't use" rule but ties it to real usage: if the
+/// workspace has indexed documents, RAG *is* in use, so the service is started on demand exactly
+/// like the text/vision services already are. Attaching is then unconditional and safe — a
+/// provider whose service is not up yet simply fails each `embed()` call and `Runtime` falls back
+/// to FTS per query, so the session self-heals the moment the model finishes loading instead of
+/// requiring a restart. With no indexed documents the old behavior is unchanged.
 fn attach_embedding_provider_if_reachable(runtime: &mut Runtime) {
     let provider = LlamaEmbeddingProvider::local_default();
-    if provider.is_reachable() {
-        runtime.set_embedding_provider(Some(Box::new(provider)));
+    let indexed_documents = runtime
+        .rag_status()
+        .map(|status| status.document_count)
+        .unwrap_or(0);
+    match embedding_attach_decision(provider.is_reachable(), indexed_documents) {
+        EmbeddingAttach::Skip => {}
+        EmbeddingAttach::Attach => {
+            runtime.set_embedding_provider(Some(Box::new(provider)));
+        }
+        EmbeddingAttach::StartThenAttach => {
+            // Fire-and-forget: never block startup on a model load. Attaching anyway is what
+            // makes this useful without waiting — retrieval retries the service every query.
+            let _ = Command::new("systemctl")
+                .args(["--user", "start", "jarvis-embedding.service"])
+                .status();
+            runtime.set_embedding_provider(Some(Box::new(provider)));
+        }
+    }
+}
+
+/// What startup should do about the embedding service. Split out from the side-effecting
+/// attach so the policy itself is unit-testable without touching `systemctl` or a real service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingAttach {
+    /// No indexed documents and no running service: RAG is not in use, so spend nothing.
+    Skip,
+    /// Service already up — just use it.
+    Attach,
+    /// RAG is genuinely in use (documents are indexed) but the service is down: start it.
+    StartThenAttach,
+}
+
+fn embedding_attach_decision(reachable: bool, indexed_documents: i64) -> EmbeddingAttach {
+    if reachable {
+        EmbeddingAttach::Attach
+    } else if indexed_documents > 0 {
+        EmbeddingAttach::StartThenAttach
+    } else {
+        EmbeddingAttach::Skip
     }
 }
 
@@ -1149,6 +1211,91 @@ fn submit(
         .filter(|task_id| !task_id.is_empty())
     {
         cancel_task(app, runtime, task_id);
+        return;
+    }
+    if let Some(rest) = input.strip_prefix("/feedback ").map(str::trim) {
+        let (word, correction) = rest.split_once(' ').unwrap_or((rest, ""));
+        let correction = correction.trim();
+        match word {
+            "onayla" | "reddet" => {
+                let review = if word == "onayla" {
+                    jarvis_core::FeedbackReview::Approved
+                } else {
+                    jarvis_core::FeedbackReview::Rejected
+                };
+                if correction.is_empty() {
+                    app.push_system(
+                        "Kullanım: `/feedback onayla <id>` veya `/feedback reddet <id>`",
+                    );
+                    return;
+                }
+                let result = runtime
+                    .lock()
+                    .expect("JARVIS runtime lock poisoned")
+                    .review_feedback(correction, review);
+                match result {
+                    Ok(()) => app.push_system(format!(
+                        "Geri bildirim {correction} → {}. Eğitim verisine dönüşmesi için ayrıca terfi gerekir.",
+                        review.as_str()
+                    )),
+                    Err(error) => app.push_system(format!("İnceleme kaydedilemedi: {error}")),
+                }
+                return;
+            }
+            "iyi" | "kotu" | "duzelt" => {}
+            _ => {
+                app.push_system(
+                    "Kullanım: `/feedback iyi` • `/feedback kotu` • `/feedback duzelt <doğru yanıt>` • `/feedback list` • `/feedback onayla|reddet <id>`"
+                        .to_string(),
+                );
+                return;
+            }
+        }
+
+        let Some((prompt, response)) = app.last_exchange() else {
+            app.push_system("Geri bildirim verilecek tamamlanmış bir tur yok.");
+            return;
+        };
+        let signal = match word {
+            "iyi" => jarvis_core::FeedbackSignal::Positive,
+            "kotu" => jarvis_core::FeedbackSignal::Negative,
+            _ => jarvis_core::FeedbackSignal::Correction,
+        };
+        if signal == jarvis_core::FeedbackSignal::Correction && correction.is_empty() {
+            app.push_system("Düzeltme metni gerekli: `/feedback duzelt <doğru yanıt>`");
+            return;
+        }
+        let candidate = jarvis_core::FeedbackCandidate {
+            schema_version: 1,
+            candidate_id: format!("fb-{}", jarvis_core::now_epoch()),
+            recorded_at: jarvis_core::now_epoch(),
+            prompt,
+            response,
+            signal,
+            correction: if signal == jarvis_core::FeedbackSignal::Correction {
+                correction.to_string()
+            } else {
+                String::new()
+            },
+            // Geri bildirim kullanıcının kendi sohbetinden gelir; varsayılan olarak Internal —
+            // hassas olduğunu düşünüyorsa kullanıcı zaten paylaşmamalı, ve Sensitive bir aday
+            // policy gate tarafından eğitim verisine dönüştürülemez.
+            sensitivity: DataSensitivity::Internal,
+            provenance: "kullanıcı geri bildirimi (TUI)".into(),
+            review: jarvis_core::FeedbackReview::Pending,
+        };
+        let result = runtime
+            .lock()
+            .expect("JARVIS runtime lock poisoned")
+            .record_feedback(&candidate);
+        match result {
+            Ok(()) => app.push_system(format!(
+                "Geri bildirim alındı ({}) → inceleme kuyruğuna eklendi: {}. Doğrudan eğitim verisi olmaz; `/feedback list` ile görebilirsin.",
+                signal.as_str(),
+                candidate.candidate_id
+            )),
+            Err(error) => app.push_system(format!("Geri bildirim kaydedilemedi: {error}")),
+        }
         return;
     }
     if let Some(path) = input.strip_prefix("/attach ").map(str::trim) {
@@ -2392,7 +2539,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /model-runs (kayıtlı model/prompt konfigürasyonları ve ölçüm sonuçları), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2427,6 +2574,64 @@ fn submit(
                 model_label(&app.model_state),
                 app.status
             ));
+            return;
+        }
+        "/model-runs" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .model_config_runs(10)
+            {
+                Ok(runs) if runs.is_empty() => app.push_system(
+                    "Kayıtlı model/prompt konfigürasyonu yok. Golden set koşumu (`cargo test --lib model_quality -- --ignored`) bir kayıt oluşturur."
+                        .to_string(),
+                ),
+                Ok(runs) => {
+                    let mut lines = vec![format!("Model/prompt konfigürasyon kayıtları ({}):", runs.len())];
+                    for run in runs {
+                        lines.push(format!(
+                            "  {} • {} • prompt {} • {}/{} senaryo • medyan {} ms{}",
+                            run.run_id,
+                            run.model_id,
+                            &run.prompt_fingerprint[..8.min(run.prompt_fingerprint.len())],
+                            run.scenarios_passed,
+                            run.scenarios_passed + run.scenarios_failed,
+                            run.median_latency_ms,
+                            run.rollback_target
+                                .map(|target| format!(" • geri dönüş: {target}"))
+                                .unwrap_or_default()
+                        ));
+                    }
+                    app.push_system(lines.join("\n"));
+                }
+                Err(error) => app.push_system(format!("Konfigürasyon kayıtları okunamadı: {error}")),
+            }
+            return;
+        }
+        "/feedback" | "/feedback list" => {
+            match runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .feedback_candidates(Some(jarvis_core::FeedbackReview::Pending), 20)
+            {
+                Ok(items) if items.is_empty() => {
+                    app.push_system("İnceleme bekleyen geri bildirim yok. Son yanıt için: `/feedback iyi`, `/feedback kotu`, `/feedback duzelt <doğru yanıt>`.".to_string())
+                }
+                Ok(items) => {
+                    let mut lines = vec![format!("İnceleme bekleyen geri bildirim ({}):", items.len())];
+                    for item in items {
+                        lines.push(format!(
+                            "  {} • {} • {}",
+                            item.candidate_id,
+                            item.signal.as_str(),
+                            item.prompt.chars().take(60).collect::<String>()
+                        ));
+                    }
+                    lines.push("Onayla: `/feedback onayla <id>` • Reddet: `/feedback reddet <id>`".to_string());
+                    app.push_system(lines.join("\n"));
+                }
+                Err(error) => app.push_system(format!("Geri bildirim okunamadı: {error}")),
+            }
             return;
         }
         "/rag status" => {

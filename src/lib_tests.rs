@@ -973,7 +973,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 12);
 }
 
 #[test]
@@ -4077,7 +4077,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -4726,4 +4726,271 @@ fn invalid_request_is_rejected_before_policy_and_tool() {
         attachments: vec![],
     };
     assert!(validate_request(&empty).is_err());
+}
+
+/// F6 madde 7 — registry contract'ı. Bir konfigürasyon kaydının atfedilebilir olması şart:
+/// hangi ağırlıklar, hangi prompt. Bu ikisi olmadan satır "aynı model miydi?" sorusunu
+/// yanıtlayamaz, yani registry'nin var olma nedenini karşılamaz.
+#[test]
+fn a_model_config_run_without_fingerprints_is_rejected() {
+    let valid = ModelConfigRun {
+        schema_version: 1,
+        run_id: "run-1".into(),
+        recorded_at: 1_760_000_000,
+        provider_id: "llama-server".into(),
+        model_id: "Qwen3-8B-Q4_K_M".into(),
+        model_fingerprint: "d98cdcbd".into(),
+        prompt_fingerprint: "a1b2c3".into(),
+        server_settings: "-ngl 28".into(),
+        scenarios_passed: 10,
+        scenarios_failed: 0,
+        median_latency_ms: 14_800,
+        notes: "baseline".into(),
+        rollback_target: None,
+    };
+    assert!(validate_model_config_run(&valid).is_ok());
+
+    let no_model_fingerprint = ModelConfigRun {
+        model_fingerprint: "  ".into(),
+        ..valid.clone()
+    };
+    assert!(validate_model_config_run(&no_model_fingerprint).is_err());
+
+    let no_prompt_fingerprint = ModelConfigRun {
+        prompt_fingerprint: String::new(),
+        ..valid.clone()
+    };
+    assert!(validate_model_config_run(&no_prompt_fingerprint).is_err());
+
+    // Hiç senaryo değerlendirilmemişse bu bir ölçüm değildir.
+    let nothing_measured = ModelConfigRun {
+        scenarios_passed: 0,
+        scenarios_failed: 0,
+        ..valid.clone()
+    };
+    assert!(validate_model_config_run(&nothing_measured).is_err());
+
+    // Kendine rollback, geri alma zincirini anlamsız kılar.
+    let self_rollback = ModelConfigRun {
+        rollback_target: Some("run-1".into()),
+        ..valid.clone()
+    };
+    assert!(validate_model_config_run(&self_rollback).is_err());
+}
+
+/// Registry kalıcı ve en-yeni-önce olmalı: rollback kararı her zaman en son konfigürasyon
+/// hakkında verilir, o yüzden ilk satır o olmalı.
+#[test]
+fn model_config_runs_persist_and_come_back_newest_first() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    let base = ModelConfigRun {
+        schema_version: 1,
+        run_id: "eski".into(),
+        recorded_at: 1_000,
+        provider_id: "llama-server".into(),
+        model_id: "Qwen3-8B".into(),
+        model_fingerprint: "aaa".into(),
+        prompt_fingerprint: "p1".into(),
+        server_settings: "-ngl 0".into(),
+        scenarios_passed: 8,
+        scenarios_failed: 2,
+        median_latency_ms: 40_000,
+        notes: "CPU-only baseline".into(),
+        rollback_target: None,
+    };
+    let newer = ModelConfigRun {
+        run_id: "yeni".into(),
+        recorded_at: 2_000,
+        server_settings: "-ngl 28".into(),
+        scenarios_passed: 10,
+        scenarios_failed: 0,
+        median_latency_ms: 14_000,
+        notes: "GPU offload".into(),
+        rollback_target: Some("eski".into()),
+        ..base.clone()
+    };
+    runtime.record_model_config_run(&base).expect("eski kayıt");
+    runtime.record_model_config_run(&newer).expect("yeni kayıt");
+
+    let rows = runtime.model_config_runs(10).expect("okuma");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].run_id, "yeni", "en yeni koşum ilk sırada olmalı");
+    assert_eq!(rows[0].rollback_target.as_deref(), Some("eski"));
+    assert_eq!(rows[1].run_id, "eski");
+}
+
+/// Prompt parmak izi, prompt metni değiştiğinde değişmeli — commit hash'i bunu yakalayamaz
+/// (commit edilmemiş bir düzenleme de prompt'u değiştirir), bu yüzden içeriğin kendisi hash'lenir.
+#[test]
+fn the_prompt_fingerprint_is_stable_and_content_derived() {
+    let first = Runtime::active_prompt_fingerprint();
+    let second = Runtime::active_prompt_fingerprint();
+    assert_eq!(first, second, "aynı build içinde kararlı olmalı");
+    assert_eq!(first.len(), 64, "SHA-256 hex bekleniyor");
+    assert_ne!(first, sha256_hex("başka bir prompt"));
+}
+
+/// F6 madde 6 + 2, uçtan uca: kullanıcı geri bildirimi → insan incelemesi → TeacherExample →
+/// sürümlü dataset. Kritik nokta, zincirin *atlanamaz* olması: incelenmemiş bir aday eğitim
+/// verisi olamaz, olduğunda da yalnız uygun olan export'a girer.
+#[test]
+fn feedback_becomes_training_data_only_after_human_review_and_then_flows_into_the_dataset() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    let candidate = FeedbackCandidate {
+        schema_version: 1,
+        candidate_id: "fb-1".into(),
+        recorded_at: 1_000,
+        prompt: "sistem durumu nedir".into(),
+        response: "Sistem sağlıklı görünüyor.".into(),
+        signal: FeedbackSignal::Positive,
+        correction: String::new(),
+        sensitivity: DataSensitivity::Internal,
+        provenance: "kullanıcı geri bildirimi (TUI)".into(),
+        review: FeedbackReview::Pending,
+    };
+    runtime.record_feedback(&candidate).expect("intake");
+
+    // İncelenmemiş aday terfi edemez — kural yapısal, sözleşmeye dayalı değil.
+    assert!(runtime
+        .promote_feedback_candidate("fb-1", "system.health")
+        .is_err());
+
+    runtime
+        .review_feedback("fb-1", FeedbackReview::Approved)
+        .expect("inceleme");
+    let example = runtime
+        .promote_feedback_candidate("fb-1", "system.health")
+        .expect("terfi");
+    assert!(example.human_reviewed);
+    assert_eq!(example.verifier_status, VerifyStatus::Pass);
+
+    let export = runtime.export_dataset(1, &[]).expect("export");
+    assert_eq!(export.records.len(), 1);
+    assert_eq!(export.records[0].example_id, "from-feedback-fb-1");
+    assert_eq!(export.manifest_hash.len(), 64);
+}
+
+/// Hassas bir aday, insan onayı almış olsa bile eğitim verisine dönüşemez — dataset, dışarı
+/// kopyalanma olasılığı en yüksek artefakt olduğu için bu sınır ayrıca burada da tutulur.
+#[test]
+fn an_approved_but_sensitive_candidate_still_cannot_become_training_data() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let candidate = FeedbackCandidate {
+        schema_version: 1,
+        candidate_id: "fb-gizli".into(),
+        recorded_at: 1_000,
+        prompt: "parolam ne".into(),
+        response: "…".into(),
+        signal: FeedbackSignal::Positive,
+        correction: String::new(),
+        sensitivity: DataSensitivity::Sensitive,
+        provenance: "kullanıcı geri bildirimi".into(),
+        review: FeedbackReview::Approved,
+    };
+    runtime.record_feedback(&candidate).expect("intake");
+    let error = runtime
+        .promote_feedback_candidate("fb-gizli", "system.health")
+        .expect_err("hassas aday terfi edememeli");
+    assert!(error.contains("Sensitive"), "gerekçe açık olmalı: {error}");
+}
+
+/// Yalnız "bu yanlıştı" sinyali öğrenilecek doğru cevabı taşımaz; düzeltme metni taşıyan bir
+/// correction ise taşır ve modelin söylediğinin yerine geçer.
+#[test]
+fn a_bare_negative_carries_nothing_to_learn_but_a_correction_replaces_the_answer() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    let negative = FeedbackCandidate {
+        schema_version: 1,
+        candidate_id: "fb-kotu".into(),
+        recorded_at: 1_000,
+        prompt: "saat kaç".into(),
+        response: "Bilmiyorum.".into(),
+        signal: FeedbackSignal::Negative,
+        correction: String::new(),
+        sensitivity: DataSensitivity::Internal,
+        provenance: "kullanıcı".into(),
+        review: FeedbackReview::Approved,
+    };
+    runtime.record_feedback(&negative).expect("intake");
+    assert!(runtime
+        .promote_feedback_candidate("fb-kotu", "system.time")
+        .is_err());
+
+    let correction = FeedbackCandidate {
+        candidate_id: "fb-duzeltme".into(),
+        signal: FeedbackSignal::Correction,
+        correction: "Yerel saat 14:30.".into(),
+        ..negative.clone()
+    };
+    runtime.record_feedback(&correction).expect("intake");
+    let example = runtime
+        .promote_feedback_candidate("fb-duzeltme", "system.time")
+        .expect("terfi");
+    assert_eq!(
+        example.response, "Yerel saat 14:30.",
+        "düzeltme, modelin verdiği yanıtın yerine geçmeli"
+    );
+}
+
+/// F6 madde 5, uçtan uca: registry'ye iki konfigürasyon yazıldığında sistem, en yenisini
+/// kendi rollback hedefiyle karşılaştırıp gerekçeli bir karar üretmeli. Bu, "tek komutla
+/// rollback" kararının dayandığı ölçümdür.
+#[test]
+fn the_registry_compares_the_newest_configuration_against_its_rollback_target() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    // Karşılaştırılacak bir hedef yokken sessizce hiçbir şey iddia edilmemeli.
+    assert!(runtime
+        .model_config_regression()
+        .expect("karşılaştırma")
+        .is_none());
+
+    let baseline = ModelConfigRun {
+        schema_version: 1,
+        run_id: "baseline".into(),
+        recorded_at: 1_000,
+        provider_id: "llama-server".into(),
+        model_id: "Qwen3-8B".into(),
+        model_fingerprint: "aaa".into(),
+        prompt_fingerprint: "p1".into(),
+        server_settings: "-ngl 0".into(),
+        scenarios_passed: 10,
+        scenarios_failed: 0,
+        median_latency_ms: 40_000,
+        notes: String::new(),
+        rollback_target: None,
+    };
+    let candidate = ModelConfigRun {
+        run_id: "aday".into(),
+        recorded_at: 2_000,
+        scenarios_passed: 7,
+        scenarios_failed: 3,
+        median_latency_ms: 9_000,
+        rollback_target: Some("baseline".into()),
+        ..baseline.clone()
+    };
+    runtime
+        .record_model_config_run(&baseline)
+        .expect("baseline");
+    runtime.record_model_config_run(&candidate).expect("aday");
+
+    let comparison = runtime
+        .model_config_regression()
+        .expect("karşılaştırma")
+        .expect("hedef var");
+    assert_eq!(comparison.current_run_id, "aday");
+    assert_eq!(comparison.previous_run_id, "baseline");
+    assert_eq!(
+        comparison.verdict,
+        ModelConfigVerdict::Regressed,
+        "4x hızlanma bile 3 senaryo kaybını telafi etmemeli"
+    );
 }

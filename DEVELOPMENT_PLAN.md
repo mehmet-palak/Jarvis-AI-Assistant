@@ -694,7 +694,7 @@ Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek tran
 
 ### F6 — Model kalite, dataset governance ve adaptasyon
 
-Durum: DEVAM EDİYOR — başlangıç 19 Ağustos 2026
+Durum: DEVAM EDİYOR — 7 maddenin 6'sı tamamlandı (19 Ağustos 2026). Kalan tek madde "model karşılaştırması", bilinçli olarak ertelendi: F6'nın indirme gerektiren tek maddesi, kullanıcı indirmeleri ev ağında yapacak.
 
 Amaç: Sohbeti hard-code etmek yerine ölçmek; gerekiyorsa küçük, geri alınabilir bir model adaptasyonu yapmak.
 
@@ -715,12 +715,25 @@ değil — sıralama buna göre revize edildi.
   - R05 (en güçlü sonuç): `Sensitive` işaretli belge atıf olarak hiç yüzeye çıkmadı, içindeki sır model yanıtına sızmadı — F3 sensitivity filtresinin **gerçek modelle uçtan uca** kanıtı (birim testi değil).
   - **Metodoloji düzeltmesi (ilk koşumda bulundu):** İlk RAG korpusu 2 belgeydi ve tüm senaryolar `PASS` veriyordu, ama sonuç limiti (4) korpustan büyük olduğu için her sorgu zaten tüm korpusu getiriyordu — yani testler hiçbir sıralama gücü ölçmüyor, değersiz bir `PASS` üretiyordu. 5 çeldirici belge eklendi (toplam 8); `rag_runtime()` artık "korpus > limit" koşulunu kendi kendine assert ediyor, böylece fixture ileride küçülürse test sessizce değersizleşmek yerine gürültülü düşer. Düzeltme sonrası doğru belge 8 belge arasından ilk sırada geliyor.
   - Kalite bulgusu (dürüst): bu senaryolarda model amatör değil (doğru, idiomatic çıktı) — yani "amatör kod" şikayeti basit görevlerde ortaya çıkmıyor. Set bir sonraki turda **zor/çok adımlı/proje bağlamlı** senaryolarla genişletilmeli, aksi halde sürekli geçen ama gerçek şikayeti ölçmeyen bir sete dönüşür.
-- [ ] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; silme/poisoned-example marker'ları ve dataset manifest hash'i.
+- [x] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; silme/poisoned-example marker'ları ve dataset manifest hash'i.
+  - `src/dataset.rs` (+ `dataset_tests.rs`): export bir veritabanı dökümü değil — incelenmemiş / verifier'ı geçmemiş / `Sensitive` örnek dışarı çıkamaz ve **sessizce düşmez**, gerekçesiyle `excluded` listesinde raporlanır. Marker'lar uygunluğu **ezer**: düzgün görünen ama `Poisoned` işaretli bir örnek asla export edilemez (sıralama bilinçli, tersi zehirli örneği geçirirdi). Silme/poisoned marker'ı satırı yok etmek yerine "bilinen-kötü" olarak kalıcı kılar — silmek aynı içeriğin sonra yeniymiş gibi kuyruğa dönmesine izin verirdi.
+  - Manifest hash'i içerik-adresli (SHA-256, elle yazılmış kanonik metin üzerinden — bir bağımlılığın formatı değişince hash'in kaymaması için). "Bu model hangi dataset ile eğitildi" sorusunu yanıtlar.
+  - Kanıt: 4 birim testi + uçtan uca `feedback → inceleme → TeacherExample → dataset` testi PASS.
 - [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
-- [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
-- [ ] Old-vs-new regresyonu ve tek komutla model/adaptor rollback.
-- [ ] Kullanıcı geri bildirimi intake'i: beğen/beğenme veya düzeltme sinyali doğrudan eğitim verisi olmaz; sensitivity, provenance ve human review kuyruğundan geçer.
-- [ ] Prompt/model konfigürasyon registry'si: her deneyin model hash'i, prompt sürümü, benchmark sonucu ve rollback hedefi kaydedilir.
+  - **Bilinçli olarak ertelendi (19 Ağustos 2026):** tek indirme gerektiren madde; kullanıcı indirmeleri ev ağında yapacak. Karşılaştırmanın ölçüm altyapısı (golden set + registry + old-vs-new karşılaştırması) hazır, yalnız aday model dosyaları eksik.
+- [x] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
+  - Karar: **şimdi eğitim yapılmayacak** — [ADR-0006](docs/adr/0006-lora-adaptation-feasibility.md). Üç bağımsız gerekçe: (1) `teacher_examples` boş, eğitilecek veri yok; (2) golden set, iddia edilen kalite sorununu ölçemedi — ölçülmemiş bir problemi eğitimle çözmek iyileşmeyi doğrulayamamak demek, F6'nın tamamlanma ölçütü bunu yasaklıyor; (3) daha ucuz ve denenmemiş bir seçenek var (kod-özel model, dataset/eğitim/rollback artefaktı gerektirmiyor). ADR yeniden değerlendirme tetikleyicilerini ve eğitim yapılacaksa gereken önkoşulları da yazıyor.
+- [x] Old-vs-new regresyonu ve tek komutla model/adaptor rollback.
+  - `compare_model_config_runs` + `Runtime::model_config_regression()`: en yeni konfigürasyonu kendi `rollback_target`'ıyla karşılaştırır. Verdict bilinçli olarak muhafazakâr — **bir senaryo kaybı, 4x hızlanma olsa bile regresyondur**, çünkü F6'nın ölçütü "iyileştirir ve regresyon üretmez", doğruluğu hıza takas etmek değil. Kalite aynıyken ≥1.5x yavaşlama da regresyon; sıradan dalgalanma değil.
+  - Kanıt: 3 birim testi + 1 uçtan uca registry testi PASS.
+- [x] Kullanıcı geri bildirimi intake'i: beğen/beğenme veya düzeltme sinyali doğrudan eğitim verisi olmaz; sensitivity, provenance ve human review kuyruğundan geçer.
+  - `FeedbackCandidate` bilinçli olarak `TeacherExample`'dan **ayrı bir tip**: planın "doğrudan eğitim verisi olmaz" kuralı böylece yapısal hale geliyor — insan incelemesini atlayarak eğitim verisi üretebilecek hiçbir kod yolu yok. Terfi tek kapıdan (`feedback_candidate_is_promotable`) geçer: insan onayı şart, `Sensitive` aday asla uygun değil, ve yalın bir "bu yanlıştı" sinyali öğrenilecek doğru cevap taşımadığı için terfi edemez (düzeltme metni taşıyan `Correction` eder ve modelin yanıtının yerine geçer). `Rejected` aday silinmez, bilinen-kötü olarak kalır.
+  - TUI: `/feedback iyi|kotu|duzelt <doğru yanıt>`, `/feedback list`, `/feedback onayla|reddet <id>`.
+  - Kanıt: 3 uçtan uca test PASS (incelenmemiş aday terfi edemiyor; onaylı ama hassas aday da edemiyor; düzeltme yanıtın yerine geçiyor).
+- [x] Prompt/model konfigürasyon registry'si: her deneyin model hash'i, prompt sürümü, benchmark sonucu ve rollback hedefi kaydedilir.
+  - `ModelConfigRun` + migration 11. Registry bilinçli olarak bir **log**, anahtar değil: satır yazmak hangi modelin/prompt'un kullanıldığını değiştirmez. Prompt sürümü olarak commit hash'i değil **prompt metninin SHA-256'sı** saklanır — commit hash'i commit edilmemiş bir düzenlemeyi kaçırırdı.
+  - Golden set koşumu artık kaydı **otomatik** üretiyor (elle doldurma bitti). TUI: `/model-runs`.
+  - Kanıt: 3 birim testi + canlı koşum (4/4 senaryo, medyan 13.5 s, prompt parmak izi `93140771…`) PASS.
 
 Tamamlanma ölçütü: Her model veya adapter değişikliği, sürümlü eval'de hedef metriği iyileştirir ve güvenlik/latency regresyonu üretmez; aksi halde kullanılmaz.
 

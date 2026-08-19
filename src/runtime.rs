@@ -666,6 +666,148 @@ impl Runtime {
             .map(|provider| provider.embedding_model_id())
     }
 
+    /// F6 "Kullanıcı geri bildirimi intake'i". Records a raw signal about one turn. This can
+    /// never create training data by itself — that requires `promote_feedback_candidate`, which
+    /// goes through the policy gate.
+    pub fn record_feedback(&self, candidate: &FeedbackCandidate) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "feedback intake requires an attached local store".to_string())?
+            .record_feedback_candidate(candidate)
+    }
+
+    pub fn feedback_candidates(
+        &self,
+        review: Option<FeedbackReview>,
+        limit: usize,
+    ) -> Result<Vec<FeedbackCandidate>, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "feedback intake requires an attached local store".to_string())?
+            .feedback_candidates(review, limit)
+    }
+
+    pub fn review_feedback(
+        &self,
+        candidate_id: &str,
+        review: FeedbackReview,
+    ) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "feedback intake requires an attached local store".to_string())?
+            .set_feedback_review(candidate_id, review)
+    }
+
+    /// The one path from user feedback to training data. Every rule the F6 plan states about
+    /// this transition is enforced by `feedback_candidate_is_promotable` (human review,
+    /// sensitivity, and that a bare "this was wrong" carries nothing to learn from) before the
+    /// example is even constructed, and `append_teacher_example` then applies the pre-existing
+    /// `TeacherExample` contract on top. There is deliberately no way to skip either check.
+    pub fn promote_feedback_candidate(
+        &self,
+        candidate_id: &str,
+        expected_capability: &str,
+    ) -> Result<TeacherExample, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "feedback intake requires an attached local store".to_string())?;
+        let candidate = store
+            .feedback_candidates(None, 1_000)?
+            .into_iter()
+            .find(|item| item.candidate_id == candidate_id)
+            .ok_or_else(|| format!("feedback candidate not found: {candidate_id}"))?;
+        feedback_candidate_is_promotable(&candidate)?;
+
+        // A correction supersedes what the model actually said; a positive signal endorses it.
+        let response = match candidate.signal {
+            FeedbackSignal::Correction => candidate.correction.clone(),
+            _ => candidate.response.clone(),
+        };
+        let example = TeacherExample {
+            schema_version: 1,
+            example_id: format!("from-feedback-{}", candidate.candidate_id),
+            prompt: candidate.prompt.clone(),
+            expected_capability: expected_capability.to_string(),
+            response,
+            evidence: vec![format!(
+                "human-approved user feedback ({})",
+                candidate.signal.as_str()
+            )],
+            verifier_status: VerifyStatus::Pass,
+            provenance: candidate.provenance.clone(),
+            human_reviewed: true,
+            sensitivity: candidate.sensitivity,
+        };
+        store.append_teacher_example(&example, &self.registry)?;
+        Ok(example)
+    }
+
+    /// F6 "Dataset export/versioning". Builds a versioned dataset artifact from the stored
+    /// teacher examples. Eligibility and marker rules live in `dataset`; this only supplies the
+    /// store's contents so there is a single implementation of "what may be exported".
+    pub fn export_dataset(
+        &self,
+        dataset_version: u32,
+        markers: &[DatasetMarker],
+    ) -> Result<DatasetExport, String> {
+        let examples = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "dataset export requires an attached local store".to_string())?
+            .teacher_examples()?;
+        Ok(build_dataset_export(dataset_version, &examples, markers))
+    }
+
+    /// F6 "Prompt/model konfigürasyon registry'si". Records one measured experiment. Recording
+    /// never changes which model or prompt is in use — see `ModelConfigRun`'s doc comment for
+    /// why the registry is deliberately a log, not a switch.
+    pub fn record_model_config_run(&self, run: &ModelConfigRun) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "model config registry requires an attached local store".to_string())?
+            .record_model_config_run(run)
+    }
+
+    /// Newest-first recorded configurations. The first row is the current configuration; its
+    /// `rollback_target` names the run to return to if it regressed.
+    pub fn model_config_runs(&self, limit: usize) -> Result<Vec<ModelConfigRun>, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "model config registry requires an attached local store".to_string())?
+            .model_config_runs(limit)
+    }
+
+    /// F6 "Old-vs-new regresyonu ve tek komutla model/adaptor rollback".
+    ///
+    /// Compares the newest recorded configuration against the one it names as its rollback
+    /// target and says whether adopting it was justified. The verdict is deliberately
+    /// conservative: a configuration that loses *any* scenario is a regression even if it is
+    /// faster, because F6's completion criterion is that a change must improve the eval without
+    /// producing a safety or latency regression — not that it may trade correctness for speed.
+    pub fn model_config_regression(&self) -> Result<Option<ModelConfigComparison>, String> {
+        let runs = self.model_config_runs(50)?;
+        let Some(current) = runs.first() else {
+            return Ok(None);
+        };
+        let Some(target_id) = current.rollback_target.as_ref() else {
+            return Ok(None);
+        };
+        let Some(previous) = runs.iter().find(|run| &run.run_id == target_id) else {
+            return Err(format!(
+                "rollback target {target_id} is not in the registry; cannot compare"
+            ));
+        };
+        Ok(Some(compare_model_config_runs(previous, current)))
+    }
+
+    /// SHA-256 of the exact system prompt this build sends. This is the "prompt version" the
+    /// registry stores: a commit hash would not notice an uncommitted edit, and a version number
+    /// would have to be remembered by hand.
+    pub fn active_prompt_fingerprint() -> String {
+        crate::sha256_hex(crate::model::JARVIS_SYSTEM_PROMPT)
+    }
+
     /// F3 post-close "`/rag status`" (GPT önerisi 4+5/7). A snapshot, not a subscription — cheap
     /// enough to compute on every call (a handful of `COUNT(*)` queries), so there is no separate
     /// metrics store to keep in sync or go stale.

@@ -9,8 +9,9 @@
 
 use crate::now_epoch;
 use crate::{
-    revalidate_local_attachment, CapabilityRegistry, PentestMode, PentestScope, PolicyControl,
-    PolicyDecision, PolicyResult, Request, Risk, TeacherExample, VerifyStatus,
+    revalidate_local_attachment, CapabilityRegistry, FeedbackCandidate, FeedbackReview,
+    FeedbackSignal, ModelConfigRun, PentestMode, PentestScope, PolicyControl, PolicyDecision,
+    PolicyResult, Request, Risk, TeacherExample, VerifyStatus,
 };
 
 pub fn classify(input: &str) -> &str {
@@ -83,6 +84,91 @@ pub fn validate_teacher_example(
     }
     if !example.human_reviewed {
         return Err("teacher example requires human review".into());
+    }
+    Ok(())
+}
+
+/// F6 feedback intake validation. The rule the plan states — feedback never becomes training
+/// data directly — is enforced here as a contract, not left to callers.
+pub fn validate_feedback_candidate(candidate: &FeedbackCandidate) -> Result<(), String> {
+    if candidate.schema_version != 1 {
+        return Err(format!(
+            "unsupported feedback candidate schema version: {}",
+            candidate.schema_version
+        ));
+    }
+    if candidate.candidate_id.trim().is_empty()
+        || candidate.prompt.trim().is_empty()
+        || candidate.response.trim().is_empty()
+        || candidate.provenance.trim().is_empty()
+    {
+        return Err("feedback candidate requires id, prompt, response and provenance".into());
+    }
+    // A correction that carries no corrected text is not a correction; storing it would create a
+    // review-queue item nobody can act on.
+    if candidate.signal == FeedbackSignal::Correction && candidate.correction.trim().is_empty() {
+        return Err("a correction signal requires the corrected text".into());
+    }
+    if candidate.signal != FeedbackSignal::Correction && !candidate.correction.trim().is_empty() {
+        return Err("only a correction signal may carry corrected text".into());
+    }
+    Ok(())
+}
+
+/// The single gate that decides whether a reviewed candidate may become a `TeacherExample`.
+/// Kept next to the other policy decisions so "what is allowed to become training data" has one
+/// answer in one place, exactly like `policy_for` does for capabilities.
+pub fn feedback_candidate_is_promotable(candidate: &FeedbackCandidate) -> Result<(), String> {
+    validate_feedback_candidate(candidate)?;
+    if candidate.review != FeedbackReview::Approved {
+        return Err("only a human-approved feedback candidate can become training data".into());
+    }
+    // Sensitive user content must never leave the machine inside a dataset export, and a dataset
+    // is exactly the artifact most likely to be copied elsewhere.
+    if candidate.sensitivity == crate::DataSensitivity::Sensitive {
+        return Err("a sensitivity=Sensitive candidate is never eligible as training data".into());
+    }
+    // A negative signal says "this answer was wrong" — it identifies a problem, but carries no
+    // correct answer to learn from. Only a positive example or an explicit correction does.
+    if candidate.signal == FeedbackSignal::Negative {
+        return Err("a negative signal alone carries no correct answer to learn from".into());
+    }
+    Ok(())
+}
+
+/// F6 registry contract validation. A run row is evidence about a model/prompt change, so an
+/// unattributable or self-contradictory row is rejected outright rather than stored and later
+/// mistaken for a real measurement.
+pub fn validate_model_config_run(run: &ModelConfigRun) -> Result<(), String> {
+    if run.schema_version != 1 {
+        return Err(format!(
+            "unsupported model config run schema version: {}",
+            run.schema_version
+        ));
+    }
+    if run.run_id.trim().is_empty()
+        || run.provider_id.trim().is_empty()
+        || run.model_id.trim().is_empty()
+    {
+        return Err("model config run requires id, provider and model".into());
+    }
+    // Without both fingerprints a row cannot answer "was this the same model and prompt?", which
+    // is the only question the registry exists to answer.
+    if run.model_fingerprint.trim().is_empty() || run.prompt_fingerprint.trim().is_empty() {
+        return Err("model config run requires model and prompt fingerprints".into());
+    }
+    if run.scenarios_passed == 0 && run.scenarios_failed == 0 {
+        return Err("model config run requires at least one evaluated scenario".into());
+    }
+    if run
+        .rollback_target
+        .as_ref()
+        .is_some_and(|target| target.trim().is_empty())
+    {
+        return Err("model config run rollback target must not be blank".into());
+    }
+    if run.rollback_target.as_deref() == Some(run.run_id.as_str()) {
+        return Err("model config run cannot roll back to itself".into());
     }
     Ok(())
 }

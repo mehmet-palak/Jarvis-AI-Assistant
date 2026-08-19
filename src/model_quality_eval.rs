@@ -18,8 +18,8 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider, ModelProvider,
-        ModelRuntimeState, Request, Runtime, SqliteStore, WorkspaceCitation,
+        DataSensitivity, InputType, LlamaEmbeddingProvider, LlamaServerProvider, ModelConfigRun,
+        ModelProvider, ModelRuntimeState, Request, Runtime, SqliteStore, WorkspaceCitation,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -505,5 +505,111 @@ mod tests {
             looks_like_code(&run.output, &["#include", "int main"]),
             "K05 yanıtı gerçek kod yerine başka bir şey döndürdü"
         );
+    }
+
+    /// F6 madde 7 ("prompt/model konfigürasyon registry'si") ile madde 1'i birbirine bağlar:
+    /// golden set'i koşar ve sonucu — model parmak izi, prompt parmak izi, geçen/kalan senaryo
+    /// sayısı, medyan gecikme — registry'ye kaydeder. Böylece bir model veya prompt değişikliği
+    /// asla ölçülmemiş, atfedilemez ve geri alınamaz bir olay olmaz.
+    ///
+    /// Ayrı bir test olmasının nedeni: diğer senaryolar tek tek koşulabilsin diye (biri
+    /// düştüğünde neyin bozulduğu görünür kalır), bu ise tam seti tek bir karşılaştırılabilir
+    /// kayda dönüştürsün.
+    #[test]
+    #[ignore = "canlı model + embedding sunucusu gerektirir"]
+    fn record_full_golden_set_run_into_the_config_registry() {
+        let provider = live_provider();
+        let root = rag_fixture();
+        let mut runtime = rag_runtime(&root);
+
+        let mut latencies: Vec<u128> = Vec::new();
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+
+        // Coding senaryoları (geçmişsiz), sonra RAG senaryoları — aynı Runtime üzerinde, çünkü
+        // registry kaydı tek bir konfigürasyonun bütün ölçümünü temsil etmeli.
+        let coding: &[(&'static str, &str, &[&str])] = &[
+            (
+                "K01",
+                "Rust'ta bir string slice'ın sesli harf sayısını döndüren kısa bir fonksiyon yaz.",
+                &["fn "],
+            ),
+            (
+                "K02",
+                "Python'da bir metindeki sesli harf sayısını döndüren kısa bir fonksiyon yaz.",
+                &["def "],
+            ),
+        ];
+        for (id, prompt, markers) in coding {
+            let run = run_scenario(id, &[], prompt, &provider);
+            latencies.push(run.latency_ms);
+            if run.capability == "conversation.reply" && looks_like_code(&run.output, markers) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        let rag: &[(&'static str, &str, &str)] = &[
+            (
+                "R01",
+                "Zephyr-7 kahve makinesinin filtresi kaç haftada bir değiştirilmeli?",
+                "kahve.md",
+            ),
+            (
+                "R04",
+                "Zephyr-7 ofisindeki yedekler ne zaman alınıyor ve orada kahve makinesinin su haznesi kaç litre?",
+                "sunucu.md",
+            ),
+        ];
+        for (id, prompt, expected_file) in rag {
+            let (run, citations) = run_rag_scenario(id, &mut runtime, prompt, &provider);
+            latencies.push(run.latency_ms);
+            if cited_files(&citations)
+                .iter()
+                .any(|file| file == expected_file)
+            {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        latencies.sort_unstable();
+        let median_latency_ms = latencies[latencies.len() / 2] as u64;
+
+        let run = ModelConfigRun {
+            schema_version: 1,
+            run_id: format!("golden-set-{}", crate::now_epoch()),
+            recorded_at: crate::now_epoch(),
+            provider_id: provider.provider_id().to_string(),
+            model_id: provider.model_id().to_string(),
+            model_fingerprint: provider.model_id().to_string(),
+            prompt_fingerprint: Runtime::active_prompt_fingerprint(),
+            server_settings: "-ngl 28 (Vulkan) -c 8192 -t 8".into(),
+            scenarios_passed: passed,
+            scenarios_failed: failed,
+            median_latency_ms,
+            notes: "F6 golden set alt kümesi (K01,K02,R01,R04) — registry kaydı".into(),
+            rollback_target: None,
+        };
+        runtime
+            .record_model_config_run(&run)
+            .expect("registry kaydı");
+
+        let stored = runtime.model_config_runs(5).expect("registry okuma");
+        assert!(
+            stored.iter().any(|row| row.run_id == run.run_id),
+            "koşum registry'ye yazılmadı"
+        );
+        println!(
+            "\nregistry kaydı: {} geçti / {} kaldı, medyan {} ms, prompt {}",
+            passed,
+            failed,
+            median_latency_ms,
+            &run.prompt_fingerprint[..16]
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 }
