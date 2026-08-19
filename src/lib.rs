@@ -9,6 +9,7 @@ pub mod desktop_config;
 pub mod embedding;
 mod memory_intent;
 mod model;
+mod model_quality_eval;
 pub mod patch_generator;
 mod persistence;
 mod policy;

@@ -694,11 +694,26 @@ Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek tran
 
 ### F6 — Model kalite, dataset governance ve adaptasyon
 
-Durum: BEKLENİYOR
+Durum: DEVAM EDİYOR — başlangıç 19 Ağustos 2026
 
 Amaç: Sohbeti hard-code etmek yerine ölçmek; gerekiyorsa küçük, geri alınabilir bir model adaptasyonu yapmak.
 
+Çalışma sırası (F5 ile bağımsız/paralel ilerliyor, F6'nın kendi önkoşulu F3/F4'ün gerçek eval
+verisi — F5 değil): önce indirme gerektirmeyen maddeler (1, 7, 6, 2, 4), model karşılaştırması
+ve LoRA/QLoRA fizibilitesi (indirme gerektiren kısımlar) kullanıcının ev ağında yapılacak.
+
+Not (19 Ağustos 2026): `append_teacher_example()` ve `teacher_examples` tablosu şema olarak hazır
+ve test edilmiş, ama hiçbir üretim akışından (TUI/desktop/Runtime) hiç çağrılmıyor — yani "insan
+onaylı öğretim örneği" borusu şu an gerçek veri akıtmıyor. Bu yüzden madde 2 (dataset
+export/versioning), madde 6 (kullanıcı geri bildirimi intake'i) bu boşluğu kapatmadan anlamlı
+değil — sıralama buna göre revize edildi.
+
 - [ ] Sürümlü benchmark: Türkçe diyalog, takip sorusu, güvenlik sınırı, RAG doğruluğu ve coding görevleri için golden set + latency/quality raporu.
+  - Belge: [docs/f6_model_quality_golden_set.md](docs/f6_model_quality_golden_set.md) — F2'nin QA setinden (Türkçe diyalog/takip/güvenlik sınırı, C01-C20) referansla devralındı, tekrar yazılmadı. Koşum aracı: [src/model_quality_eval.rs](src/model_quality_eval.rs), `coding_eval.rs` deseniyle ama canlı model gerektirdiği için `#[ignore]`'lu (offline `cargo test`/`release_check.sh` bozulmadı: 280 PASS + 5 ignored).
+  - **Coding görevleri (K01-K05): 5/5 PASS**, gerçek Qwen3-8B ile koşuldu (19 Ağustos 2026, commit `77b82f5`, prompt `5451932`, `-ngl 28` Vulkan). K05, 16 Ağustos router-misfire'ının kalıcı regresyon koruması — canlı doğrulandı, `conversation.reply` + gerçek C++ üretiyor.
+  - Ölçülen latency: 10.3-19.0 s/yanıt — F6'nın model karşılaştırması adımı için baseline.
+  - Kalite bulgusu: bu beş senaryoda model amatör değil (doğru, idiomatic çıktı) — yani "amatör kod" şikayeti basit görevlerde görünmüyor, set bir sonraki turda **zor/çok adımlı** senaryolarla genişletilmeli, aksi halde gerçek şikayeti ölçmeyen bir set olur.
+  - Kalan: RAG senaryoları (R01-R05) `NOT RUN` — indekslenmiş test belgeleri hazırlanmadı. Madde bu yüzden `[x]` değil.
 - [ ] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; silme/poisoned-example marker'ları ve dataset manifest hash'i.
 - [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
 - [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
