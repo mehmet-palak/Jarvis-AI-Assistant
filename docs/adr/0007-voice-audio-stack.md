@@ -128,3 +128,27 @@ zorunlu — dördü birden olmadan açılmaz.
   doğarsa (ör. JARVIS'in sesi başka bir cihaza gitsin) ayrı olarak ele alınır.
 - **STT ölçümü sentetik ses üzerinde yapıldı.** Gerçek mikrofon kaydıyla doğrulama, gerçek
   kullanım sırasında yapılacak; `small` yetersiz kalırsa `medium` diskte hazır bekliyor.
+
+## Etkileşim modeli — 20 Ağustos 2026 düzeltmesi
+
+İlk uygulama sesi bir *dikte aracı* gibi ele alıyordu: konuş → metne çevrilsin → taslakta gör →
+düzelt → Enter. Kullanıcının istediği bu değildi:
+
+> "basıcam hiçbir şey enterlemeden jarvis beni duyacak ve o da bana sesli cevap verecek"
+
+Yani ses bir giriş yöntemi değil, bir **konuşma kanalı**. Araya konan onay adımı, konuşmanın
+doğal akışını kesiyordu — kimse bir soru sorduktan sonra cevabı duymak için ayrıca bir tuşa
+basmaz.
+
+**Yeni varsayılan:** tuş bırakılınca istek doğrudan gider ve yanıt sesli döner. Yanıtın sesli
+olması ayrı bir tercihe bağlanmadı: soru sesle geldiyse kanalı kullanıcı zaten seçmiş oluyor.
+Yazıyla sorulan sorular yalnız `auto_play` açıksa seslendirilir; sessiz mod ikisini de bastırır.
+
+**Gözden geçirme yolu kayboldu mu:** hayır, `/voice-settings review on` ile açılıyor. Konuşma
+tanıma gürültülü ortamda veya teknik terimlerde yanılabiliyor; o durumda yanlış anlaşılmış bir
+isteğin sessizce gitmesi istenmez. Ama bu, varsayılan değil istisna.
+
+**Güvenlik sınırı değişmedi:** doğrudan gönderim, sesli onay kuralını gevşetmiyor. İstek sesle
+gelebilir, ama policy gate'in onay şarttı koştuğu bir eylem hâlâ klavyeden onay istiyor —
+`approve_from` bunu reddediyor ve deneme audit'e yazılıyor. Sesin *istek başlatması* ile bir
+eylemi *yetkilendirmesi* farklı şeyler.

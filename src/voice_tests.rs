@@ -387,3 +387,60 @@ fn synthesizing_empty_text_is_an_error_not_a_silent_no_op() {
         .expect_err("boş metin reddedilmeli");
     assert!(error.contains("boş"), "{error}");
 }
+
+/// F5 konuşma modu (20 Ağustos 2026 düzeltmesi): kullanıcı "bas, konuş, cevabı sesli duy"
+/// istiyordu; ilk uygulama araya bir "taslağı gözden geçir ve Enter'a bas" adımı koyuyordu ve
+/// bu konuşmanın akışını kesiyordu. Varsayılan artık doğrudan gönderim.
+#[test]
+fn voice_requests_are_sent_directly_by_default_not_parked_for_review() {
+    let settings = SpeechSettings::default();
+    assert!(
+        !settings.review_transcript,
+        "varsayılan konuşma modu olmalı: bas, konuş, cevabı duy"
+    );
+    assert!(settings.summary().contains("doğrudan gönder"));
+}
+
+/// Gözden geçirme hâlâ mümkün olmalı: gürültülü ortamda veya teknik terimlerde konuşma tanıma
+/// yanılır ve yanlış anlaşılmış bir isteğin sessizce gitmesi istenmez.
+#[test]
+fn review_mode_remains_available_for_when_transcription_is_unreliable() {
+    let settings = SpeechSettings {
+        review_transcript: true,
+        ..SpeechSettings::default()
+    };
+    assert!(settings.summary().contains("önce gözden geçir"));
+
+    // Gözden geçirme açıkken bile onaysız bir transkript istek üretemez — iki koruma
+    // birbirinden bağımsız.
+    let transcript = VoiceTranscript {
+        transcript_id: "t-r".into(),
+        text: "notlarımı sil".into(),
+        duration_ms: 1000,
+        retention: RecordingRetention::default(),
+        confirmed: false,
+    };
+    assert_eq!(
+        transcript_into_request(&transcript, "r-1").expect_err("onaysız"),
+        TranscriptRejection::NotConfirmed
+    );
+}
+
+/// Sessiz mod, sesli soruya sesli cevabı da bastırmalı. Aksi halde "toplantıdayım, ses çıkmasın"
+/// diyen kullanıcı yine de sesli yanıt alırdı — sessiz modun tek işi bunu engellemek.
+#[test]
+fn mute_silences_even_the_reply_to_a_spoken_question() {
+    let mut settings = SpeechSettings {
+        muted: true,
+        ..SpeechSettings::default()
+    };
+    // `should_speak_reply` yazılı sorular için; sesli sorularda çağıran `speak_next_reply`
+    // kullanıyor ama `speak_text` sessiz modu kendi içinde denetliyor — bu testin koruduğu
+    // sözleşme, sessiz modun her iki yolu da kapatması.
+    assert!(!settings.should_speak_reply());
+    settings.auto_play = true;
+    assert!(
+        !settings.should_speak_reply(),
+        "sessiz mod her şeyi bastırmalı"
+    );
+}

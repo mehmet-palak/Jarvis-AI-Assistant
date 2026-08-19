@@ -120,6 +120,9 @@ struct App {
     /// F6: bu oturumda işaretlenmiş dataset örnekleri (silinmiş/zehirli). Export'a veriliyor;
     /// marker uygunluğu ezdiği için işaretli bir örnek hiçbir export'a giremiyor.
     dataset_markers: Vec<jarvis_core::DatasetMarker>,
+    /// F5 konuşma modu: sıradaki yanıt sesli okunacak mı. Soru sesle geldiyse `true` oluyor —
+    /// kanal isteğin kendisinden belli olduğu için kullanıcının ayrıca bir ayar açması gerekmiyor.
+    speak_next_reply: bool,
     /// F5 köken: en son transkriptin ham metni. Gönderilen taslak buna birebir eşitse istek
     /// `InputType::Voice` olarak işaretlenir; kullanıcı metni düzenlediyse artık yazılı girdidir.
     /// Ayrı bir "düzenlendi mi" bayrağı yerine metni karşılaştırmak, her tuş vuruşuna kanca
@@ -166,6 +169,7 @@ impl App {
             speech: jarvis_core::SpeechSettings::default(),
             dataset_markers: Vec::new(),
             voice_draft: None,
+            speak_next_reply: false,
             pending_patch: None,
             pending_patch_note: None,
             active_cancel: None,
@@ -638,39 +642,64 @@ fn start_voice_recording(app: &mut App) {
 
 /// Kaydı durdurur, çevirir ve transkripti taslağa yazar. Transkript doğrudan gönderilmiyor —
 /// kullanıcı görüp düzeltebilsin diye (F5 "transkript editörü": taslak zaten tam düzenlenebilir).
-fn finish_voice_recording(app: &mut App) {
+fn finish_voice_recording(
+    app: &mut App,
+    runtime: &Arc<Mutex<Runtime>>,
+    provider: &LlamaServerProvider,
+    vision: &LlamaVisionServerProvider,
+    sender: &mpsc::Sender<WorkerReply>,
+) {
     let Some(recording) = app.voice_recording.take() else {
         return;
     };
-    match recording.stop() {
-        Ok(wav) => {
-            app.status = "Çeviriliyor…".into();
-            let paths = jarvis_core::VoiceStackPaths::local_default();
-            match jarvis_core::transcribe_recording(
-                &paths,
-                &wav,
-                jarvis_core::RecordingRetention::DiscardImmediately,
-                "tui",
-            ) {
-                Ok(transcript) if transcript.text.trim().is_empty() => {
-                    app.push_system(jarvis_core::TranscriptRejection::Empty.user_message());
-                }
-                Ok(transcript) => {
-                    app.input = transcript.text.clone();
-                    app.input_cursor = app.input.chars().count();
-                    app.voice_draft = Some(transcript.text.clone());
-                    app.push_system(format!(
-                        "Çevrildi: \"{}\" — gözden geçir, düzelt, göndermek için Enter. {}",
-                        transcript.text,
-                        transcript.retention.user_visible_summary()
-                    ));
-                }
-                Err(error) => app.push_system(format!("Çeviri başarısız: {error}")),
-            }
-            app.status = "Hazır".into();
+    let wav = match recording.stop() {
+        Ok(wav) => wav,
+        Err(error) => {
+            app.push_system(format!("Kayıt durdurulamadı: {error}"));
+            return;
         }
-        Err(error) => app.push_system(format!("Kayıt durdurulamadı: {error}")),
+    };
+    app.status = "Çeviriliyor…".into();
+    let paths = jarvis_core::VoiceStackPaths::local_default();
+    let transcript = match jarvis_core::transcribe_recording(
+        &paths,
+        &wav,
+        jarvis_core::RecordingRetention::DiscardImmediately,
+        "tui",
+    ) {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            app.push_system(format!("Çeviri başarısız: {error}"));
+            app.status = "Hazır".into();
+            return;
+        }
+    };
+    if transcript.text.trim().is_empty() {
+        app.push_system(jarvis_core::TranscriptRejection::Empty.user_message());
+        app.status = "Hazır".into();
+        return;
     }
+
+    app.input = transcript.text.clone();
+    app.input_cursor = app.input.chars().count();
+    app.voice_draft = Some(transcript.text.clone());
+    app.status = "Hazır".into();
+
+    if app.speech.review_transcript {
+        // Gözden geçirme modu: metin taslakta kalır, kullanıcı düzeltip Enter'a basar.
+        app.push_system(format!(
+            "Çevrildi: \"{}\" — gözden geçir, göndermek için Enter. {}",
+            transcript.text,
+            transcript.retention.user_visible_summary()
+        ));
+        return;
+    }
+
+    // Konuşma modu (varsayılan): kullanıcı konuştu, cevabı beklemesi gerekiyor — Enter'a
+    // basmak konuşmanın doğal akışını kesiyordu. Soru sesle geldiği için yanıt da sesli
+    // veriliyor; bunun için ayrıca bir ayar açmak gerekmiyor, kanal isteğin kendisinden belli.
+    app.speak_next_reply = true;
+    submit(app, runtime, provider, vision, sender);
 }
 
 fn event_loop(
@@ -693,9 +722,13 @@ fn event_loop(
             app.last_citations = reply.citations;
             app.status = reply.status;
             app.pending = false;
-            // F5 "TTS playback: yanıt bitince opt-in oynatma". Varsayılan kapalı; `speak_text`
-            // sessiz modu da ayrıca denetliyor, böylece hiçbir yol onu atlayamıyor.
-            if app.speech.should_speak_reply() {
+            // F5: sesle sorulan soruya sesle cevap verilir — bu, ayrı bir "otomatik oynatma"
+            // tercihinden bağımsız, çünkü kanalı kullanıcının kendisi seçmiş oluyor. Yazıyla
+            // sorulan sorular yalnız `auto_play` açıksa seslendirilir. Sessiz mod ikisini de
+            // bastırıyor (`speak_text` kendi içinde denetliyor).
+            let speak_this = app.speak_next_reply || app.speech.should_speak_reply();
+            app.speak_next_reply = false;
+            if speak_this {
                 if let Some(spoken) = app
                     .messages
                     .get(reply.message_index)
@@ -777,7 +810,7 @@ fn event_loop(
                 }
                 KeyEventKind::Release => {
                     if app.voice_recording.is_some() {
-                        finish_voice_recording(&mut app);
+                        finish_voice_recording(&mut app, &runtime, &provider, &vision, &sender);
                     }
                 }
                 KeyEventKind::Repeat => {}
@@ -1590,6 +1623,17 @@ fn submit(
                 },
                 Err(_) => app.push_system("Kullanım: /voice-settings speed <0.5-2.0>"),
             },
+            "review" => match value.trim() {
+                "on" => {
+                    app.speech.review_transcript = true;
+                    app.push_system("Sesli istekler artık önce taslakta gösterilecek — düzeltip Enter'a basman gerekecek.");
+                }
+                "off" => {
+                    app.speech.review_transcript = false;
+                    app.push_system("Sesli istekler doğrudan gönderilecek ve yanıt sesli dönecek.");
+                }
+                _ => app.push_system("Kullanım: /voice-settings review on|off"),
+            },
             "mute" => {
                 app.speech.muted = true;
                 app.push_system("Sessiz mod açıldı — otomatik oynatma dahil hiç ses çıkmayacak.");
@@ -1599,7 +1643,7 @@ fn submit(
                 app.push_system(format!("Sessiz mod kapatıldı. {}", app.speech.summary()));
             }
             _ => app.push_system(
-                "Kullanım: /voice-settings autoplay on|off • speed <0.5-2.0> • mute • unmute"
+                "Kullanım: /voice-settings autoplay on|off • speed <0.5-2.0> • mute • unmute • review on|off"
                     .to_string(),
             ),
         }
@@ -2957,7 +3001,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** (bırakınca çevrilir); desteklemiyorsa /voice ile başlat-bitir. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Çevrilen metin doğrudan gönderilmez, taslağa yazılır — gönderilmeden önce görüp düzeltirsin. Ham ses hiçbir zaman saklanmaz. Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2996,7 +3040,7 @@ fn submit(
         }
         "/voice" => {
             if app.voice_recording.is_some() {
-                finish_voice_recording(app);
+                finish_voice_recording(app, runtime, provider, vision, sender);
             } else {
                 start_voice_recording(app);
                 if app.voice_recording.is_some() && app.hold_to_talk_supported {
@@ -3060,7 +3104,7 @@ fn submit(
                 }
             ));
             lines.push(
-                "Değiştir: /voice-settings autoplay on|off • /voice-settings speed <0.5-2.0> • /voice-settings mute|unmute"
+                "Değiştir: /voice-settings autoplay on|off • speed <0.5-2.0> • mute|unmute • review on|off"
                     .to_string(),
             );
             app.push_system(lines.join("\n"));

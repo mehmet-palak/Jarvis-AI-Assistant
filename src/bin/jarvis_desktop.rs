@@ -132,6 +132,8 @@ struct JarvisDesktop {
     voice_recording: Option<jarvis_core::VoiceRecording>,
     /// F5: seslendirme tercihleri; TUI ile aynı tip, aynı varsayılanlar (otomatik oynatma kapalı).
     speech: jarvis_core::SpeechSettings,
+    /// F5 konuşma modu: sıradaki yanıt sesli okunacak mı (soru sesle geldiyse).
+    speak_next_reply: bool,
     /// Ses yığınının kurulu olup olmadığı — **bir kez** açılışta ölçülüyor.
     ///
     /// İlk hâlinde her karede yeniden sorgulanıyordu ve `availability()` içindeki
@@ -273,6 +275,7 @@ impl JarvisDesktop {
             draft: String::new(),
             voice_recording: None,
             speech: jarvis_core::SpeechSettings::default(),
+            speak_next_reply: false,
             voice_availability: jarvis_core::VoiceStackPaths::local_default().availability(),
             queued_attachments: vec![],
             sent_attachment_receipts: vec![],
@@ -312,7 +315,9 @@ impl JarvisDesktop {
             self.scroll_to_latest = true;
             // F5 opt-in otomatik seslendirme — TUI ile aynı kural: varsayılan kapalı, sessiz mod
             // her şeyi bastırır (`speak_last_reply` kontrolü kendi içinde yapıyor).
-            if self.speech.should_speak_reply() {
+            let speak_this = self.speak_next_reply || self.speech.should_speak_reply();
+            self.speak_next_reply = false;
+            if speak_this {
                 self.speak_last_reply();
             }
             self.close_requested |= reply.close_window;
@@ -890,7 +895,11 @@ impl JarvisDesktop {
                             self.speech.muted = !self.speech.muted;
                         }
                     });
-                    ui.checkbox(&mut self.speech.auto_play, "Yanıt bitince otomatik seslendir");
+                    ui.checkbox(&mut self.speech.auto_play, "Yazılı sorulara da sesli yanıt ver");
+                    ui.checkbox(
+                        &mut self.speech.review_transcript,
+                        "Sesli isteği göndermeden önce göster",
+                    );
                 }
             });
     }
@@ -925,9 +934,16 @@ impl JarvisDesktop {
                             .to_string(),
                     );
                 }
-                // Transkript doğrudan gönderilmiyor: yazı kutusuna yazılıyor, kullanıcı görüp
-                // düzeltebiliyor — TUI ile aynı sözleşme.
-                Ok(transcript) => self.draft = transcript.text,
+                Ok(transcript) => {
+                    self.draft = transcript.text;
+                    if !self.speech.review_transcript {
+                        // Konuşma modu (varsayılan, TUI ile aynı): kullanıcı konuştu, isteği
+                        // göndermek için ayrıca bir düğmeye basması gerekmiyor ve yanıt sesli
+                        // dönüyor — kanalı kullanıcının kendisi seçmiş oluyor.
+                        self.speak_next_reply = true;
+                        self.submit();
+                    }
+                }
                 Err(error) => self.push_system_message(format!("Çeviri başarısız: {error}")),
             },
             Err(error) => self.push_system_message(format!("Kayıt durdurulamadı: {error}")),

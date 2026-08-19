@@ -497,6 +497,13 @@ pub struct SpeechSettings {
     /// Sessiz mod: açıkken `/speak` dahil hiçbir ses çıkmaz. Otomatik oynatmayı kapatmaktan
     /// farklı — bu, "şu an hiç ses istemiyorum" durumu (toplantı, gece).
     pub muted: bool,
+    /// Konuşma metne çevrildikten sonra gönderilmeden önce gözden geçirilsin mi.
+    ///
+    /// Varsayılan `false`: kullanıcı konuşup bıraktığında istek doğrudan gidiyor ve yanıt sesli
+    /// dönüyor — konuşmanın doğal akışı bu, araya Enter koymak onu kesiyor. `true` yapıldığında
+    /// transkript taslakta bekler; konuşma tanımanın yanıldığı durumlarda (gürültülü ortam,
+    /// teknik terimler) düzeltme şansı verir.
+    pub review_transcript: bool,
 }
 
 impl Default for SpeechSettings {
@@ -505,6 +512,7 @@ impl Default for SpeechSettings {
             auto_play: false,
             speed: 1.0,
             muted: false,
+            review_transcript: false,
         }
     }
 }
@@ -540,14 +548,19 @@ impl SpeechSettings {
     /// okunabilir olmalı, yalnız bir simgeyle değil.
     pub fn summary(&self) -> String {
         format!(
-            "Seslendirme: {} • otomatik oynatma: {} • hız: {:.2}x",
+            "Seslendirme: {} • otomatik oynatma: {} • hız: {:.2}x • sesli istek: {}",
             if self.muted {
                 "sessiz mod AÇIK"
             } else {
                 "açık"
             },
             if self.auto_play { "açık" } else { "kapalı" },
-            self.speed
+            self.speed,
+            if self.review_transcript {
+                "önce gözden geçir"
+            } else {
+                "doğrudan gönder ve sesli yanıtla"
+            }
         )
     }
 }
