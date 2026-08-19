@@ -708,12 +708,13 @@ onaylı öğretim örneği" borusu şu an gerçek veri akıtmıyor. Bu yüzden m
 export/versioning), madde 6 (kullanıcı geri bildirimi intake'i) bu boşluğu kapatmadan anlamlı
 değil — sıralama buna göre revize edildi.
 
-- [ ] Sürümlü benchmark: Türkçe diyalog, takip sorusu, güvenlik sınırı, RAG doğruluğu ve coding görevleri için golden set + latency/quality raporu.
-  - Belge: [docs/f6_model_quality_golden_set.md](docs/f6_model_quality_golden_set.md) — F2'nin QA setinden (Türkçe diyalog/takip/güvenlik sınırı, C01-C20) referansla devralındı, tekrar yazılmadı. Koşum aracı: [src/model_quality_eval.rs](src/model_quality_eval.rs), `coding_eval.rs` deseniyle ama canlı model gerektirdiği için `#[ignore]`'lu (offline `cargo test`/`release_check.sh` bozulmadı: 280 PASS + 5 ignored).
-  - **Coding görevleri (K01-K05): 5/5 PASS**, gerçek Qwen3-8B ile koşuldu (19 Ağustos 2026, commit `77b82f5`, prompt `5451932`, `-ngl 28` Vulkan). K05, 16 Ağustos router-misfire'ının kalıcı regresyon koruması — canlı doğrulandı, `conversation.reply` + gerçek C++ üretiyor.
-  - Ölçülen latency: 10.3-19.0 s/yanıt — F6'nın model karşılaştırması adımı için baseline.
-  - Kalite bulgusu: bu beş senaryoda model amatör değil (doğru, idiomatic çıktı) — yani "amatör kod" şikayeti basit görevlerde görünmüyor, set bir sonraki turda **zor/çok adımlı** senaryolarla genişletilmeli, aksi halde gerçek şikayeti ölçmeyen bir set olur.
-  - Kalan: RAG senaryoları (R01-R05) `NOT RUN` — indekslenmiş test belgeleri hazırlanmadı. Madde bu yüzden `[x]` değil.
+- [x] Sürümlü benchmark: Türkçe diyalog, takip sorusu, güvenlik sınırı, RAG doğruluğu ve coding görevleri için golden set + latency/quality raporu.
+  - Belge: [docs/f6_model_quality_golden_set.md](docs/f6_model_quality_golden_set.md) — F2'nin QA setinden (Türkçe diyalog/takip/güvenlik sınırı, C01-C20) referansla devralındı, tekrar yazılmadı. Koşum aracı: [src/model_quality_eval.rs](src/model_quality_eval.rs), `coding_eval.rs` deseniyle ama canlı model gerektirdiği için `#[ignore]`'lu (offline `cargo test`/`release_check.sh` bozulmadı: 280 PASS + 10 ignored).
+  - **Kanıt: 10/10 senaryo PASS**, gerçek Qwen3-8B + gerçek embedding servisiyle koşuldu (19 Ağustos 2026, commit `77b82f5`, prompt `5451932`, `-ngl 28` Vulkan). Coding K01-K05 (latency 10.3-19.0 s), RAG R01-R05 (latency 4.6-7.1 s).
+  - K05: 16 Ağustos router-misfire'ının kalıcı regresyon koruması — canlı doğrulandı, `conversation.reply` + gerçek C++ üretiyor.
+  - R05 (en güçlü sonuç): `Sensitive` işaretli belge atıf olarak hiç yüzeye çıkmadı, içindeki sır model yanıtına sızmadı — F3 sensitivity filtresinin **gerçek modelle uçtan uca** kanıtı (birim testi değil).
+  - **Metodoloji düzeltmesi (ilk koşumda bulundu):** İlk RAG korpusu 2 belgeydi ve tüm senaryolar `PASS` veriyordu, ama sonuç limiti (4) korpustan büyük olduğu için her sorgu zaten tüm korpusu getiriyordu — yani testler hiçbir sıralama gücü ölçmüyor, değersiz bir `PASS` üretiyordu. 5 çeldirici belge eklendi (toplam 8); `rag_runtime()` artık "korpus > limit" koşulunu kendi kendine assert ediyor, böylece fixture ileride küçülürse test sessizce değersizleşmek yerine gürültülü düşer. Düzeltme sonrası doğru belge 8 belge arasından ilk sırada geliyor.
+  - Kalite bulgusu (dürüst): bu senaryolarda model amatör değil (doğru, idiomatic çıktı) — yani "amatör kod" şikayeti basit görevlerde ortaya çıkmıyor. Set bir sonraki turda **zor/çok adımlı/proje bağlamlı** senaryolarla genişletilmeli, aksi halde sürekli geçen ama gerçek şikayeti ölçmeyen bir sete dönüşür.
 - [ ] Dataset export/versioning: yalnız human-reviewed, verifier-passed, sensitivity etiketli örnekler; silme/poisoned-example marker'ları ve dataset manifest hash'i.
 - [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
 - [ ] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.

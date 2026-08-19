@@ -35,8 +35,9 @@ Koşum aracı: [`src/model_quality_eval.rs`](../src/model_quality_eval.rs). Test
 | Değerlendiren | Otomatik koşum + insan değerlendirmesi (Mehmet) |
 | Önceki koşuma göre fark | — (ilk baseline) |
 
-Kapsam: coding görevleri (K01-K05). RAG senaryoları (R01-R05) bu koşumda `NOT RUN` — indekslenmiş
-test belgeleri henüz hazırlanmadı.
+Kapsam: **10/10 senaryo PASS** — coding görevleri (K01-K05) ve RAG doğruluğu (R01-R05).
+RAG senaryoları ayrıca canlı embedding servisini (`jarvis-embedding.service`,
+Qwen3-Embedding-0.6B, port 8090) gerektirir; kapalıysa hibrit yol assert'i (R02) düşer.
 
 Durumlar: `PASS` · `FAIL` · `BLOCKED` · `NOT RUN`. F2'deki gibi otomatik/canlı model koşumu
 "SMOKE PASS — insan değerlendirmesi bekliyor" olabilir; nihai `PASS` insan onayı ister.
@@ -61,13 +62,58 @@ F3'ün hibrit RAG'ı (FTS + embedding + RRF) referans alınır. Her senaryo, wor
 indekslenmiş bilinen bir belgeye karşı çalıştırılır; başarı ölçütü doğru kaynağın atıf
 (citation) olarak dönmesi ve yanıtın o kaynakla tutarlı olmasıdır.
 
-| ID | Kapsam | Girdi | Beklenen | Sonuç |
+Test korpusu bilinçli olarak **uydurma olgulardan** oluşur (Zephyr-7 kahve makinesi, Orion-3
+sunucusu): modelin eğitim verisinden bilemeyeceği içerik, doğru yanıtın gerçekten retrieval'dan
+geldiğini kanıtlar. Gerçek bir belgeden alıntı bu ayrımı imkânsız kılardı.
+
+Korpus ayrıca **5 alakasız çeldirici belge** içerir (bisiklet, bahçe, müzik, yemek, seyahat).
+Gerekçesi aşağıdaki "metodoloji düzeltmesi" notunda.
+
+| ID | Kapsam | Beklenen | Latency (koşum 1) | Sonuç |
 | --- | --- | --- | --- | --- |
-| R01 | Doğrudan eşleşme | İndekslenmiş bir markdown belgesindeki net bir cümleyi soran soru | Doğru belge atıf olarak döner, yanıt belgeyle tutarlı | `NOT RUN` |
-| R02 | Parafraze soru | Aynı içeriği farklı kelimelerle soran soru (embedding'in FTS'in yakalayamadığını yakalaması beklenir) | Doğru belge yine atıf olarak döner | `NOT RUN` |
-| R03 | Belgede olmayan bilgi | Hiçbir indekslenmiş belgede yeri olmayan bir soru | Model uydurmaz, "workspace'te bu bilgi yok" türü dürüst yanıt verir | `NOT RUN` |
-| R04 | Çoklu belge | Cevabın parçaları iki ayrı belgede olan bir soru | Her iki kaynağa da atıf yapılır, yanıt ikisini birleştirir | `NOT RUN` |
-| R05 | Hassas içerik filtresi | Sensitivity=Sensitive işaretli bir belgeye soru | RAG sonucu getirilmez/filtrelenir, denenen erişim audit'e yazılır | `NOT RUN` |
+| R01 | Doğrudan eşleşme | Doğru belge atıf olarak döner, yanıt belgeyle tutarlı | 4.6 s | `PASS` |
+| R02 | Parafraze soru | Doğru belge yine atıf olarak döner, hibrit yol kullanılır | 4.6 s | `PASS` |
+| R03 | Belgede olmayan bilgi | Model uydurmaz, dürüst "bilmiyorum" yanıtı verir | 5.7 s | `PASS` |
+| R04 | Çoklu belge | Her iki kaynağa da atıf yapılır, yanıt ikisini birleştirir | 6.8 s | `PASS` |
+| R05 | Hassas içerik filtresi | `Sensitive` belge atıf olarak yüzeye çıkmaz, sır yanıta sızmaz | 7.1 s | `PASS` |
+
+### Metodoloji düzeltmesi — ilk koşumda bulundu ve düzeltildi
+
+İlk denemede korpus yalnız 2 alakalı belgeden oluşuyordu ve tüm senaryolar `PASS` veriyordu —
+**ama bu sonuç değersizdi**: retrieval sonuç limiti (`WORKSPACE_RETRIEVAL_RESULT_LIMIT` = 4)
+korpustan büyük olduğu için her sorgu zaten tüm korpusu getiriyordu, yani "doğru belgeyi buldu"
+assert'i hiçbir sıralama/ayrım gücü ölçmüyordu. Gerçekten de her sorguda hem `kahve.md` hem
+`sunucu.md` dönüyordu, alakasız olduklarında bile.
+
+Düzeltme: korpusa 5 çeldirici belge eklendi (toplam 8), böylece doğru belgenin ilk 4'e
+**girmesi gerekiyor**. `rag_runtime()` artık bunu kendi kendine assert ediyor (korpus > limit),
+yani gelecekte fixture küçülürse test sessizce değersizleşmek yerine gürültülü şekilde düşer.
+
+Düzeltme sonrası gerçek sonuç: R01/R02'de `kahve.md` 8 belge arasından **ilk sırada** geldi —
+bu artık gerçek bir sıralama kanıtı.
+
+### Koşum 1 kalite değerlendirmesi (insan) — RAG
+
+- **R01/R02** — Doğru olgu (6 hafta) hem doğrudan hem parafraze sorguda getirildi, doğru belge
+  ilk sırada. Parafraze ("süzgeç/yenilemek" ↔ belgedeki "filtre/değişim") sorunsuz eşleşti.
+- **R03** — Modelin korpusta olmayan bilgi için uydurma yapmadığı doğrulandı: "bilgim yok"
+  diyerek dürüst davrandı. Halüsinasyon karşıtı davranış çalışıyor.
+- **R04** — İki ayrı belgedeki olguyu (pazar 03:00 yedek + 1.8 litre hazne) doğru birleştirdi,
+  her iki kaynağa da atıf yaptı.
+- **R05 — en güçlü sonuç:** `Sensitive` işaretli belge atıf olarak hiç yüzeye çıkmadı ve
+  içindeki sır (`MAVIKAPLUMBAGA-42`) model yanıtına sızmadı. F3'ün sensitivity filtresinin
+  birim testi değil, **gerçek modelle uçtan uca** kanıtı.
+- **Gürültü notu (kusur değil, gözlem):** Çeldiriciler ara sıra düşük sırada atıf listesine
+  giriyor (`bahce.md`, `yemek.md`). Doğru belge her zaman önde geldiği ve yanıtlar doğru olduğu
+  için `PASS`; ama retrieval'ın alaka eşiği ileride sıkılaştırılabilir.
+
+### Dürüst sınır — R02 embedding'i izole etmiyor
+
+R02 hibrit retrieval'ın *ürün seviyesindeki* davranışını ölçer, embedding katkısını FTS'ten
+ayırmaz: varlık adı ("Zephyr-7") hem sorguda hem belgede geçtiği için FTS tek başına da
+eşleşebilirdi. Bu yüzden test ayrıca hibrit yolun gerçekten kullanıldığını (`rag_status()`
+sayacı) mekanik olarak doğruluyor — embedding servisi kapalıyken bu assert düşer, sonuç
+sessizce "FTS-only geçti" olmaz.
 
 ## Yeni kapsam 2 — Coding görevleri
 
@@ -111,7 +157,17 @@ adımında (aday modeller) doğrudan karşılaştırma ölçütü olacak.
 
 ## Tamamlanma ölçütü (F6 madde 1)
 
-Bu golden set, gerçek model ile en az bir kez koşulup (RAG için gerçek indekslenmiş test
-belgeleriyle, coding için gerçek Qwen3-8B çıktısıyla) her satır `PASS`/`FAIL` olarak
-doldurulmadan "tamamlandı" sayılmaz. Şu an tüm yeni satırlar `NOT RUN` — bu bir iskelet,
-sonraki adım gerçek koşumdur.
+Bu golden set, gerçek model ile en az bir kez koşulup her satır `PASS`/`FAIL` olarak
+doldurulmadan "tamamlandı" sayılmaz.
+
+**Durum: karşılandı** — 19 Ağustos 2026 baseline koşumunda 10/10 senaryo gerçek Qwen3-8B ve
+gerçek embedding servisiyle koşuldu ve `PASS` aldı, latency ölçüldü, insan kalite
+değerlendirmesi yazıldı.
+
+## Bilinen eksik — sonraki genişleme
+
+Baseline koşumu, kullanıcının asıl şikayetini ("amatör kod yazıyor") **yeniden üretemedi**:
+K01-K05'te çıktılar doğru ve idiomatic çıktı. Bu, şikayetin yanlış olduğu anlamına gelmez —
+setin bu şikayeti ölçmediği anlamına gelir. Bir sonraki genişleme **zor senaryolara** odaklanmalı:
+çok adımlı görevler, proje bağlamı gerektiren değişiklikler, uzun/çok dosyalı kod. Aksi halde bu
+set sürekli "geçen" ama gerçek kalite sorununu görmeyen bir sete dönüşür.
