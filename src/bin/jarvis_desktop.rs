@@ -965,6 +965,11 @@ impl JarvisDesktop {
             self.push_system_message("Seslendirilecek bir yanıt yok.".to_string());
             return;
         };
+        // TUI ile aynı sözleşme: kod blokları ve kaynak listesi seslendirilmiyor.
+        let text = jarvis_core::speakable_summary(&text);
+        if text.trim().is_empty() {
+            return;
+        }
         let paths = jarvis_core::VoiceStackPaths::local_default();
         let wav = paths.scratch_dir.join("desktop-speak.wav");
         match jarvis_core::synthesize_speech_with(&paths, &text, &wav, &self.speech) {

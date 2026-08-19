@@ -565,6 +565,86 @@ impl SpeechSettings {
     }
 }
 
+/// Bir yanıtın **seslendirilecek** kısmını çıkarır.
+///
+/// 20 Ağustos 2026, gerçek kullanımda bulundu: JARVIS bir C++ sınıfı yazdı ve sesli mod açıkken
+/// kodun tamamını — süslü parantezler, `std::unique_lock`, noktalı virgüller dahil — yüksek
+/// sesle okudu. Kullanıcının tarifiyle "büyü yapıyor gibi". Kod okunacak bir şey değil, ekranda
+/// görülecek bir şeydir; kaynak listesi de öyle (dosya yolları sesli okunduğunda anlamsız).
+///
+/// Bu yüzden konuşma metni yanıtın kendisi değil, yanıtın **anlatı kısmı**: kod blokları tek bir
+/// kısa cümleyle özetleniyor, biçimlendirme işaretleri temizleniyor, kaynak bloğu atılıyor.
+/// Ekrandaki metin hiç değişmiyor — yalnız seslendirilen sürüm sadeleşiyor.
+pub fn speakable_summary(reply: &str) -> String {
+    // Kaynak/bellek bloğu: ekranda değerli, seslendirildiğinde gürültü.
+    let mut body = reply;
+    for marker in ["\n\nKaynaklar:", "\n\n(bu yanıtta "] {
+        if let Some(index) = body.find(marker) {
+            body = &body[..index];
+        }
+    }
+
+    let mut spoken = String::new();
+    let mut code_blocks = 0usize;
+    let mut inside_code = false;
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            if !inside_code {
+                code_blocks += 1;
+            }
+            inside_code = !inside_code;
+            continue;
+        }
+        if inside_code {
+            continue;
+        }
+        let cleaned = strip_inline_markup(line);
+        if cleaned.trim().is_empty() {
+            continue;
+        }
+        spoken.push_str(cleaned.trim());
+        spoken.push(' ');
+    }
+
+    let mut spoken = spoken.trim().to_string();
+    if code_blocks > 0 {
+        // Kullanıcı kodun *var olduğunu* duymalı, içeriğini değil — ekrana bakması gerektiğini
+        // bilmesi lazım.
+        let note = if code_blocks == 1 {
+            "Kodu ekrana yazdım.".to_string()
+        } else {
+            format!("{code_blocks} kod bloğunu ekrana yazdım.")
+        };
+        if spoken.is_empty() {
+            spoken = note;
+        } else {
+            spoken.push(' ');
+            spoken.push_str(&note);
+        }
+    }
+    spoken
+}
+
+/// Satır içi markdown işaretlerini temizler. Sesli okunduğunda `**`, backtick ve başlık
+/// diyezleri ya sessizce yutulur ya da garip duraklamalara yol açar; ikisi de istenmez.
+fn strip_inline_markup(line: &str) -> String {
+    let without_heading = line.trim_start().trim_start_matches('#').trim_start();
+    let without_bullet = without_heading
+        .strip_prefix("- ")
+        .or_else(|| without_heading.strip_prefix("* "))
+        .unwrap_or(without_heading);
+    // Tek geçiş: `**` zaten `*` temizliğinin içinde kalıyor, `_` boşluğa dönüyor.
+    without_bullet
+        .chars()
+        .map(|character| match character {
+            '`' | '*' => '\0',
+            '_' => ' ',
+            other => other,
+        })
+        .filter(|character| *character != '\0')
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "voice_tests.rs"]
 mod tests;

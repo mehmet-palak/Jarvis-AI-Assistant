@@ -75,9 +75,10 @@ pub use project_analyst::{analyze_repository, draft_coding_plan_with_provider, R
 pub use runtime::{RegressionCheckedPatch, Runtime};
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
 pub use voice::{
-    level_description, level_meter, recent_audio_level, synthesize_speech, synthesize_speech_with,
-    transcribe_recording, transcript_into_request, RecordingRetention, SpeechSettings,
-    TranscriptRejection, VoiceRecording, VoiceStackAvailability, VoiceStackPaths, VoiceTranscript,
+    level_description, level_meter, recent_audio_level, speakable_summary, synthesize_speech,
+    synthesize_speech_with, transcribe_recording, transcript_into_request, RecordingRetention,
+    SpeechSettings, TranscriptRejection, VoiceRecording, VoiceStackAvailability, VoiceStackPaths,
+    VoiceTranscript,
 };
 pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{

@@ -444,3 +444,70 @@ fn mute_silences_even_the_reply_to_a_spoken_question() {
         "sessiz mod her şeyi bastırmalı"
     );
 }
+
+/// 20 Ağustos 2026, gerçek kullanımda bulundu: sesli mod açıkken JARVIS bir C++ sınıfı yazdı ve
+/// kodun tamamını — süslü parantezler, `std::unique_lock`, noktalı virgüller dahil — yüksek
+/// sesle okudu. Kod okunacak değil, ekranda görülecek bir şeydir.
+#[test]
+fn code_blocks_are_not_read_aloud_but_their_existence_is_announced() {
+    let reply = "Elbette, işte istediğin sınıf:\n\n\
+        ```cpp\n\
+        class LimitedQueue {\n\
+            std::mutex mtx_;\n\
+            void produce(int item) { queue_.push(item); }\n\
+        };\n\
+        ```\n\n\
+        Kapatıldığında bekleyen tüm iş parçacıkları çıkar.";
+    let spoken = speakable_summary(reply);
+
+    // Kodun hiçbir parçası seslendirilmemeli.
+    for fragment in ["std::mutex", "class LimitedQueue", "queue_.push", "{", ";"] {
+        assert!(
+            !spoken.contains(fragment),
+            "kod parçası seslendirilmemeli ({fragment}): {spoken}"
+        );
+    }
+    // Anlatı kısmı korunmalı.
+    assert!(spoken.contains("işte istediğin sınıf"), "{spoken}");
+    assert!(spoken.contains("bekleyen tüm iş parçacıkları"), "{spoken}");
+    // Kullanıcı kodun var olduğunu duymalı — ekrana bakması gerektiğini bilsin.
+    assert!(spoken.contains("Kodu ekrana yazdım"), "{spoken}");
+}
+
+/// Yalnız koddan ibaret bir yanıt sessiz kalmamalı: kullanıcı bir şey olduğunu duymalı.
+#[test]
+fn a_reply_that_is_only_code_still_says_something() {
+    let spoken = speakable_summary("```python\nprint('merhaba')\n```");
+    assert_eq!(spoken, "Kodu ekrana yazdım.");
+
+    let two_blocks = speakable_summary("```c\nint a;\n```\nve\n```c\nint b;\n```");
+    assert!(two_blocks.contains("2 kod bloğunu"), "{two_blocks}");
+}
+
+/// Kaynak listesi ekranda değerli ama sesli okunduğunda anlamsız: dosya yolları ve
+/// "(bu yanıtta 4 kayıtlı bilgi bağlam olarak kullanıldı)" gibi ekler seslendirilmemeli.
+#[test]
+fn citation_and_memory_blocks_are_left_out_of_speech() {
+    let reply = "Filtre her 6 haftada bir değişmeli.\n\nKaynaklar:\n• kahve.md (bölüm 1)";
+    let spoken = speakable_summary(reply);
+    assert!(spoken.contains("6 haftada"), "{spoken}");
+    assert!(!spoken.contains("Kaynaklar"), "{spoken}");
+    assert!(!spoken.contains("kahve.md"), "{spoken}");
+
+    let with_memory =
+        speakable_summary("Tamam.\n\n(bu yanıtta 4 kayıtlı bilgi bağlam olarak kullanıldı)");
+    assert_eq!(with_memory, "Tamam.");
+}
+
+/// Markdown işaretleri sesli okunduğunda ya yutulur ya garip duraklama yapar; temizlenmeli.
+/// Ama işaretin *içindeki* kelime korunmalı — anlamı taşıyan o.
+#[test]
+fn markdown_markers_are_stripped_without_losing_the_words() {
+    let spoken = speakable_summary("## Başlık\n\n- **önemli** bir `değer` var");
+    assert!(spoken.contains("Başlık"), "{spoken}");
+    assert!(spoken.contains("önemli"), "{spoken}");
+    assert!(spoken.contains("değer"), "{spoken}");
+    assert!(!spoken.contains('#'), "{spoken}");
+    assert!(!spoken.contains('*'), "{spoken}");
+    assert!(!spoken.contains('`'), "{spoken}");
+}

@@ -587,6 +587,14 @@ fn speak_text(app: &mut App, text: &str) {
     if app.speech.muted {
         return;
     }
+    // Yanıtın tamamı değil, anlatı kısmı seslendiriliyor: kod blokları ve kaynak listesi
+    // ekranda okunacak şeyler, sesli okunduğunda anlamsız (20 Ağustos 2026'da gerçek kullanımda
+    // bulundu — model bir C++ sınıfı yazdı ve tamamını noktalı virgülleriyle sesli okudu).
+    let spoken = jarvis_core::speakable_summary(text);
+    let text = spoken.trim();
+    if text.is_empty() {
+        return;
+    }
     let paths = jarvis_core::VoiceStackPaths::local_default();
     if !paths.availability().speech {
         app.push_system("Seslendirme kurulu değil (Piper bulunamadı).");
