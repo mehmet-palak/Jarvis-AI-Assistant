@@ -171,3 +171,47 @@ K01-K05'te çıktılar doğru ve idiomatic çıktı. Bu, şikayetin yanlış old
 setin bu şikayeti ölçmediği anlamına gelir. Bir sonraki genişleme **zor senaryolara** odaklanmalı:
 çok adımlı görevler, proje bağlamı gerektiren değişiklikler, uzun/çok dosyalı kod. Aksi halde bu
 set sürekli "geçen" ama gerçek kalite sorununu görmeyen bir sete dönüşür.
+
+---
+
+## Model karşılaştırması — F6 madde 3 (19 Ağustos 2026)
+
+Koşum aracı: `compare_baseline_against_a_local_candidate_model` ([src/model_quality_eval.rs](../src/model_quality_eval.rs)).
+Aynı beş senaryo (K01, K02, K03, K05, R01) iki modele karşı **aynı anda ayakta** olan iki
+sunucuyla koşuldu — sırayla yeniden yükleme yapılsaydı ölçüm model yükleme süresini de içerir ve
+gecikmeler karşılaştırılamaz olurdu.
+
+Aday, bu tur için **hiçbir indirme yapılmadan** seçildi: makinede F2'de kullanıcı onayıyla
+indirilmiş Qwen2.5-VL-3B zaten vardı ve gerçek bir alternatif model (3B, farklı aile).
+
+| | Baseline | Aday |
+| --- | --- | --- |
+| Model | Qwen3-8B-Q4_K_M | Qwen2.5-VL-3B-Instruct-Q4_K_M |
+| Çalışma | `-ngl 28` (Vulkan GPU offload) | `-ngl 0` (yalnız CPU) |
+| Disk | 4.7 GB | 1.8 GB |
+| RAM | 5443 MB | 3609 MB |
+| VRAM | ~4.5 GB (paylaşımlı GPU'da toplam 7.3 GB kullanımda) | 0 |
+| Senaryo | **5/5 PASS** | **5/5 PASS** |
+| Medyan gecikme | 7019 ms | 8994 ms |
+| Verdict | — | `Unchanged` (kalite ve gecikme pratikte aynı) |
+
+Senaryo bazında gecikme (ms): K01 6215/24123 · K02 7019/10306 · K03 7373/7317 ·
+K05 9535/8994 · R01 2163/7711 (baseline/aday).
+
+### Sonucun anlamı — bu bir başarı raporu değil, bir uyarı
+
+**3B'lik, tamamen CPU'da çalışan bir model, 8B'lik GPU hızlandırmalı modelle beş senaryonun
+beşinde de berabere kaldı** ve medyan gecikmede yalnız ~%28 geride. Doğru okuma şu değildir
+"aday model 8B kadar iyi"; doğru okuma şudur: **bu golden set, 3B ile 8B arasındaki farkı ölçemiyor.**
+
+Bu, [koşum 1'in kalite bulgusunu](#bilinen-eksik--sonraki-genişleme) bağımsız bir kanıtla
+doğruluyor: senaryolar bir model seçimi kararını destekleyecek kadar zor değil. Ayrım gücü
+olmayan bir ölçekle model karşılaştırmak, hangi modeli seçersen seç "fark yok" cevabı üretir.
+
+**Pratik sonuç:** Yeni aday modeller (ör. kod-özel bir model) indirilmeden önce golden set zor
+senaryolarla genişletilmeli. Aksi halde indirme yapılır, karşılaştırma koşulur ve sonuç yine
+`Unchanged` çıkar — yani indirme boşa gider.
+
+**Karşılaştırma altyapısı tarafında eksik yok:** ölçüm, kayıt (registry), ve verdict üretimi
+(F6 madde 5 kuralı: bir senaryo kaybı hızlanmayla telafi edilemez) uçtan uca çalıştı. Yeni bir
+aday eklemek yalnız ikinci bir sunucu başlatıp aynı testi koşmak demek.

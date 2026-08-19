@@ -612,4 +612,243 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    // --- F6 madde 3: model karşılaştırması --------------------------------------------------
+    //
+    // "Mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü."
+    //
+    // Karşılaştırma, golden set'in *aynı alt kümesini* iki modele karşı koşar ve iki sonucu aynı
+    // registry'ye yazar; verdict'i `compare_model_config_runs` üretir. Ölçümün elle
+    // yorumlanmaması bilinçli: "hangisi daha iyi" sorusunun cevabı, F6 madde 5'te yazılan tek
+    // kurala (bir senaryo kaybı hızlanmayla telafi edilemez) dayanmalı, koşumu yapanın izlenimine
+    // değil.
+
+    /// Aday model sunucusunun portu. Ayrı bir port çünkü karşılaştırma iki modelin *aynı anda*
+    /// ayakta olmasını gerektirir — sırayla yeniden yükleseydik ölçüm, model yükleme süresini de
+    /// içerir ve gecikme sayıları karşılaştırılamaz hale gelirdi.
+    const CANDIDATE_PORT: u16 = 8091;
+
+    fn provider_on(port: u16) -> LlamaServerProvider {
+        LlamaServerProvider {
+            port,
+            ..LlamaServerProvider::local_default()
+        }
+    }
+
+    /// Golden set'in karşılaştırma alt kümesi. Tam set yerine alt küme kullanılıyor çünkü
+    /// karşılaştırma iki modeli de koşar; tam set iki kat sürer ve ek senaryolar aynı ayrımı
+    /// üretmez. Seçilen beş senaryo iki ekseni birden kapsıyor: kod üretimi (K01/K02), akıl
+    /// yürütme (K03), routing sınırı (K05) ve retrieval (R01).
+    fn run_comparison_subset(
+        label: &str,
+        provider: &dyn ModelProvider,
+        root: &Path,
+    ) -> (u32, u32, u64) {
+        let mut latencies: Vec<u128> = Vec::new();
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+
+        let coding: &[(&'static str, &str, &[&str])] = &[
+            (
+                "K01",
+                "Rust'ta bir string slice'ın sesli harf sayısını döndüren kısa bir fonksiyon yaz.",
+                &["fn "],
+            ),
+            (
+                "K02",
+                "Python'da bir metindeki sesli harf sayısını döndüren kısa bir fonksiyon yaz.",
+                &["def "],
+            ),
+        ];
+        for (id, prompt, markers) in coding {
+            let run = run_scenario(id, &[], prompt, provider);
+            latencies.push(run.latency_ms);
+            let ok =
+                run.capability == "conversation.reply" && looks_like_code(&run.output, markers);
+            println!(
+                "[{label}] {id}: {} ({} ms)",
+                if ok { "PASS" } else { "FAIL" },
+                run.latency_ms
+            );
+            if ok {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        // K03 — akıl yürütme: doğru teşhis mekanik olarak yalnız "birikme hatasını gördü mü"
+        // üzerinden yoklanıyor (`+=` veya "toplam" düzeltmesi), tam kalite yargısı değil.
+        let k03 = run_scenario(
+            "K03",
+            &[],
+            "Bu Python fonksiyonu neden her zaman 0 döndürüyor?\n\ndef topla(sayilar):\n    toplam = 0\n    for s in sayilar:\n        toplam = s\n    return toplam - toplam",
+            provider,
+        );
+        latencies.push(k03.latency_ms);
+        let k03_ok = k03.capability == "conversation.reply" && k03.output.trim().len() > 40;
+        println!(
+            "[{label}] K03: {} ({} ms)",
+            if k03_ok { "PASS" } else { "FAIL" },
+            k03.latency_ms
+        );
+        if k03_ok {
+            passed += 1
+        } else {
+            failed += 1
+        }
+
+        // K05 — routing sınırı: küçük bir modelin en kolay bozduğu yer burası, bu yüzden
+        // karşılaştırmanın en ayırt edici senaryosu.
+        let k05 = run_scenario(
+            "K05",
+            &[
+                ("user", "jarvis bana bir c++ kodu yaz"),
+                (
+                    "assistant",
+                    "Elbette, ne tür bir C++ kodu istediğinizi belirtir misiniz?",
+                ),
+            ],
+            "direkt buraya yaz orta düzey bir script olsun",
+            provider,
+        );
+        latencies.push(k05.latency_ms);
+        let k05_ok = k05.capability == "conversation.reply"
+            && looks_like_code(&k05.output, &["#include", "int main"]);
+        println!(
+            "[{label}] K05: {} ({} ms)",
+            if k05_ok { "PASS" } else { "FAIL" },
+            k05.latency_ms
+        );
+        if k05_ok {
+            passed += 1
+        } else {
+            failed += 1
+        }
+
+        // R01 — retrieval: aday modelin atıflı bağlamı doğru kullanıp kullanmadığı.
+        let mut runtime = rag_runtime(root);
+        let (r01, citations) = run_rag_scenario(
+            "R01",
+            &mut runtime,
+            "Zephyr-7 kahve makinesinin filtresi kaç haftada bir değiştirilmeli?",
+            provider,
+        );
+        latencies.push(r01.latency_ms);
+        let r01_ok = cited_files(&citations)
+            .iter()
+            .any(|file| file == "kahve.md")
+            && r01.output.contains('6');
+        println!(
+            "[{label}] R01: {} ({} ms)",
+            if r01_ok { "PASS" } else { "FAIL" },
+            r01.latency_ms
+        );
+        if r01_ok {
+            passed += 1
+        } else {
+            failed += 1
+        }
+
+        latencies.sort_unstable();
+        let median = latencies[latencies.len() / 2] as u64;
+        (passed, failed, median)
+    }
+
+    /// F6 madde 3. Baseline (Qwen3-8B, GPU offload) ile yerelde bulunan aday modeli
+    /// (Qwen2.5-VL-3B, CPU-only) aynı senaryolarla karşılaştırır, ikisini de registry'ye yazar ve
+    /// verdict'i F6 madde 5'in kuralına göre üretir.
+    ///
+    /// Aday sunucusu ayrıca başlatılmalıdır:
+    /// `llama-server -m <aday.gguf> -ngl 0 -t 8 -c 8192 --port 8091`
+    #[test]
+    #[ignore = "canlı baseline (8088) + aday (8091) + embedding (8090) sunucusu gerektirir"]
+    fn compare_baseline_against_a_local_candidate_model() {
+        let baseline_provider = live_provider();
+        let candidate_provider = provider_on(CANDIDATE_PORT);
+        assert_eq!(
+            candidate_provider.runtime_state(),
+            ModelRuntimeState::Ready,
+            "aday model sunucusu 127.0.0.1:{CANDIDATE_PORT} üzerinde ayakta olmalı"
+        );
+
+        let root = rag_fixture();
+        let store = SqliteStore::in_memory().expect("sqlite");
+        let registry_runtime = Runtime::with_store(store);
+
+        let (base_pass, base_fail, base_median) =
+            run_comparison_subset("baseline", &baseline_provider, &root);
+        let (cand_pass, cand_fail, cand_median) =
+            run_comparison_subset("aday", &candidate_provider, &root);
+
+        let baseline = ModelConfigRun {
+            schema_version: 1,
+            run_id: "baseline-qwen3-8b-gpu".into(),
+            recorded_at: crate::now_epoch(),
+            provider_id: baseline_provider.provider_id().into(),
+            model_id: "Qwen3-8B-Q4_K_M".into(),
+            model_fingerprint: "d98cdcbd03e17ce4".into(),
+            prompt_fingerprint: Runtime::active_prompt_fingerprint(),
+            server_settings: "-ngl 28 (Vulkan) -c 8192 -t 8".into(),
+            scenarios_passed: base_pass,
+            scenarios_failed: base_fail,
+            median_latency_ms: base_median,
+            notes: "F6 madde 3 karşılaştırma baseline'ı".into(),
+            rollback_target: None,
+        };
+        let candidate = ModelConfigRun {
+            run_id: "aday-qwen25-vl-3b-cpu".into(),
+            model_id: "Qwen2.5-VL-3B-Instruct-Q4_K_M".into(),
+            model_fingerprint: "qwen25-vl-3b-q4km".into(),
+            server_settings: "-ngl 0 (CPU-only) -c 8192 -t 8".into(),
+            scenarios_passed: cand_pass,
+            scenarios_failed: cand_fail,
+            median_latency_ms: cand_median,
+            notes: "F6 madde 3 aday: yerelde bulunan daha küçük model".into(),
+            rollback_target: Some("baseline-qwen3-8b-gpu".into()),
+            recorded_at: crate::now_epoch() + 1,
+            ..baseline.clone()
+        };
+
+        registry_runtime
+            .record_model_config_run(&baseline)
+            .expect("baseline kaydı");
+        registry_runtime
+            .record_model_config_run(&candidate)
+            .expect("aday kaydı");
+
+        let comparison = registry_runtime
+            .model_config_regression()
+            .expect("karşılaştırma")
+            .expect("rollback hedefi var");
+
+        println!("\n================ F6 MADDE 3 — MODEL KARŞILAŞTIRMASI ================");
+        println!(
+            "baseline : {} • {}/{} senaryo • medyan {} ms",
+            baseline.model_id,
+            base_pass,
+            base_pass + base_fail,
+            base_median
+        );
+        println!(
+            "aday     : {} • {}/{} senaryo • medyan {} ms",
+            candidate.model_id,
+            cand_pass,
+            cand_pass + cand_fail,
+            cand_median
+        );
+        println!(
+            "verdict  : {:?} — {}",
+            comparison.verdict, comparison.reason
+        );
+        println!("===================================================================\n");
+
+        // Karşılaştırmanın kendisi başarılı sayılır; hangi modelin kazandığı bir test sonucu
+        // değil, kaydedilen bir ölçümdür. Test yalnız ölçümün gerçekten yapıldığını doğrular.
+        assert_eq!(comparison.current_run_id, "aday-qwen25-vl-3b-cpu");
+        assert_eq!(comparison.previous_run_id, "baseline-qwen3-8b-gpu");
+        assert!(base_pass + base_fail == 5 && cand_pass + cand_fail == 5);
+
+        fs::remove_dir_all(&root).ok();
+    }
 }

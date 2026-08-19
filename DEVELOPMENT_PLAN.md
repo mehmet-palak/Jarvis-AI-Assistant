@@ -98,7 +98,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
 | F4 | Onaylı, izole coding ve yerel iş workbench'i | TAMAMLANDI (15/15 madde `[x]`: plan(varsayım/soru/risk dahil)→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti + seçilebilir dosya scope'lu patch preview dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor, `LocalTool` çerçevesi 2 gerçek tool'la ve genel bir `workflow.rs` çok-adımlı orkestratörü kanıtlandı; gerçek cgroup v2 (RAM/CPU) + `WorkspaceWriteMode::Overlay` (disk bütçesi dahil) + gerçek seccomp-bpf allowlist filtresi eklendi, izole worker (bwrap+cgroup+overlay+seccomp) ilk kez gerçek makinede tamamen uçtan uca kanıtlandı — 2 gerçek bug (RLIMIT_NPROC per-UID yanlış hesap, tmpfs/bind mount sırası) bulunup düzeltildi) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
-| F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | BEKLENİYOR | F3/F4 gerçek eval verisi |
+| F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | TAMAMLANDI (7/7 madde; golden set + dataset governance + config registry + regresyon/rollback + geri bildirim intake'i + LoRA kararı ADR-0006 + model karşılaştırması — hepsi gerçek modelle kanıtlı, hiçbir indirme yapılmadan) | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
 | F8 | MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile | BEKLENİYOR | F3, F7 trust/permission temeli |
 | F9 | Operasyonel olgunluk, release ve uzun dönem bakım | BEKLENİYOR | F2–F8 boyunca sürekli yürür |
@@ -694,7 +694,9 @@ Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek tran
 
 ### F6 — Model kalite, dataset governance ve adaptasyon
 
-Durum: DEVAM EDİYOR — 7 maddenin 6'sı tamamlandı (19 Ağustos 2026). Kalan tek madde "model karşılaştırması", bilinçli olarak ertelendi: F6'nın indirme gerektiren tek maddesi, kullanıcı indirmeleri ev ağında yapacak.
+Durum: TAMAMLANDI — 7/7 madde, 19 Ağustos 2026. Hiçbir model indirilmedi: "model karşılaştırması" maddesi, makinede F2'de zaten indirilmiş olan Qwen2.5-VL-3B aday olarak kullanılarak tamamlandı.
+
+**F6'nın en önemli çıktısı bir özellik değil, bir uyarı:** golden set iki bağımsız kanıtla (madde 1 kalite değerlendirmesi + madde 3 model karşılaştırması) **ayrım gücü yetersiz** çıktı — 3B CPU modeli, 8B GPU modeliyle berabere kalıyor. Bir sonraki tur zor/çok adımlı senaryolarla genişletme olmalı; aksi halde ne model seçimi ne de fine-tuning kararı bu setle desteklenemez.
 
 Amaç: Sohbeti hard-code etmek yerine ölçmek; gerekiyorsa küçük, geri alınabilir bir model adaptasyonu yapmak.
 
@@ -719,8 +721,12 @@ değil — sıralama buna göre revize edildi.
   - `src/dataset.rs` (+ `dataset_tests.rs`): export bir veritabanı dökümü değil — incelenmemiş / verifier'ı geçmemiş / `Sensitive` örnek dışarı çıkamaz ve **sessizce düşmez**, gerekçesiyle `excluded` listesinde raporlanır. Marker'lar uygunluğu **ezer**: düzgün görünen ama `Poisoned` işaretli bir örnek asla export edilemez (sıralama bilinçli, tersi zehirli örneği geçirirdi). Silme/poisoned marker'ı satırı yok etmek yerine "bilinen-kötü" olarak kalıcı kılar — silmek aynı içeriğin sonra yeniymiş gibi kuyruğa dönmesine izin verirdi.
   - Manifest hash'i içerik-adresli (SHA-256, elle yazılmış kanonik metin üzerinden — bir bağımlılığın formatı değişince hash'in kaymaması için). "Bu model hangi dataset ile eğitildi" sorusunu yanıtlar.
   - Kanıt: 4 birim testi + uçtan uca `feedback → inceleme → TeacherExample → dataset` testi PASS.
-- [ ] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
-  - **Bilinçli olarak ertelendi (19 Ağustos 2026):** tek indirme gerektiren madde; kullanıcı indirmeleri ev ağında yapacak. Karşılaştırmanın ölçüm altyapısı (golden set + registry + old-vs-new karşılaştırması) hazır, yalnız aday model dosyaları eksik.
+- [x] Model karşılaştırması: mevcut Qwen3 baseline ile aday modellerin CPU/RAM gecikmesi ve kalite ölçümü.
+  - **İndirme yapılmadan tamamlandı:** aday olarak makinede F2'de zaten indirilmiş Qwen2.5-VL-3B kullanıldı (gerçek bir alternatif model — 3B, farklı aile). İki sunucu **aynı anda** ayakta koşuldu; sırayla yeniden yükleme yapılsaydı ölçüm model yükleme süresini de içerir ve gecikmeler karşılaştırılamaz olurdu.
+  - Ölçüm: baseline Qwen3-8B (`-ngl 28` Vulkan) **5/5 senaryo, medyan 7019 ms, 5443 MB RAM + ~4.5 GB VRAM**; aday Qwen2.5-VL-3B (`-ngl 0`, yalnız CPU) **5/5 senaryo, medyan 8994 ms, 3609 MB RAM + 0 VRAM**. Verdict: `Unchanged`.
+  - **Sonucun anlamı bir uyarı, başarı raporu değil:** 3B'lik, tamamen CPU'da çalışan bir model 8B'lik GPU hızlandırmalı modelle beşte beş berabere kaldı ve medyanda yalnız ~%28 geride. Doğru okuma "aday 8B kadar iyi" değil, **"bu golden set 3B ile 8B arasındaki farkı ölçemiyor"**. Bu, madde 1'in kalite bulgusunu (setin kolay olduğu) bağımsız bir kanıtla doğruluyor.
+  - **Pratik sonuç:** Yeni aday modeller (ör. kod-özel model) indirilmeden **önce** golden set zor senaryolarla genişletilmeli — aksi halde indirme yapılır, karşılaştırma koşulur ve sonuç yine `Unchanged` çıkar, yani indirme boşa gider.
+  - Altyapı tarafında eksik yok: ölçüm → registry kaydı → verdict üretimi uçtan uca çalıştı. Yeni aday eklemek yalnız ikinci bir sunucu başlatıp aynı testi koşmak demek.
 - [x] LoRA/QLoRA fizibilite kararı: VRAM/RAM, eğitim süresi, lisans, eval hedefi ve rollback artifact'i kullanıcıya sunulmadan eğitim başlamaz.
   - Karar: **şimdi eğitim yapılmayacak** — [ADR-0006](docs/adr/0006-lora-adaptation-feasibility.md). Üç bağımsız gerekçe: (1) `teacher_examples` boş, eğitilecek veri yok; (2) golden set, iddia edilen kalite sorununu ölçemedi — ölçülmemiş bir problemi eğitimle çözmek iyileşmeyi doğrulayamamak demek, F6'nın tamamlanma ölçütü bunu yasaklıyor; (3) daha ucuz ve denenmemiş bir seçenek var (kod-özel model, dataset/eğitim/rollback artefaktı gerektirmiyor). ADR yeniden değerlendirme tetikleyicilerini ve eğitim yapılacaksa gereken önkoşulları da yazıyor.
 - [x] Old-vs-new regresyonu ve tek komutla model/adaptor rollback.
