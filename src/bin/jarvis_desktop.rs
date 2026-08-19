@@ -132,6 +132,12 @@ struct JarvisDesktop {
     voice_recording: Option<jarvis_core::VoiceRecording>,
     /// F5: seslendirme tercihleri; TUI ile aynı tip, aynı varsayılanlar (otomatik oynatma kapalı).
     speech: jarvis_core::SpeechSettings,
+    /// Ses yığınının kurulu olup olmadığı — **bir kez** açılışta ölçülüyor.
+    ///
+    /// İlk hâlinde her karede yeniden sorgulanıyordu ve `availability()` içindeki
+    /// `command -v pw-record` saniyede ~60 alt süreç doğuruyordu. Kurulum bir oturum içinde
+    /// değişmeyen bir şey; her karede sormak saf israftı.
+    voice_availability: jarvis_core::VoiceStackAvailability,
     queued_attachments: Vec<AttachmentRef>,
     sent_attachment_receipts: Vec<AttachmentReceipt>,
     previews: HashMap<String, TextureHandle>,
@@ -267,6 +273,7 @@ impl JarvisDesktop {
             draft: String::new(),
             voice_recording: None,
             speech: jarvis_core::SpeechSettings::default(),
+            voice_availability: jarvis_core::VoiceStackPaths::local_default().availability(),
             queued_attachments: vec![],
             sent_attachment_receipts: vec![],
             previews: HashMap::new(),
@@ -989,7 +996,7 @@ impl JarvisDesktop {
         hud_status_row(ui, "MODEL", &self.model_status, model_color);
         hud_status_row(ui, "DONANIM", "GPU (VULKAN) 28/36", COLOR_TEAL_DIM);
         hud_status_row(ui, "ERİŞİM", "LOOPBACK", COLOR_TEAL_DIM);
-        let voice = jarvis_core::VoiceStackPaths::local_default().availability();
+        let voice = self.voice_availability;
         hud_status_row(
             ui,
             "SES",
@@ -1966,7 +1973,21 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([900.0, 620.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    // 20 Ağustos 2026: GPU belleği doluyken eframe/glutin `EGL_BAD_ALLOC` ile çöküyor ve
+    // kullanıcı yalnız `Glutin(Error { raw_code: Some(12291) })` görüyordu — hiçbir şey
+    // anlatmayan bir mesaj. JARVIS'in kendi modeli 8 GB'lık kartın yarısını kullandığı için bu,
+    // olağandışı değil sınırda-beklenen bir durum (ölçüldü: ~600 MB boş kalıyor, bazen yetiyor
+    // bazen yetmiyor).
+    //
+    // Yedek yol, ortam değişkenini bu süreçte ayarlayıp tekrar denemek DEĞİL: GL kütüphanesi
+    // ilk denemede yüklenip sürücü seçimini önbelleğe aldığı için o çok geç kalıyor (denendi,
+    // ikinci deneme de aynı hatayla düştü). Bunun yerine süreç, değişken ayarlanmış olarak
+    // kendini yeniden başlatıyor — temiz bir GL başlatması garanti.
+    const SOFTWARE_RENDER_ENV: &str = "LIBGL_ALWAYS_SOFTWARE";
+    const FALLBACK_MARKER_ENV: &str = "JARVIS_DESKTOP_SOFTWARE_FALLBACK";
+
+    let already_retried = std::env::var(FALLBACK_MARKER_ENV).is_ok();
+    let result = eframe::run_native(
         "JARVIS",
         options,
         Box::new(move |creation_context| {
@@ -1978,7 +1999,41 @@ fn main() -> eframe::Result<()> {
                 &creation_context.egui_ctx,
             )))
         }),
-    )
+    );
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if already_retried => {
+            eprintln!(
+                "JARVIS penceresi yazılım render ile de açılamadı: {error}\n\
+                 GPU belleğini boşaltmayı dene: `systemctl --user stop jarvis-llama.service`\n\
+                 (modeli RAM'e döndürür) veya ekran kartını kullanan diğer uygulamaları kapat."
+            );
+            Err(error)
+        }
+        Err(error) => {
+            eprintln!(
+                "JARVIS penceresi donanım hızlandırmayla açılamadı: {error}\n\
+                 Muhtemel neden: GPU belleği dolu. JARVIS'in modeli ekran kartında yer tutuyor\n\
+                 (`systemctl --user stop jarvis-llama.service` ile boşaltabilirsin) ve başka GL\n\
+                 uygulamaları da pay alıyor olabilir.\n\
+                 Yazılım render ile yeniden başlatılıyor (daha yavaş ama çalışır)…"
+            );
+            let executable = std::env::current_exe()
+                .map_err(|io_error| eframe::Error::AppCreation(Box::new(io_error)))?;
+            let status = std::process::Command::new(executable)
+                .args(std::env::args().skip(1))
+                .env(SOFTWARE_RENDER_ENV, "1")
+                .env(FALLBACK_MARKER_ENV, "1")
+                .status()
+                .map_err(|io_error| eframe::Error::AppCreation(Box::new(io_error)))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
