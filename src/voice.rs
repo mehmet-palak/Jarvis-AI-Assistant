@@ -325,6 +325,16 @@ pub fn synthesize_speech(
     text: &str,
     output_path: &Path,
 ) -> Result<(), String> {
+    synthesize_speech_with(paths, text, output_path, &SpeechSettings::default())
+}
+
+/// Hız ayarıyla seslendirme. `synthesize_speech` bunun varsayılan ayarlı hâli.
+pub fn synthesize_speech_with(
+    paths: &VoiceStackPaths,
+    text: &str,
+    output_path: &Path,
+    settings: &SpeechSettings,
+) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("seslendirilecek metin boş".into());
     }
@@ -343,6 +353,8 @@ pub fn synthesize_speech(
         .arg(&paths.piper_voice)
         .arg("--output_file")
         .arg(output_path)
+        .arg("--length_scale")
+        .arg(format!("{:.3}", settings.piper_length_scale()))
         .env("LD_LIBRARY_PATH", &piper_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -366,6 +378,178 @@ pub fn synthesize_speech(
         return Err("seslendirme başarısız".into());
     }
     Ok(())
+}
+
+/// Kaydın son parçasındaki ses seviyesi (0.0–1.0 arası RMS).
+///
+/// F5 "ses seviyesi/VAD göstergesi": kullanıcı kayıt sırasında mikrofonun gerçekten ses alıp
+/// almadığını görebilmeli. Sessiz bir kaydın 20 saniye sonra "hiçbir şey duyulmadı" ile
+/// bitmesi, en sinir bozucu başarısızlık biçimi.
+///
+/// Yalnız dosyanın *sonunu* okur (son ~0.25 saniye): büyüyen bir kaydı her yenilemede baştan
+/// okumak, kayıt uzadıkça göstergeyi yavaşlatırdı.
+pub fn recent_audio_level(wav_path: &Path) -> f32 {
+    // 16 kHz mono s16 → saniyede 32000 bayt; 0.25 saniye = 8000 bayt.
+    const TAIL_BYTES: u64 = 8_000;
+
+    let Ok(mut file) = std::fs::File::open(wav_path) else {
+        return 0.0;
+    };
+    let Some(audio_start) = wav_data_offset(&mut file) else {
+        return 0.0;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return 0.0;
+    };
+    let len = metadata.len();
+    if len <= audio_start {
+        return 0.0;
+    }
+    let read_len = (len - audio_start).min(TAIL_BYTES);
+    let start = len - read_len;
+
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return 0.0;
+    }
+    let mut buffer = vec![0u8; read_len as usize];
+    if file.read_exact(&mut buffer).is_err() {
+        return 0.0;
+    }
+
+    let mut sum_squares = 0.0f64;
+    let mut count = 0u32;
+    for chunk in buffer.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f64 / i16::MAX as f64;
+        sum_squares += sample * sample;
+        count += 1;
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    ((sum_squares / count as f64).sqrt() as f32).clamp(0.0, 1.0)
+}
+
+/// WAV `data` chunk'ının başladığı bayt konumu.
+///
+/// Sabit 44 varsaymak yerine gerçekten aranıyor: `pw-record` ve Piper kanonik 44 baytlık başlık
+/// üretiyor ama WAV biçimi `data` öncesinde başka chunk'lara (`LIST`, `fact`) izin veriyor.
+/// Yanlış konumdan okumak, başlık baytlarını ses örneği sanıp **sahte bir seviye** göstermek
+/// demek olurdu — göstergenin hiç çalışmamasından daha kötü, çünkü kullanıcı ona güvenir.
+fn wav_data_offset(file: &mut std::fs::File) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut offset = 12u64;
+    // Kötü/kesik bir dosyada sonsuza dek dönmemek için chunk sayısı sınırlı.
+    for _ in 0..16 {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut chunk = [0u8; 8];
+        if file.read_exact(&mut chunk).is_err() {
+            return None;
+        }
+        let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
+        if &chunk[0..4] == b"data" {
+            return Some(offset + 8);
+        }
+        // Chunk'lar çift bayta hizalı; tek boyutlu bir chunk bir dolgu baytı taşır.
+        offset += 8 + size + (size % 2);
+    }
+    None
+}
+
+/// Ses seviyesini ekranda gösterilecek bir çubuğa çevirir. Metin olarak da okunabilir olması
+/// önemli: ekran okuyucu kullanan biri için `level_description` var (erişilebilirlik maddesi).
+pub fn level_meter(level: f32, width: usize) -> String {
+    // Konuşma seviyeleri RMS olarak düşüktür (0.02–0.2 tipik); doğrusal ölçek göstergeyi hep
+    // boş gösterirdi, bu yüzden karekök ile açılıyor.
+    let scaled = (level.sqrt() * 2.2).clamp(0.0, 1.0);
+    let filled = (scaled * width as f32).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Ses seviyesinin metin karşılığı — ekran okuyucular ve görsel gösterge okunamadığı durumlar
+/// için. F5 erişilebilirlik maddesi: her görsel bilginin metin eşdeğeri olmalı.
+pub fn level_description(level: f32) -> &'static str {
+    match level {
+        l if l < 0.005 => "sessiz",
+        l if l < 0.03 => "çok kısık",
+        l if l < 0.10 => "normal",
+        l if l < 0.25 => "yüksek",
+        _ => "çok yüksek",
+    }
+}
+
+/// Seslendirme davranışı. Hepsi kullanıcı tercihi; varsayılan **sessiz** — JARVIS kendiliğinden
+/// konuşmaya başlamaz, kullanıcı açıkça istemedikçe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeechSettings {
+    /// Her yanıt bittiğinde otomatik seslendirilsin mi. Varsayılan `false` (opt-in).
+    pub auto_play: bool,
+    /// Konuşma hızı çarpanı. Piper'da `--length_scale` ters çalışır (küçük = hızlı), dönüşüm
+    /// `piper_length_scale()` içinde yapılıyor ki kullanıcı sezgisel yönü görsün.
+    pub speed: f32,
+    /// Sessiz mod: açıkken `/speak` dahil hiçbir ses çıkmaz. Otomatik oynatmayı kapatmaktan
+    /// farklı — bu, "şu an hiç ses istemiyorum" durumu (toplantı, gece).
+    pub muted: bool,
+}
+
+impl Default for SpeechSettings {
+    fn default() -> Self {
+        Self {
+            auto_play: false,
+            speed: 1.0,
+            muted: false,
+        }
+    }
+}
+
+impl SpeechSettings {
+    pub const MIN_SPEED: f32 = 0.5;
+    pub const MAX_SPEED: f32 = 2.0;
+
+    /// Piper'ın `--length_scale` değeri. Kullanıcının gördüğü "hız" ile ters orantılı.
+    pub fn piper_length_scale(&self) -> f32 {
+        1.0 / self.speed.clamp(Self::MIN_SPEED, Self::MAX_SPEED)
+    }
+
+    /// Bir yanıt tamamlandığında ses çıkmalı mı. İki ayrı tercihin birleşimi, çünkü ikisi
+    /// farklı şeyler: `auto_play` kalıcı bir alışkanlık, `muted` anlık bir durum.
+    pub fn should_speak_reply(&self) -> bool {
+        self.auto_play && !self.muted
+    }
+
+    pub fn set_speed(&mut self, speed: f32) -> Result<(), String> {
+        if !(Self::MIN_SPEED..=Self::MAX_SPEED).contains(&speed) {
+            return Err(format!(
+                "hız {} ile {} arasında olmalı",
+                Self::MIN_SPEED,
+                Self::MAX_SPEED
+            ));
+        }
+        self.speed = speed;
+        Ok(())
+    }
+
+    /// Kullanıcıya tek satırda durum. Erişilebilirlik: ses davranışının tamamı metin olarak
+    /// okunabilir olmalı, yalnız bir simgeyle değil.
+    pub fn summary(&self) -> String {
+        format!(
+            "Seslendirme: {} • otomatik oynatma: {} • hız: {:.2}x",
+            if self.muted {
+                "sessiz mod AÇIK"
+            } else {
+                "açık"
+            },
+            if self.auto_play { "açık" } else { "kapalı" },
+            self.speed
+        )
+    }
 }
 
 #[cfg(test)]

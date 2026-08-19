@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -111,6 +112,11 @@ struct App {
     /// F5: süren bir sesli kayıt. `Some` iken mikrofon açık ve kullanıcıya gösteriliyor —
     /// "kayıtta mıyım?" sorusu hiçbir zaman belirsiz kalmamalı (ADR-0007 gizlilik duruşu).
     voice_recording: Option<jarvis_core::VoiceRecording>,
+    /// Terminal gerçek bas-tut'u destekliyor mu (tuş bırakma olayı bildiriyor mu).
+    /// Desteklemiyorsa `/voice` aç/kapa modeli tek seçenek — kullanıcıya bu açıkça söyleniyor.
+    hold_to_talk_supported: bool,
+    /// F5: seslendirme tercihleri (otomatik oynatma, hız, sessiz mod).
+    speech: jarvis_core::SpeechSettings,
     /// F4 "Patch preview/review": en son `/patch`'in ürettiği, henüz onaylanmamış teklif.
     pending_patch: Option<(CodingPlan, PatchProposal)>,
     /// F4 "Patch preview/review": kullanıcının `/patch-note` ile eklediği serbest metin —
@@ -148,6 +154,8 @@ impl App {
             last_citations: vec![],
             pending_coding_plan: None,
             voice_recording: None,
+            hold_to_talk_supported: false,
+            speech: jarvis_core::SpeechSettings::default(),
             pending_patch: None,
             pending_patch_note: None,
             active_cancel: None,
@@ -444,6 +452,17 @@ fn run_tui(
         EnableBracketedPaste,
         EnableMouseCapture
     )?;
+    // F5 "push-to-talk": gerçek bas-TUT, terminalin tuş *bırakma* olayını bildirmesini
+    // gerektirir. Bu, Kitty klavye protokolünü destekleyen terminallerde (foot, kitty,
+    // ghostty, WezTerm) mümkün; desteklemeyende sessizce eski aç/kapa davranışına düşüyoruz —
+    // özelliğin hiç çalışmaması yerine daha zayıf ama çalışan bir biçimi kalıyor.
+    let hold_to_talk = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if hold_to_talk {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+        )?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let model_state = provider.runtime_state().as_str();
@@ -455,8 +474,12 @@ fn run_tui(
             .expect("JARVIS runtime lock poisoned")
             .startup_briefing(),
     );
+    app.hold_to_talk_supported = hold_to_talk;
     let result = event_loop(&mut terminal, runtime, provider, vision, app);
     disable_raw_mode()?;
+    if hold_to_talk {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     execute!(
         terminal.backend_mut(),
         DisableMouseCapture,
@@ -465,6 +488,105 @@ fn run_tui(
     )?;
     terminal.show_cursor()?;
     result
+}
+
+/// F5 bas-tut tuşu. F2 seçildi çünkü hiçbir düzenleme kısayoluyla çakışmıyor ve tek başına
+/// basılabiliyor (Ctrl+Space gibi bileşimler bazı terminallerde bırakma olayı üretmiyor).
+/// Bir metni kullanıcının hız/sessizlik tercihleriyle seslendirip oynatır.
+///
+/// Ortak fonksiyon, çünkü iki çağıran var: açık `/speak` komutu ve yanıt bittiğinde otomatik
+/// oynatma. İkisinin ayrı ayrı yazılması, sessiz modun bir yolda unutulması demek olurdu.
+fn speak_text(app: &mut App, text: &str) {
+    if app.speech.muted {
+        return;
+    }
+    let paths = jarvis_core::VoiceStackPaths::local_default();
+    if !paths.availability().speech {
+        app.push_system("Seslendirme kurulu değil (Piper bulunamadı).");
+        return;
+    }
+    let wav = paths.scratch_dir.join("speak.wav");
+    match jarvis_core::synthesize_speech_with(&paths, text, &wav, &app.speech) {
+        Ok(()) => {
+            let played = Command::new("pw-play")
+                .arg(&wav)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            // Sentez dosyası da kalıcı değil: oynatıldıktan sonra siliniyor (F5 gizlilik).
+            let _ = std::fs::remove_file(&wav);
+            if !played {
+                app.push_system("Ses üretildi ama oynatılamadı (pw-play).");
+            }
+        }
+        Err(error) => app.push_system(format!("Seslendirme başarısız: {error}")),
+    }
+}
+
+fn is_hold_to_talk_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::F(2) && key.modifiers.is_empty()
+}
+
+/// Kaydı başlatır ve kullanıcıya durumu bildirir. Hem `/voice` hem bas-tut yolu bunu kullanıyor
+/// ki "kayıt başlarken ne olur" tek bir yerde tanımlı olsun.
+fn start_voice_recording(app: &mut App) {
+    let paths = jarvis_core::VoiceStackPaths::local_default();
+    let availability = paths.availability();
+    if !availability.voice_input_ready() {
+        app.push_system(format!(
+            "Sesli giriş kullanılamıyor. {}",
+            availability
+                .missing_summary()
+                .unwrap_or_else(|| "Bilinmeyen eksik".into())
+        ));
+        return;
+    }
+    match jarvis_core::VoiceRecording::start(&paths, &format!("tui-{}", jarvis_core::now_epoch())) {
+        Ok(recording) => {
+            app.voice_recording = Some(recording);
+            app.status = "🎙 KAYIT — konuş".into();
+            app.push_system(
+                "🎙 Kayıt başladı. Ham ses saklanmıyor; iptal için /voice-cancel.".to_string(),
+            );
+        }
+        Err(error) => app.push_system(format!("Kayıt başlatılamadı: {error}")),
+    }
+}
+
+/// Kaydı durdurur, çevirir ve transkripti taslağa yazar. Transkript doğrudan gönderilmiyor —
+/// kullanıcı görüp düzeltebilsin diye (F5 "transkript editörü": taslak zaten tam düzenlenebilir).
+fn finish_voice_recording(app: &mut App) {
+    let Some(recording) = app.voice_recording.take() else {
+        return;
+    };
+    match recording.stop() {
+        Ok(wav) => {
+            app.status = "Çeviriliyor…".into();
+            let paths = jarvis_core::VoiceStackPaths::local_default();
+            match jarvis_core::transcribe_recording(
+                &paths,
+                &wav,
+                jarvis_core::RecordingRetention::DiscardImmediately,
+                "tui",
+            ) {
+                Ok(transcript) if transcript.text.trim().is_empty() => {
+                    app.push_system(jarvis_core::TranscriptRejection::Empty.user_message());
+                }
+                Ok(transcript) => {
+                    app.input = transcript.text.clone();
+                    app.input_cursor = app.input.chars().count();
+                    app.push_system(format!(
+                        "Çevrildi: \"{}\" — gözden geçir, düzelt, göndermek için Enter. {}",
+                        transcript.text,
+                        transcript.retention.user_visible_summary()
+                    ));
+                }
+                Err(error) => app.push_system(format!("Çeviri başarısız: {error}")),
+            }
+            app.status = "Hazır".into();
+        }
+        Err(error) => app.push_system(format!("Kayıt durdurulamadı: {error}")),
+    }
 }
 
 fn event_loop(
@@ -487,6 +609,17 @@ fn event_loop(
             app.last_citations = reply.citations;
             app.status = reply.status;
             app.pending = false;
+            // F5 "TTS playback: yanıt bitince opt-in oynatma". Varsayılan kapalı; `speak_text`
+            // sessiz modu da ayrıca denetliyor, böylece hiçbir yol onu atlayamıyor.
+            if app.speech.should_speak_reply() {
+                if let Some(spoken) = app
+                    .messages
+                    .get(reply.message_index)
+                    .map(|m| m.content.clone())
+                {
+                    speak_text(&mut app, &spoken);
+                }
+            }
             // F4 "Gerçek cancellation": her yanıt tek bir arka plan işinin sonucu (app.pending
             // yeni bir gönderiyi zaten engelliyor) — aktif bir CancelFlag varsa bu iş bitmiş
             // demektir, artık iptal edilecek bir şey kalmadı.
@@ -548,6 +681,25 @@ fn event_loop(
             Event::Key(key) => key,
             _ => continue,
         };
+        // F5 gerçek bas-TUT: F2 basılıyken kayıt, bırakınca çeviri. Tuş bırakma olayları yalnız
+        // terminal destekliyorsa geliyor (`hold_to_talk_supported`); gelmediğinde bu blok hiç
+        // tetiklenmez ve `/voice` aç/kapa yolu tek seçenek olarak kalır.
+        if app.hold_to_talk_supported && is_hold_to_talk_key(key) {
+            match key.kind {
+                KeyEventKind::Press => {
+                    if app.voice_recording.is_none() {
+                        start_voice_recording(&mut app);
+                    }
+                }
+                KeyEventKind::Release => {
+                    if app.voice_recording.is_some() {
+                        finish_voice_recording(&mut app);
+                    }
+                }
+                KeyEventKind::Repeat => {}
+            }
+            continue;
+        }
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -1215,6 +1367,46 @@ fn submit(
         .filter(|task_id| !task_id.is_empty())
     {
         cancel_task(app, runtime, task_id);
+        return;
+    }
+    if let Some(rest) = input.strip_prefix("/voice-settings ").map(str::trim) {
+        let (word, value) = rest.split_once(' ').unwrap_or((rest, ""));
+        match word {
+            "autoplay" => match value.trim() {
+                "on" => {
+                    app.speech.auto_play = true;
+                    app.push_system(
+                        "Otomatik seslendirme açıldı — her yanıt bittiğinde sesli okunacak.",
+                    );
+                }
+                "off" => {
+                    app.speech.auto_play = false;
+                    app.push_system("Otomatik seslendirme kapatıldı.");
+                }
+                _ => app.push_system("Kullanım: /voice-settings autoplay on|off"),
+            },
+            "speed" => match value.trim().parse::<f32>() {
+                Ok(speed) => match app.speech.set_speed(speed) {
+                    Ok(()) => {
+                        app.push_system(format!("Konuşma hızı {speed:.2}x olarak ayarlandı."))
+                    }
+                    Err(error) => app.push_system(format!("Hız ayarlanamadı: {error}")),
+                },
+                Err(_) => app.push_system("Kullanım: /voice-settings speed <0.5-2.0>"),
+            },
+            "mute" => {
+                app.speech.muted = true;
+                app.push_system("Sessiz mod açıldı — otomatik oynatma dahil hiç ses çıkmayacak.");
+            }
+            "unmute" => {
+                app.speech.muted = false;
+                app.push_system(format!("Sessiz mod kapatıldı. {}", app.speech.summary()));
+            }
+            _ => app.push_system(
+                "Kullanım: /voice-settings autoplay on|off • speed <0.5-2.0> • mute • unmute"
+                    .to_string(),
+            ),
+        }
         return;
     }
     if let Some(rest) = input.strip_prefix("/feedback ").map(str::trim) {
@@ -2543,7 +2735,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /model-runs (kayıtlı model/prompt konfigürasyonları ve ölçüm sonuçları), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>. F5 (ses): /voice (kaydı başlat; bitirmek için tekrar /voice — çevrilen metin taslağa yazılır, gönderilmeden önce düzeltebilirsin), /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son JARVIS yanıtını seslendir). Ham ses saklanmaz; sesli onay yüksek riskli eylemler için yeterli değildir, ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /model-runs (kayıtlı model/prompt konfigürasyonları ve ölçüm sonuçları), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** (bırakınca çevrilir); desteklemiyorsa /voice ile başlat-bitir. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Çevrilen metin doğrudan gönderilmez, taslağa yazılır — gönderilmeden önce görüp düzeltirsin. Ham ses hiçbir zaman saklanmaz. Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2581,66 +2773,15 @@ fn submit(
             return;
         }
         "/voice" => {
-            // Aç/kapa: terminal tuş-bırakma olayını güvenilir bildirmediği için gerçek
-            // "bas-tut" mümkün değil (ADR-0007 bilinen sınırlar).
-            if let Some(recording) = app.voice_recording.take() {
-                match recording.stop() {
-                    Ok(wav) => {
-                        app.status = "Çeviriliyor…".into();
-                        let paths = jarvis_core::VoiceStackPaths::local_default();
-                        match jarvis_core::transcribe_recording(
-                            &paths,
-                            &wav,
-                            jarvis_core::RecordingRetention::DiscardImmediately,
-                            "tui",
-                        ) {
-                            Ok(transcript) if transcript.text.trim().is_empty() => {
-                                app.push_system(
-                                    jarvis_core::TranscriptRejection::Empty.user_message(),
-                                );
-                            }
-                            Ok(transcript) => {
-                                // Transkript doğrudan gönderilmiyor: taslağa yazılıyor, böylece
-                                // kullanıcı görüp düzeltebiliyor. Taslak zaten tam düzenlenebilir
-                                // olduğu için ayrı bir "transkript editörü" gerekmiyor.
-                                app.input = transcript.text.clone();
-                                app.input_cursor = app.input.chars().count();
-                                app.push_system(format!(
-                                    "Çevrildi: \"{}\" — gözden geçir, düzelt, göndermek için Enter. {}",
-                                    transcript.text,
-                                    transcript.retention.user_visible_summary()
-                                ));
-                            }
-                            Err(error) => app.push_system(format!("Çeviri başarısız: {error}")),
-                        }
-                        app.status = "Hazır".into();
-                    }
-                    Err(error) => app.push_system(format!("Kayıt durdurulamadı: {error}")),
-                }
-                return;
-            }
-            let paths = jarvis_core::VoiceStackPaths::local_default();
-            let availability = paths.availability();
-            if !availability.voice_input_ready() {
-                app.push_system(format!(
-                    "Sesli giriş kullanılamıyor. {}",
-                    availability
-                        .missing_summary()
-                        .unwrap_or_else(|| "Bilinmeyen eksik".into())
-                ));
-                return;
-            }
-            match jarvis_core::VoiceRecording::start(
-                &paths,
-                &format!("tui-{}", jarvis_core::now_epoch()),
-            ) {
-                Ok(recording) => {
-                    app.voice_recording = Some(recording);
+            if app.voice_recording.is_some() {
+                finish_voice_recording(app);
+            } else {
+                start_voice_recording(app);
+                if app.voice_recording.is_some() && app.hold_to_talk_supported {
                     app.push_system(
-                        "🎙 Kayıt başladı — bitirmek için tekrar /voice, iptal için /voice-cancel. Ham ses saklanmıyor.".to_string(),
+                        "İpucu: bu terminal gerçek bas-tut destekliyor — F2'yi basılı tutup konuşabilirsin.".to_string(),
                     );
                 }
-                Err(error) => app.push_system(format!("Kayıt başlatılamadı: {error}")),
             }
             return;
         }
@@ -2655,6 +2796,10 @@ fn submit(
             return;
         }
         "/speak" => {
+            if app.speech.muted {
+                app.push_system("Sessiz mod açık — `/voice-settings unmute` ile kapatabilirsin.");
+                return;
+            }
             let Some(last) = app
                 .messages
                 .iter()
@@ -2664,29 +2809,39 @@ fn submit(
                 app.push_system("Seslendirilecek bir JARVIS yanıtı yok.");
                 return;
             };
-            let paths = jarvis_core::VoiceStackPaths::local_default();
-            if !paths.availability().speech {
-                app.push_system("Seslendirme kurulu değil (Piper bulunamadı).");
-                return;
-            }
-            let wav = paths.scratch_dir.join("speak.wav");
-            match jarvis_core::synthesize_speech(&paths, &last.content, &wav) {
-                Ok(()) => {
-                    let played = Command::new("pw-play")
-                        .arg(&wav)
-                        .status()
-                        .map(|status| status.success())
-                        .unwrap_or(false);
-                    // Ham sentez dosyası da kalıcı değil: oynatıldıktan sonra siliniyor.
-                    let _ = std::fs::remove_file(&wav);
-                    if played {
-                        app.push_system("Yanıt seslendirildi.");
-                    } else {
-                        app.push_system("Ses üretildi ama oynatılamadı (pw-play).");
-                    }
+            let text = last.content.clone();
+            speak_text(app, &text);
+            return;
+        }
+        "/speak stop" => {
+            // pw-play alt süreç olarak çalışıyor; durdurmak onu sonlandırmak demek.
+            let stopped = Command::new("pkill")
+                .args(["-f", "pw-play"])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            app.push_system(if stopped {
+                "Seslendirme durduruldu."
+            } else {
+                "Çalan bir seslendirme yok."
+            });
+            return;
+        }
+        "/voice-settings" => {
+            let mut lines = vec![app.speech.summary()];
+            lines.push(format!(
+                "Bas-tut: {}",
+                if app.hold_to_talk_supported {
+                    "destekleniyor (F2'yi basılı tut)"
+                } else {
+                    "bu terminal desteklemiyor — /voice ile aç/kapa kullan"
                 }
-                Err(error) => app.push_system(format!("Seslendirme başarısız: {error}")),
-            }
+            ));
+            lines.push(
+                "Değiştir: /voice-settings autoplay on|off • /voice-settings speed <0.5-2.0> • /voice-settings mute|unmute"
+                    .to_string(),
+            );
+            app.push_system(lines.join("\n"));
             return;
         }
         "/model-runs" => {
@@ -3410,7 +3565,26 @@ fn draw(area: Rect, frame: &mut ratatui::Frame, app: &App) {
         .wrap(Wrap { trim: false })
         .scroll((input_scroll, 0));
     frame.render_widget(input, layout[2]);
-    let footer = Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray));
+    // F5 "ses seviyesi/VAD göstergesi": kayıt sürerken durum çubuğu canlı seviye gösterir.
+    // Metin karşılığı (`level_description`) da yazılıyor — çubuk görsel, açıklama okunabilir
+    // (erişilebilirlik: her görsel bilginin metin eşdeğeri olmalı).
+    let footer_text = match app.voice_recording.as_ref() {
+        Some(recording) => {
+            let level = jarvis_core::recent_audio_level(recording.path());
+            format!(
+                "🎙 KAYIT {} {} • bırak/durdur: {}",
+                jarvis_core::level_meter(level, 12),
+                jarvis_core::level_description(level),
+                if app.hold_to_talk_supported {
+                    "F2'yi bırak"
+                } else {
+                    "/voice"
+                }
+            )
+        }
+        None => app.status.clone(),
+    };
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, layout[3]);
     // Editing stays live while `pending` too (F4-adjacent TUI fix, 2026-08-16) — the draft cursor
     // is always real now, not just while idle.

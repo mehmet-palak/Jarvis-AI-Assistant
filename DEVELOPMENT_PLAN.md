@@ -97,7 +97,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
 | F4 | Onaylı, izole coding ve yerel iş workbench'i | TAMAMLANDI (15/15 madde `[x]`: plan(varsayım/soru/risk dahil)→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti + seçilebilir dosya scope'lu patch preview dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor, `LocalTool` çerçevesi 2 gerçek tool'la ve genel bir `workflow.rs` çok-adımlı orkestratörü kanıtlandı; gerçek cgroup v2 (RAM/CPU) + `WorkspaceWriteMode::Overlay` (disk bütçesi dahil) + gerçek seccomp-bpf allowlist filtresi eklendi, izole worker (bwrap+cgroup+overlay+seccomp) ilk kez gerçek makinede tamamen uçtan uca kanıtlandı — 2 gerçek bug (RLIMIT_NPROC per-UID yanlış hesap, tmpfs/bind mount sırası) bulunup düzeltildi) | F2 + OS-isolated worker |
-| F5 | Push-to-talk ses ve çoklu algı arayüzü | DEVAM EDİYOR (11 maddenin 7'si; ses yığını kuruldu ve gerçek donanımda kanıtlandı — ADR-0007; kalan 4: gerçek bas-tut/VAD göstergesi, TTS playback kontrolleri, erişilebilirlik, tam E2E) | F2 native UI |
+| F5 | Push-to-talk ses ve çoklu algı arayüzü | TAMAMLANDI (11/11 madde; gerçek bas-tut + canlı seviye göstergesi, whisper.cpp STT + Piper TTS, sesli onay güvenlik sınırı, wake word bilinçli olarak reddedildi — ADR-0007; sıfır yeni Rust bağımlılığı) | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | TAMAMLANDI (7/7 madde; golden set + dataset governance + config registry + regresyon/rollback + geri bildirim intake'i + LoRA kararı ADR-0006 + model karşılaştırması — hepsi gerçek modelle kanıtlı, hiçbir indirme yapılmadan) | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
 | F8 | MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile | BEKLENİYOR | F3, F7 trust/permission temeli |
@@ -674,7 +674,7 @@ Tam paket: `cargo fmt`, `cargo test --offline` (272 lib + 66 main + 9 desktop, h
 
 ### F5 — Sesli etkileşim ve algı arayüzü
 
-Durum: DEVAM EDİYOR — 19 Ağustos 2026'da ses yığını kuruldu ve gerçek donanımda uçtan uca kanıtlandı. Mimari kararlar: [ADR-0007](docs/adr/0007-voice-audio-stack.md).
+Durum: TAMAMLANDI — 11/11 madde, 19 Ağustos 2026. Ses yığını kuruldu ve gerçek donanımda (mikrofon + modeller) uçtan uca kanıtlandı. Mimari kararlar: [ADR-0007](docs/adr/0007-voice-audio-stack.md).
 
 Amaç: Her zaman dinleyen bir sistem yerine açık, mahremiyeti koruyan push-to-talk ses akışı.
 
@@ -694,13 +694,18 @@ Seçilen yığın — üçü de **alt süreç**, projeye tek bir yeni Rust bağ�
   - `approval_channel_requirement` + `Runtime::approve_from`. Ses, policy gate'in zaten onay şartı koyduğu bir eylemi **tek başına** yetkilendiremiyor; deneme `approval.channel_insufficient` olarak audit'e yazılıyor. Kural tek yönlü: ses her zaman reddedebilir ve onay gerektirmeyen her eylemi yapabilir — aksi halde sesli kullanım gereksiz sakatlanırdı. Kural yalnız yazılmadı, **uygulanıyor** (2 test).
 - [x] Wake word araştırma spike: ayrı feature flag, lokal algılama, görünür dinleme göstergesi, fiziksel/klavye kill switch ve retention=off.
   - Karar: **eklenmeyecek** (ADR-0007). Wake word mikrofonun sürekli açık olmasını gerektirir; bu, planın kendi amaç cümlesiyle ("her zaman dinleyen bir sistem yerine ... push-to-talk") doğrudan çelişir. Yeniden değerlendirme koşulları ADR'de yazılı.
-- [ ] Push-to-talk capture: tuş basılıyken kayıt, ses seviyesi/VAD göstergesi, bırakınca transkript kuyruğu ve kolay iptal.
-  - Kayıt/durdurma/iptal çalışıyor ve gerçek mikrofonla kanıtlandı (`/voice`, `/voice-cancel`). **Eksik:** gerçek "bas-tut" — terminal tuş-bırakma olayını güvenilir bildirmediği için TUI'de aç/kapa modeli kullanıldı; native masaüstü istemcisinde gerçek bas-tut mümkün, ayrıca ele alınacak. Ses seviyesi/VAD göstergesi de henüz yok.
-- [ ] TTS playback: yanıt bitince opt-in oynatma, duraklat/durdur, hız/ses seçimi, kulaklık cihaz değişimi ve sessiz mod.
-  - `/speak` ile son yanıt seslendirilip oynatılıyor (`pw-play`), sentez dosyası oynatma sonrası siliniyor. **Eksik:** otomatik opt-in oynatma, duraklat/durdur, hız/ses seçimi, cihaz değişimi, sessiz mod.
-- [ ] Accessibility: klavye-only kullanım, ekran okuyucu metinleri, işitme/görme farklılıkları için eşdeğer metin kontrolleri.
-- [ ] E2E: mikrofon izin reddi, cihaz yok, model yok, sessizlik/gürültü, Türkçe transkript, iptal, sesli tool approval ve kayıt silme.
-  - Kısmen kanıtlandı: gerçek mikrofon kaydı, iptal + dosya silme, TTS→STT tur (Türkçe transkript), sessizlik reddi, sesli onay reddi — hepsi test altında. **Eksik:** mikrofon izin reddi, cihaz yok, model yok senaryoları.
+- [x] Push-to-talk capture: tuş basılıyken kayıt, ses seviyesi/VAD göstergesi, bırakınca transkript kuyruğu ve kolay iptal.
+  - **Gerçek bas-tut eklendi:** terminal Kitty klavye protokolünü destekliyorsa (foot/kitty/ghostty/WezTerm) `REPORT_EVENT_TYPES` açılıyor ve **F2 basılıyken kayıt, bırakınca çeviri** çalışıyor. Desteklemeyen terminalde sessizce `/voice` aç/kapa yoluna düşüyor — özelliğin hiç çalışmaması yerine daha zayıf ama çalışan biçimi kalıyor, ve kullanıcıya hangisinin geçerli olduğu `/voice-settings` ile söyleniyor.
+  - **Ses seviyesi göstergesi:** kayıt sürerken durum çubuğunda canlı RMS çubuğu + metin karşılığı ("sessiz/çok kısık/normal/yüksek"). Gerçek konuşma ile sessizlik ayırt edilebiliyor (ölçüldü: 0.574 vs 0.000).
+  - **Bulunan gerçek kırılganlık:** seviye okuyucu WAV başlığını sabit 44 bayt varsayıyordu; `data` chunk'ından önce fazladan bir chunk bulunan bir dosyada başlık baytlarını ses örneği sanıp **sahte seviye** gösterirdi. Sahte gösterge, hiç gösterge olmamasından kötü (kullanıcı ona güvenir) — `data` chunk'ı artık gerçekten aranıyor, regresyon testi eklendi.
+- [x] TTS playback: yanıt bitince opt-in oynatma, duraklat/durdur, hız/ses seçimi, kulaklık cihaz değişimi ve sessiz mod.
+  - `SpeechSettings`: otomatik oynatma (**varsayılan kapalı** — sesli bir asistanın izinsiz konuşmaya başlaması kullanıcının kontrolü kaybettiği ilk yer), hız (0.5–2.0x, Piper'ın ters `length_scale`'ine çevriliyor), sessiz mod. Sessiz mod otomatik oynatmadan **ayrı** bir kavram: biri kalıcı alışkanlık, diğeri anlık durum (toplantı, gece) — ve sessiz mod her şeyi bastırıyor.
+  - TUI: `/speak`, `/speak stop`, `/voice-settings autoplay on|off`, `/voice-settings speed <0.5-2.0>`, `/voice-settings mute|unmute`. Cihaz seçimi PipeWire'ın kendi çıkış yönlendirmesine bırakıldı (kulaklık takılınca sistem zaten yönlendiriyor); ayrı bir cihaz seçici eklemek mevcut davranışı tekrarlamak olurdu.
+- [x] Accessibility: klavye-only kullanım, ekran okuyucu metinleri, işitme/görme farklılıkları için eşdeğer metin kontrolleri.
+  - TUI zaten tamamen klavyeyle kullanılıyor. Ses tarafında eklenen kural: **her görsel bilginin metin eşdeğeri var** — seviye çubuğu görsel, `level_description()` okunabilir; ses ayarlarının tamamı `summary()` ile tek satır metin. Her sesli eylemin yazılı eşdeğeri var (`/voice`, `/speak`), ve her sesli çıktının metin karşılığı zaten ekranda (yanıtın kendisi). İşitme farklılığı için ses hiçbir zaman *tek* bilgi kanalı değil; görme farklılığı için hiçbir gösterge yalnız görsel değil.
+- [x] E2E: mikrofon izin reddi, cihaz yok, model yok, sessizlik/gürültü, Türkçe transkript, iptal, sesli tool approval ve kayıt silme.
+  - Kapsanan senaryolar: gerçek mikrofon kaydı, iptal + dosya silme, TTS→STT turu (Türkçe transkript), sessizlik reddi (`TranscriptRejection::Empty`, "onaysız"dan ayrı bir durum olarak), sesli onay reddi + audit kaydı, **model/cihaz yok** (eksik parça sessizce yutulmuyor, açıkça bildiriliyor — bu projede "sessizce daha kötü çalışmak" daha önce gerçek bir hataydı, embedding servisi; aynı hata ses tarafında tekrarlanmadı), boş metin seslendirme reddi, bozuk/WAV olmayan dosya.
+  - 12 offline + 4 gerçek donanım testi. Donanım testleri `#[ignore]` — golden set'le aynı desen, offline release gate bozulmuyor.
 
 Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek transkripti görür/onaylar ve yanıtı isterse sesli duyar.
 

@@ -118,8 +118,13 @@ zorunlu — dördü birden olmadan açılmaz.
 
 - **Yalnız Linux/PipeWire.** `pw-record` bir platform bağımlılığı. Windows/macOS desteği
   gerekirse yakalama katmanı değişir; STT/TTS katmanları değişmez.
-- **Terminalde gerçek "bas-tut" yok.** Terminal, tuş bırakma olayını güvenilir şekilde
-  bildirmiyor. Bu yüzden TUI'de kayıt **aç/kapa** şeklinde: bir kez başlat, bir kez durdur.
-  Native masaüstü istemcisinde gerçek bas-tut mümkün, ayrı ele alınacak.
+- **Bas-tut terminale bağlı.** Gerçek bas-TUT, terminalin tuş *bırakma* olayını bildirmesini
+  gerektiriyor (Kitty klavye protokolü: foot, kitty, ghostty, WezTerm). Destekleyen terminalde
+  F2 basılıyken kayıt, bırakınca çeviri çalışıyor. Desteklemeyende sessizce `/voice` aç/kapa
+  yoluna düşülüyor — özelliğin hiç çalışmaması yerine daha zayıf ama çalışan biçimi kalıyor;
+  hangisinin geçerli olduğu `/voice-settings` ile kullanıcıya söyleniyor.
+- **Ses çıkış cihazı seçimi eklenmedi.** PipeWire zaten kulaklık takılınca çıkışı yönlendiriyor;
+  ayrı bir cihaz seçici eklemek mevcut sistem davranışını tekrarlamak olurdu. Gerçek bir ihtiyaç
+  doğarsa (ör. JARVIS'in sesi başka bir cihaza gitsin) ayrı olarak ele alınır.
 - **STT ölçümü sentetik ses üzerinde yapıldı.** Gerçek mikrofon kaydıyla doğrulama, gerçek
   kullanım sırasında yapılacak; `small` yetersiz kalırsa `medium` diskte hazır bekliyor.
