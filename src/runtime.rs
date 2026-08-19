@@ -1463,6 +1463,41 @@ impl Runtime {
 
     /// Approves and resumes exactly one waiting task. Approval never grants a broader scope.
     pub fn approve(&mut self, task_id: &str) -> Option<(Task, ToolResult, VerifierResult)> {
+        // A typed approval is the strongest channel available, so the origin gate below is a
+        // no-op for it. Voice callers must use `approve_from` and accept its refusal.
+        self.approve_from(task_id, InputType::Cli)
+    }
+
+    /// F5 "Sesli approval UX". Same approval path, but aware of *how* the confirmation arrived.
+    ///
+    /// This exists because an unenforced rule is only documentation: `approval_channel_requirement`
+    /// states that speech alone may not authorize an action the policy gate already gated, and
+    /// this is the single place that refuses to proceed when it does not. A refusal is audited —
+    /// an attempt to approve a restricted action by voice is exactly the event a later review
+    /// would want to see, whether it came from the user, someone else in the room, or a replayed
+    /// recording.
+    pub fn approve_from(
+        &mut self,
+        task_id: &str,
+        origin: InputType,
+    ) -> Option<(Task, ToolResult, VerifierResult)> {
+        {
+            let task = self.tasks.get(task_id)?;
+            let input = self.pending_inputs.get(task_id)?;
+            if approval_channel_requirement(&task.capability, input, origin)
+                == ApprovalChannelRequirement::WrittenConfirmationRequired
+            {
+                self.record_audit(AuditEvent::pending(
+                    task_id,
+                    "approval.channel_insufficient",
+                ));
+                return None;
+            }
+        }
+        self.approve_checked(task_id)
+    }
+
+    fn approve_checked(&mut self, task_id: &str) -> Option<(Task, ToolResult, VerifierResult)> {
         let task = self.tasks.get(task_id)?.clone();
         if task.state != TaskState::WaitingForUser {
             return None;

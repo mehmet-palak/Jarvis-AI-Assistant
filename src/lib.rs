@@ -20,6 +20,7 @@ pub mod project_analyst;
 mod runtime;
 mod seccomp_filter;
 pub mod vision;
+pub mod voice;
 pub mod weather;
 pub mod workbench;
 pub mod workflow;
@@ -57,9 +58,10 @@ pub use model::{
 pub use patch_generator::draft_patch_with_provider;
 pub use persistence::SqliteStore;
 pub use policy::{
-    authorize_pentest_target, classify, feedback_candidate_is_promotable, policy_for,
-    validate_feedback_candidate, validate_model_config_run, validate_pentest_scope,
-    validate_request, validate_teacher_example,
+    approval_channel_requirement, authorize_pentest_target, classify,
+    feedback_candidate_is_promotable, policy_for, validate_feedback_candidate,
+    validate_model_config_run, validate_pentest_scope, validate_request, validate_teacher_example,
+    voice_approval_is_sufficient, ApprovalChannelRequirement,
 };
 pub use profile::{
     profile_manifest, propose_profile_field, validate_profile_value, ProfileField, ProfileSnapshot,
@@ -71,6 +73,10 @@ pub use profile_files::{
 pub use project_analyst::{analyze_repository, draft_coding_plan_with_provider, RepoOverview};
 pub use runtime::{RegressionCheckedPatch, Runtime};
 pub use vision::{LlamaVisionServerProvider, VisionAnalysis, VisionProvider};
+pub use voice::{
+    synthesize_speech, transcribe_recording, transcript_into_request, RecordingRetention,
+    TranscriptRejection, VoiceRecording, VoiceStackAvailability, VoiceStackPaths, VoiceTranscript,
+};
 pub use weather::{OpenMeteoWeatherProvider, WeatherProvider, WeatherSnapshot};
 pub use workbench::{
     apply_approved_patch, approve_patch, create_patch_proposal, create_read_only_coding_plan,

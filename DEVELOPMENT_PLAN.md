@@ -97,7 +97,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
 | F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
 | F4 | Onaylı, izole coding ve yerel iş workbench'i | TAMAMLANDI (15/15 madde `[x]`: plan(varsayım/soru/risk dahil)→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti + seçilebilir dosya scope'lu patch preview dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor, `LocalTool` çerçevesi 2 gerçek tool'la ve genel bir `workflow.rs` çok-adımlı orkestratörü kanıtlandı; gerçek cgroup v2 (RAM/CPU) + `WorkspaceWriteMode::Overlay` (disk bütçesi dahil) + gerçek seccomp-bpf allowlist filtresi eklendi, izole worker (bwrap+cgroup+overlay+seccomp) ilk kez gerçek makinede tamamen uçtan uca kanıtlandı — 2 gerçek bug (RLIMIT_NPROC per-UID yanlış hesap, tmpfs/bind mount sırası) bulunup düzeltildi) | F2 + OS-isolated worker |
-| F5 | Push-to-talk ses ve çoklu algı arayüzü | BEKLENİYOR | F2 native UI |
+| F5 | Push-to-talk ses ve çoklu algı arayüzü | DEVAM EDİYOR (11 maddenin 7'si; ses yığını kuruldu ve gerçek donanımda kanıtlandı — ADR-0007; kalan 4: gerçek bas-tut/VAD göstergesi, TTS playback kontrolleri, erişilebilirlik, tam E2E) | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | TAMAMLANDI (7/7 madde; golden set + dataset governance + config registry + regresyon/rollback + geri bildirim intake'i + LoRA kararı ADR-0006 + model karşılaştırması — hepsi gerçek modelle kanıtlı, hiçbir indirme yapılmadan) | F3/F4 gerçek eval verisi |
 | F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
 | F8 | MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile | BEKLENİYOR | F3, F7 trust/permission temeli |
@@ -674,21 +674,33 @@ Tam paket: `cargo fmt`, `cargo test --offline` (272 lib + 66 main + 9 desktop, h
 
 ### F5 — Sesli etkileşim ve algı arayüzü
 
-Durum: BEKLENİYOR
+Durum: DEVAM EDİYOR — 19 Ağustos 2026'da ses yığını kuruldu ve gerçek donanımda uçtan uca kanıtlandı. Mimari kararlar: [ADR-0007](docs/adr/0007-voice-audio-stack.md).
 
 Amaç: Her zaman dinleyen bir sistem yerine açık, mahremiyeti koruyan push-to-talk ses akışı.
 
-- [ ] Audio ADR: PipeWire/Wayland cihaz erişimi, mikrofon izinleri, örnekleme formatı, gecikme hedefi ve recording retention varsayılanı.
-- [ ] STT aday değerlendirmesi: Türkçe doğruluk, CPU/RAM, model boyutu, lisans, offline destek ve warm-start süreleri. **İndirme kullanıcı onayıyla.**
+Seçilen yığın — üçü de **alt süreç**, projeye tek bir yeni Rust bağımlılığı bile eklenmedi (`llama-server`'ın zaten kullandığı desen): yakalama `pw-record` (PipeWire, sistemde vardı), STT whisper.cpp + `ggml-small-q5_1` (182 MB, MIT), TTS Piper + `tr_TR-dfki-medium` (30+61 MB, MIT).
+
+- [x] Audio ADR: PipeWire/Wayland cihaz erişimi, mikrofon izinleri, örnekleme formatı, gecikme hedefi ve recording retention varsayılanı.
+  - [ADR-0007](docs/adr/0007-voice-audio-stack.md). Kayıt formatı 16 kHz/mono/s16 — whisper'ın istediği format, ara dönüştürme yok. Yeni bir ses kütüphanesi (`cpal`) yerine alt süreç seçildi: mevcut desen, platform/derleme karmaşıklığı yok, iptal tek bir sinyal.
+- [x] STT aday değerlendirmesi: Türkçe doğruluk, CPU/RAM, model boyutu, lisans, offline destek ve warm-start süreleri.
+  - **Ölçüm ilk seçimi çürüttü.** `large-v3-turbo-q5_0` akıl yürütmeyle seçilmişti; üç model gerçek Türkçe cümlelerle ölçüldü: `small-q5_1` 7.2 s, `medium-q5_0` 22.8 s, `large-v3-turbo-q5_0` 36.2 s. Üçü de **aynı** hatayı yaptı — büyük model ek doğruluk vermiyor, `large-v3-turbo` `medium`'a göre %60 daha yavaş (CPU'da turbo'nun encoder'ı tam boy kalıyor). Seçim: `small-q5_1`, cümle başına ~2.4 s. Reddedilenler diskte bırakıldı: ölçüm sentetik ses üzerindeydi, gerçek mikrofonda `small` bozulursa geçiş hazır.
+- [x] Transkript editörü: gönderim öncesi metni görme, düzeltme, silme, yeniden deneme ve normal `InputType::Voice` pipeline'ına dönüştürme.
+  - Ayrı bir editör yazılmadı: transkript doğrudan **taslağa** yazılıyor, taslak zaten tam düzenlenebilir (Ctrl+A/E/K/U, imleç, çok satır). `VoiceTranscript` onaylanmadan `Request` üretemiyor — onaysız bir transkriptten istek üretebilecek kod yolu yok.
+- [x] Voice privacy: ham ses varsayılan olarak kalıcı değil; kullanıcı isterse geçici dosyanın yeri/silme zamanı görünür.
+  - `RecordingRetention` varsayılanı `DiscardImmediately` — bir ayar tercihi değil, **tipin kendi varsayılanı**: ayar dosyası unutulsa/bozulsa bile gizlilik korunur. Saklama seçilirse konum ve silinme zamanı tipin içinde (`KeepUntil { path, delete_after_epoch }`) ve kullanıcıya gösteriliyor. İptal edilen kayıt da siliniyor (gerçek mikrofonla test edildi).
+- [x] TTS aday değerlendirmesi: Türkçe ses kalitesi, lisans, CPU kullanımı, ses modeli boyutu ve offline çalışma.
+  - Piper `tr_TR-dfki-medium` — Türkçe için pratikte tek yerel seçenek. Ölçüldü: 3.58 s ses **0.11 s'de** üretildi (gerçek zamanın ~33 katı), yani TTS gecikme açısından hiç sorun değil. Eski `rhasspy/piper` (MIT, bağımsız ikili) seçildi, yeni `piper1-gpl` (Python wheel) değil.
+- [x] Sesli approval UX: yüksek riskli aksiyon için yalnız ses değil, ekranda açık yazılı onay veya güvenli ikinci doğrulama.
+  - `approval_channel_requirement` + `Runtime::approve_from`. Ses, policy gate'in zaten onay şartı koyduğu bir eylemi **tek başına** yetkilendiremiyor; deneme `approval.channel_insufficient` olarak audit'e yazılıyor. Kural tek yönlü: ses her zaman reddedebilir ve onay gerektirmeyen her eylemi yapabilir — aksi halde sesli kullanım gereksiz sakatlanırdı. Kural yalnız yazılmadı, **uygulanıyor** (2 test).
+- [x] Wake word araştırma spike: ayrı feature flag, lokal algılama, görünür dinleme göstergesi, fiziksel/klavye kill switch ve retention=off.
+  - Karar: **eklenmeyecek** (ADR-0007). Wake word mikrofonun sürekli açık olmasını gerektirir; bu, planın kendi amaç cümlesiyle ("her zaman dinleyen bir sistem yerine ... push-to-talk") doğrudan çelişir. Yeniden değerlendirme koşulları ADR'de yazılı.
 - [ ] Push-to-talk capture: tuş basılıyken kayıt, ses seviyesi/VAD göstergesi, bırakınca transkript kuyruğu ve kolay iptal.
-- [ ] Transkript editörü: gönderim öncesi metni görme, düzeltme, silme, yeniden deneme ve normal `InputType::Voice` pipeline'ına dönüştürme.
-- [ ] Voice privacy: ham ses varsayılan olarak kalıcı değil; kullanıcı isterse geçici dosyanın yeri/silme zamanı görünür.
-- [ ] TTS aday değerlendirmesi: Türkçe ses kalitesi, lisans, CPU kullanımı, ses modeli boyutu ve offline çalışma; indirme onaylı.
+  - Kayıt/durdurma/iptal çalışıyor ve gerçek mikrofonla kanıtlandı (`/voice`, `/voice-cancel`). **Eksik:** gerçek "bas-tut" — terminal tuş-bırakma olayını güvenilir bildirmediği için TUI'de aç/kapa modeli kullanıldı; native masaüstü istemcisinde gerçek bas-tut mümkün, ayrıca ele alınacak. Ses seviyesi/VAD göstergesi de henüz yok.
 - [ ] TTS playback: yanıt bitince opt-in oynatma, duraklat/durdur, hız/ses seçimi, kulaklık cihaz değişimi ve sessiz mod.
-- [ ] Sesli approval UX: yüksek riskli aksiyon için yalnız ses değil, ekranda açık yazılı onay veya güvenli ikinci doğrulama.
-- [ ] Wake word araştırma spike: ayrı feature flag, lokal algılama, görünür dinleme göstergesi, fiziksel/klavye kill switch ve retention=off.
+  - `/speak` ile son yanıt seslendirilip oynatılıyor (`pw-play`), sentez dosyası oynatma sonrası siliniyor. **Eksik:** otomatik opt-in oynatma, duraklat/durdur, hız/ses seçimi, cihaz değişimi, sessiz mod.
 - [ ] Accessibility: klavye-only kullanım, ekran okuyucu metinleri, işitme/görme farklılıkları için eşdeğer metin kontrolleri.
 - [ ] E2E: mikrofon izin reddi, cihaz yok, model yok, sessizlik/gürültü, Türkçe transkript, iptal, sesli tool approval ve kayıt silme.
+  - Kısmen kanıtlandı: gerçek mikrofon kaydı, iptal + dosya silme, TTS→STT tur (Türkçe transkript), sessizlik reddi, sesli onay reddi — hepsi test altında. **Eksik:** mikrofon izin reddi, cihaz yok, model yok senaryoları.
 
 Tamamlanma ölçütü: Kullanıcı bir tuşa basıp konuşur, gönderilecek transkripti görür/onaylar ve yanıtı isterse sesli duyar.
 

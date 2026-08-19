@@ -108,6 +108,9 @@ struct App {
     last_citations: Vec<WorkspaceCitation>,
     /// F4: en son `/plan`'ın ürettiği plan — `/patch`'in üzerinde çalıştığı taban.
     pending_coding_plan: Option<CodingPlan>,
+    /// F5: süren bir sesli kayıt. `Some` iken mikrofon açık ve kullanıcıya gösteriliyor —
+    /// "kayıtta mıyım?" sorusu hiçbir zaman belirsiz kalmamalı (ADR-0007 gizlilik duruşu).
+    voice_recording: Option<jarvis_core::VoiceRecording>,
     /// F4 "Patch preview/review": en son `/patch`'in ürettiği, henüz onaylanmamış teklif.
     pending_patch: Option<(CodingPlan, PatchProposal)>,
     /// F4 "Patch preview/review": kullanıcının `/patch-note` ile eklediği serbest metin —
@@ -144,6 +147,7 @@ impl App {
             pending_memory: None,
             last_citations: vec![],
             pending_coding_plan: None,
+            voice_recording: None,
             pending_patch: None,
             pending_patch_note: None,
             active_cancel: None,
@@ -2539,7 +2543,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /model-runs (kayıtlı model/prompt konfigürasyonları ve ölçüm sonuçları), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /model-runs (kayıtlı model/prompt konfigürasyonları ve ölçüm sonuçları), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>. F5 (ses): /voice (kaydı başlat; bitirmek için tekrar /voice — çevrilen metin taslağa yazılır, gönderilmeden önce düzeltebilirsin), /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son JARVIS yanıtını seslendir). Ham ses saklanmaz; sesli onay yüksek riskli eylemler için yeterli değildir, ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -2574,6 +2578,115 @@ fn submit(
                 model_label(&app.model_state),
                 app.status
             ));
+            return;
+        }
+        "/voice" => {
+            // Aç/kapa: terminal tuş-bırakma olayını güvenilir bildirmediği için gerçek
+            // "bas-tut" mümkün değil (ADR-0007 bilinen sınırlar).
+            if let Some(recording) = app.voice_recording.take() {
+                match recording.stop() {
+                    Ok(wav) => {
+                        app.status = "Çeviriliyor…".into();
+                        let paths = jarvis_core::VoiceStackPaths::local_default();
+                        match jarvis_core::transcribe_recording(
+                            &paths,
+                            &wav,
+                            jarvis_core::RecordingRetention::DiscardImmediately,
+                            "tui",
+                        ) {
+                            Ok(transcript) if transcript.text.trim().is_empty() => {
+                                app.push_system(
+                                    jarvis_core::TranscriptRejection::Empty.user_message(),
+                                );
+                            }
+                            Ok(transcript) => {
+                                // Transkript doğrudan gönderilmiyor: taslağa yazılıyor, böylece
+                                // kullanıcı görüp düzeltebiliyor. Taslak zaten tam düzenlenebilir
+                                // olduğu için ayrı bir "transkript editörü" gerekmiyor.
+                                app.input = transcript.text.clone();
+                                app.input_cursor = app.input.chars().count();
+                                app.push_system(format!(
+                                    "Çevrildi: \"{}\" — gözden geçir, düzelt, göndermek için Enter. {}",
+                                    transcript.text,
+                                    transcript.retention.user_visible_summary()
+                                ));
+                            }
+                            Err(error) => app.push_system(format!("Çeviri başarısız: {error}")),
+                        }
+                        app.status = "Hazır".into();
+                    }
+                    Err(error) => app.push_system(format!("Kayıt durdurulamadı: {error}")),
+                }
+                return;
+            }
+            let paths = jarvis_core::VoiceStackPaths::local_default();
+            let availability = paths.availability();
+            if !availability.voice_input_ready() {
+                app.push_system(format!(
+                    "Sesli giriş kullanılamıyor. {}",
+                    availability
+                        .missing_summary()
+                        .unwrap_or_else(|| "Bilinmeyen eksik".into())
+                ));
+                return;
+            }
+            match jarvis_core::VoiceRecording::start(
+                &paths,
+                &format!("tui-{}", jarvis_core::now_epoch()),
+            ) {
+                Ok(recording) => {
+                    app.voice_recording = Some(recording);
+                    app.push_system(
+                        "🎙 Kayıt başladı — bitirmek için tekrar /voice, iptal için /voice-cancel. Ham ses saklanmıyor.".to_string(),
+                    );
+                }
+                Err(error) => app.push_system(format!("Kayıt başlatılamadı: {error}")),
+            }
+            return;
+        }
+        "/voice-cancel" => {
+            match app.voice_recording.take() {
+                Some(recording) => {
+                    recording.cancel();
+                    app.push_system("Kayıt iptal edildi ve ses dosyası silindi.");
+                }
+                None => app.push_system("Süren bir kayıt yok."),
+            }
+            return;
+        }
+        "/speak" => {
+            let Some(last) = app
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == MessageRole::Jarvis)
+            else {
+                app.push_system("Seslendirilecek bir JARVIS yanıtı yok.");
+                return;
+            };
+            let paths = jarvis_core::VoiceStackPaths::local_default();
+            if !paths.availability().speech {
+                app.push_system("Seslendirme kurulu değil (Piper bulunamadı).");
+                return;
+            }
+            let wav = paths.scratch_dir.join("speak.wav");
+            match jarvis_core::synthesize_speech(&paths, &last.content, &wav) {
+                Ok(()) => {
+                    let played = Command::new("pw-play")
+                        .arg(&wav)
+                        .status()
+                        .map(|status| status.success())
+                        .unwrap_or(false);
+                    // Ham sentez dosyası da kalıcı değil: oynatıldıktan sonra siliniyor.
+                    let _ = std::fs::remove_file(&wav);
+                    if played {
+                        app.push_system("Yanıt seslendirildi.");
+                    } else {
+                        app.push_system("Ses üretildi ama oynatılamadı (pw-play).");
+                    }
+                }
+                Err(error) => app.push_system(format!("Seslendirme başarısız: {error}")),
+            }
             return;
         }
         "/model-runs" => {

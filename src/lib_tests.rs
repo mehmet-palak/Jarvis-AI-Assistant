@@ -4994,3 +4994,73 @@ fn the_registry_compares_the_newest_configuration_against_its_rollback_target() 
         "4x hızlanma bile 3 senaryo kaybını telafi etmemeli"
     );
 }
+
+/// F5 madde 8 — sesli approval sınırı. Ses, yazılı onaydan daha zayıf bir yetkilendirme
+/// kanalı: yanlış duyulabilir, odadaki başkası söyleyebilir, kayıttan tekrar oynatılabilir.
+/// Bu yüzden policy gate'in zaten onay şartı koyduğu bir eylemi ses TEK BAŞINA onaylayamaz.
+#[test]
+fn voice_alone_cannot_approve_an_action_that_policy_already_gated() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut runtime = Runtime::with_store(store);
+
+    // note.create policy gate tarafından onay gerektiren bir eylem.
+    let (task, _result, _verify) = runtime.handle(Request {
+        schema_version: 1,
+        request_id: "v-1".into(),
+        input_type: InputType::Voice,
+        content: "not oluştur: sesli onay sınırı testi".into(),
+        attachments: Vec::new(),
+    });
+    assert_eq!(task.state, TaskState::WaitingForUser);
+
+    // Ses ile onay reddedilmeli ve denemesi audit'e yazılmalı.
+    assert!(
+        runtime
+            .approve_from(&task.task_id, InputType::Voice)
+            .is_none(),
+        "ses tek başına onay gerektiren bir eylemi yetkilendirememeli"
+    );
+    assert!(
+        runtime
+            .audit
+            .iter()
+            .any(|event| event.event == "approval.channel_insufficient"),
+        "reddedilen sesli onay denemesi audit'e yazılmalı"
+    );
+
+    // Aynı görev, ekrandan yazılı onayla tamamlanabilmeli — kural kanalla ilgili, eylemle değil.
+    let completed = runtime.approve(&task.task_id);
+    assert!(
+        completed.is_some(),
+        "yazılı onay aynı eylemi yetkilendirebilmeli"
+    );
+}
+
+/// Kural tek yönlü: ses, policy gate'in zaten onay istemediği bir eylemi engellemez. Aksi halde
+/// sesli kullanım gereksiz yere sakatlanır ve kullanıcı sesi hiç kullanmaz.
+#[test]
+fn voice_is_not_restricted_for_actions_that_never_needed_approval() {
+    assert!(
+        voice_approval_is_sufficient("system.health", ""),
+        "onay gerektirmeyen salt-okunur eylem ses ile de çalışmalı"
+    );
+    assert!(voice_approval_is_sufficient("conversation.reply", ""));
+    assert!(
+        !voice_approval_is_sufficient("note.create", "not oluştur: x"),
+        "kalıcı dosya oluşturan eylem ses ile onaylanamamalı"
+    );
+    assert!(
+        !voice_approval_is_sufficient("file.read_workspace", "dosya oku: a.md"),
+        "özel workspace erişimi ses ile onaylanamamalı"
+    );
+
+    // Kanal kuralı yalnız sesli girişe uygulanır; yazılı kanallar etkilenmez.
+    assert_eq!(
+        approval_channel_requirement("note.create", "not oluştur: x", InputType::Cli),
+        ApprovalChannelRequirement::AnyChannel
+    );
+    assert_eq!(
+        approval_channel_requirement("note.create", "not oluştur: x", InputType::Voice),
+        ApprovalChannelRequirement::WrittenConfirmationRequired
+    );
+}

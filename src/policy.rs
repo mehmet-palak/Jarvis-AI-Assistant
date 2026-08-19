@@ -88,6 +88,44 @@ pub fn validate_teacher_example(
     Ok(())
 }
 
+/// F5 "Sesli approval UX: yüksek riskli aksiyon için yalnız ses değil, ekranda açık yazılı onay
+/// veya güvenli ikinci doğrulama."
+///
+/// Speech is a weaker authorization channel than a keypress: it can be misheard, it can be
+/// produced by someone else in the room, and it can be replayed from a recording. This gate is
+/// therefore about *how the approval arrived*, not about what the capability does — the
+/// capability's own risk still comes from `policy_for`, and this never widens it.
+///
+/// The rule is one-directional on purpose: voice may always *decline*, and may approve anything
+/// that `policy_for` already treats as approval-free. What it may not do is be the sole
+/// authorization for an action the policy gate already decided needs an explicit human approval.
+pub fn voice_approval_is_sufficient(capability: &str, input: &str) -> bool {
+    !policy_for(capability, input).approval_required
+}
+
+/// The confirmation an approval must carry to be accepted. Returned rather than a bare bool so
+/// the UI can say *why* it is asking for a keypress instead of silently ignoring the spoken
+/// "evet" — an approval prompt the user does not understand is its own security problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalChannelRequirement {
+    /// Any channel, including voice, may approve.
+    AnyChannel,
+    /// Voice alone is not enough: the user must confirm on screen.
+    WrittenConfirmationRequired,
+}
+
+pub fn approval_channel_requirement(
+    capability: &str,
+    input: &str,
+    origin: crate::InputType,
+) -> ApprovalChannelRequirement {
+    if origin != crate::InputType::Voice || voice_approval_is_sufficient(capability, input) {
+        ApprovalChannelRequirement::AnyChannel
+    } else {
+        ApprovalChannelRequirement::WrittenConfirmationRequired
+    }
+}
+
 /// F6 feedback intake validation. The rule the plan states — feedback never becomes training
 /// data directly — is enforced here as a contract, not left to callers.
 pub fn validate_feedback_candidate(candidate: &FeedbackCandidate) -> Result<(), String> {
