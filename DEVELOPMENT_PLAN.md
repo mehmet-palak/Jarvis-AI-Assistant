@@ -99,7 +99,7 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F4 | Onaylı, izole coding ve yerel iş workbench'i | TAMAMLANDI (15/15 madde `[x]`: plan(varsayım/soru/risk dahil)→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti + seçilebilir dosya scope'lu patch preview dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor, `LocalTool` çerçevesi 2 gerçek tool'la ve genel bir `workflow.rs` çok-adımlı orkestratörü kanıtlandı; gerçek cgroup v2 (RAM/CPU) + `WorkspaceWriteMode::Overlay` (disk bütçesi dahil) + gerçek seccomp-bpf allowlist filtresi eklendi, izole worker (bwrap+cgroup+overlay+seccomp) ilk kez gerçek makinede tamamen uçtan uca kanıtlandı — 2 gerçek bug (RLIMIT_NPROC per-UID yanlış hesap, tmpfs/bind mount sırası) bulunup düzeltildi) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | TAMAMLANDI (11/11 madde; gerçek bas-tut + canlı seviye göstergesi, whisper.cpp STT + Piper TTS, sesli onay güvenlik sınırı, wake word bilinçli olarak reddedildi — ADR-0007; sıfır yeni Rust bağımlılığı) | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | TAMAMLANDI (7/7 madde; golden set + dataset governance + config registry + regresyon/rollback + geri bildirim intake'i + LoRA kararı ADR-0006 + model karşılaştırması — hepsi gerçek modelle kanıtlı, hiçbir indirme yapılmadan) | F3/F4 gerçek eval verisi |
-| F7 | Yazılı yetkili ve teknik olarak sınırlı security/pentest | BEKLENİYOR | F4 isolation + F9 operasyon kapıları |
+| F7 | Yazılı yetkili, bug bounty odaklı, teknik olarak sınırlı security/pentest | BEKLENİYOR — kullanıcı önceliklendirdi (20 Ağustos 2026), F8/F9'dan önce gelir | F4 isolation + F9 operasyon kapıları |
 | F8 | MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile | BEKLENİYOR | F3, F7 trust/permission temeli |
 | F9 | Operasyonel olgunluk, release ve uzun dönem bakım | BEKLENİYOR | F2–F8 boyunca sürekli yürür |
 
@@ -115,7 +115,7 @@ Bu dosyanın aşağısındaki ayrıntılı mimari bölümleri korunur; aşağıd
 | 4. Local model adapter ve routing | F2 + F6 + F9 | UX/health, benchmark, model registry ve rollback |
 | 5. RAG, workspace ve memory | F3 | Ingestion, sensitivity, retrieval, context budget ve silme |
 | 6. Teacher–Student learning ve dataset governance | F6 | Dataset sürümü, deletion marker, eval, LoRA/QLoRA ve rollback |
-| 7. Yetkili security/pentest | F7 | Authorization, network enforcement, sandbox, evidence ve deny testleri |
+| 7. Yetkili security/pentest | F7 | Authorization, network enforcement, sandbox, keşif/proxy/replay, evidence, rapor üretimi ve deny testleri |
 | 8. Remote device trust ve task handoff | F8 | Pairing, public key, replay koruması, revoke ve handoff |
 | 9. MCP vertical slice | F8 | Credential filtresi, provenance, extension trust ve permission UX |
 | 10. Observability, audit integrity ve recovery | F9 | Retention, metrikler, witness/export ve config/model rollback |
@@ -797,18 +797,57 @@ kapatıldı:
 
 Tamamlanma ölçütü: Her model veya adapter değişikliği, sürümlü eval'de hedef metriği iyileştirir ve güvenlik/latency regresyonu üretmez; aksi halde kullanılmaz.
 
-### F7 — Yetkili security/pentest hazırlığı
+### F7 — Yetkili security/pentest ve bug bounty yeteneği
 
-Durum: BEKLENİYOR — F4 izolasyonundan önce execution açılmaz
+Durum: BEKLENİYOR — F4 izolasyonundan önce execution açılmaz. **20 Ağustos 2026'da kullanıcı önceliklendirdi**: bunu gerçek bug bounty programlarında kullanacak, "en kritik yeteneklerden biri olacak" — F7, F8/F9'dan önce gelir (bkz. [[jarvis-f6-f7-prioritization-open]] hafıza kaydı).
 
-Amaç: “sızma testi yapabilen” değil, yalnız yazılı yetki ve teknik sınırlar altında güvenli değerlendirme yapabilen bir capability oluşturmak.
+Amaç: "sızma testi yapabilen" değil, yalnız yazılı yetki ve teknik sınırlar altında güvenli değerlendirme yapabilen bir capability oluşturmak — ama gerçek bug bounty iş akışını (keşif, manuel test, raporlama, program uyumu) baştan destekleyecek şekilde tasarlanmış olarak.
 
-- [ ] İmzalı authorization/scope manifest, hedef canonicalization, CIDR semantiği, DNS pinning/rebinding savunması ve expiry/revoke.
-- [ ] Network-scoped sandbox worker: yalnız allowlist egress, rate/runtime limiti, kill switch, dry-run ve gerçek cancellation/cleanup.
-- [ ] Önce SAFE/read-only envanter ve raporlama; ACTIVE/INTRUSIVE/DESTRUCTIVE modları varsayılan olarak kapalı kalır.
+**Bug bounty bağlamının tasarıma etkisi:** Programlar scope'u wildcard/CIDR ile tanımlar (madde F7.1'de zorunlu hale geldi); kapsam-dışı bir varlığa dokunmak en sık ban/hukuki sorun sebebi (F7.2 bunu OS seviyesinde imkansız kılıyor); en değerli bug'lar (IDOR, yetki atlatma, iş mantığı hataları) otomatik taramayla değil manuel/yarı-manuel çalışmayla bulunuyor (F7.4).
+
+#### F7.1 — Yetkilendirme ve scope (önce bu — hiçbir şey bunsuz açılmaz)
+
+- [ ] İmzalı authorization/scope manifest, hedef canonicalization, expiry/revoke.
+- [ ] CIDR, wildcard, punycode ve DNS pinning/rebinding savunması — bug bounty scope'u (ör. `*.example.com`, `10.0.0.0/24`) ifade etmek için zorunlu; mevcut contract bunları bilinçli reddediyor, bu yüzden bug bounty kullanımı için ilk yapılacak iş bu.
+- [ ] Program scope'unu doğrudan içe aktarma (HackerOne/Bugcrowd yapılandırılmış scope API'leri) — elle girmenin yanlış kapsam riskini ortadan kaldırır.
+- [ ] Çoklu program/scope yönetimi: aktif scope her zaman açıkça gösterilir; bir programın scope'u yüklüyken yanlışlıkla başka bir programın hedefine dokunma riski engellenir.
+- [ ] Pasif/aktif keşif ayrımı: pasif kaynaklara bakmak (sertifika şeffaflık kayıtları, arama motoru verisi) hedefe hiç dokunmaz — mevcut SAFE/ACTIVE merdiveninden daha ince, ayrı bir kategori.
+
+#### F7.2 — Ağ sınırlama (en kritik güvenlik parçası)
+
+- [ ] Network-scoped sandbox worker: yalnız allowlist egress, kill switch, dry-run ve gerçek cancellation/cleanup.
+- [ ] Rate/runtime limitleri — agresif tarama çoğu bug bounty programında otomatik ban sebebi.
+- [ ] WAF/engelleme tespiti: hedef aniden farklı davranmaya (sürekli 429/503) başlarsa kör devam etmek yerine dur ve haber ver.
+- [ ] Programın kendi politika metnini okuma: "otomatik tarama yasak" gibi kısıtlamalara uyum, izin verilen test saatleri.
+
+#### F7.3 — Keşif ve sürekli izleme
+
+- [ ] Pasif keşif: subdomain (sertifika şeffaflık kayıtları), teknoloji parmak izi, geçmiş URL/endpoint kayıtları.
+- [ ] Aktif keşif (yalnız scope onaylıysa): port/servis tarama, subdomain brute-force, JS analiziyle endpoint keşfi.
+- [ ] Varlık envanteri kalıcı kaydı + periyodik yeniden tarama + **yeni varlık ortaya çıkınca bildirim**. Bug bounty'de değerin çoğu buradan geliyor — yeni bir subdomain/endpoint'e ilk bakan avantajlı; bu madde olmadan F7 sadece tek seferlik bir tarayıcı kalır.
+
+#### F7.4 — Manuel test araçları (en yüksek getirili kategori)
+
+- [ ] İstek yakalama/değiştirme/tekrar gönderme (proxy/replay) ve cevapları karşılaştırma (diff). En yüksek ödemeli bug sınıfları (IDOR, yetki atlatma, iş mantığı hataları) neredeyse hiç otomatik taramayla bulunmuyor; bunsuz F7 yalnız "otomatik keşif + bilinen açık eşleştirme" aracı kalır.
+- [ ] Oturum açmış (authenticated) test desteği: program tarafından verilen test hesabı bilgisinin güvenli saklanması ve tarama/replay araçlarına enjekte edilmesi — mevcut Secret Manager'a bağlanır ([[jarvis-layered-memory-architecture]]), yeni bir mekanizma icat edilmez.
+
+#### F7.5 — SAFE modun somut ilk kontrolleri
+
+- [ ] Subdomain devralma (takeover) tespiti — yalnız DNS/HTTP kontrolü, sömürü yok.
+- [ ] Açığa çıkmış hassas dosya/yanlış yapılandırma tespiti (`.git`, `.env`, yedek dosyaları, açık depolama).
+- [ ] Bilinen CVE eşleştirmesi (parmak izinden çıkan yazılım sürümüne karşı) — CVE veri kaynağının güncel tutulması dahil.
+- [ ] TLS/sertifika sorunları.
+
+#### F7.6 — Bulgu yönetimi ve raporlama
+
 - [ ] Evidence tabanlı finding formatı, insan onayı, audit export ve scope dışı/secret hedef deny testleri.
+- [ ] Daha önce bulunanla eşleştirme (deduplication) — mevcut audit hash-chain deseniyle, yeni bir mekanizma icat edilmez. Programlar tekrar bildirilen bulgulara olumsuz bakıyor.
+- [ ] Rapor öncesi yeniden doğrulama: bulgu ile rapor yazma arasında hedef değişmiş olabilir, göndermeden önce hâlâ geçerli mi diye tekrar bakılır.
+- [ ] **Modelin kendisi raporu yazabilmeli, iyi bir şekilde.** Kanıt toplamak (F7.6'nın diğer maddeleri) ile göndermeye hazır bir rapor arasındaki mesafe kapanmalı: model, toplanan kanıttan (istek/cevap çiftleri, ekran görüntüleri, replay/diff sonuçları) platformun beklediği yapıda (özet, adım adım tekrar üretme, etki analizi, önerilen düzeltme, CVSS/severity tahmini) düzyazı bir rapor taslağı üretir. Kullanıcı gönderilmeden önce gözden geçirip onaylar — F4'ün patch akışındaki "önce göster, sonra onay al" deseniyle aynı, burada da model asla kullanıcı adına doğrudan göndermez. Rapor kalitesi golden set'e (F6) yeni bir zor senaryo olarak eklenebilir: gerçek bir bulgu senaryosundan üretilen rapor taslağı, gerekli bölümlerin hepsini içeriyor mu diye mekanik olarak kontrol edilebilir.
+- [ ] Düzeltme sonrası hedefli yeniden test: program "düzelttik, doğrular mısın" dediğinde tüm taramayı değil yalnız o bulguyu tekrar kontrol etme.
+- [ ] Program-özel hariç tutulan/düşük değerli bulgu sınıfları filtresi (ör. "self-XSS kabul etmiyoruz") — program politikasından okunur, zaman kaybını önler.
 
-Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda üretilen her bulgu kanıt ve audit ile ilişkilidir. Bu gate geçmeden aktif test capability'si eklenmez.
+Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda üretilen her bulgu kanıt ve audit ile ilişkilidir. Bu gate geçmeden aktif test capability'si eklenmez. F7.1-F7.2 (yetkilendirme + ağ sınırlama) tamamlanmadan F7.3 ve sonrası açılmaz — sıra bilinçli, en riskli katman en önce sağlamlaştırılır.
 
 ### F8 — MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile
 
@@ -1190,7 +1229,45 @@ Durum: DEVAM EDİYOR
 - [ ] 7.8 Security tool sandbox worker’ı
 - [ ] 7.9 Scope dışı hedef için deny testleri
 
-Tamamlanma ölçütü: Kullanıcının sözlü yetki iddiası tek başına yeterli olmamalı; scope runtime tarafından enforce edilmeli. Mevcut contract yalnız ilk adımdır; imzalı authorization ve network enforcement eklenmeden security tool açılmayacak.
+**20 Ağustos 2026 — bug bounty önceliklendirmesi sonrası eklenen maddeler** (üst düzey gruplama
+için bkz. F7.1-F7.6 fazlı liste; buradaki numaralar aynı işlerin teknik backlog karşılığı,
+7.1-7.9'un devamı, mevcut maddeler yeniden numaralandırılmadı):
+
+- [ ] 7.10 Program scope içe aktarma: HackerOne/Bugcrowd yapılandırılmış scope API'lerinden
+  doğrudan okuma — elle girmenin yanlış kapsam riski.
+- [ ] 7.11 Çoklu program/scope yönetimi: aktif scope göstergesi, programlar arası yanlışlıkla
+  karışmayı engelleme.
+- [ ] 7.12 Pasif/aktif keşif ayrımı: pasif kaynaklara bakmak (sertifika şeffaflık kayıtları vb.)
+  hedefe dokunmaz, SAFE/ACTIVE merdiveninden ayrı ve daha ince bir kategori.
+- [ ] 7.13 Sürekli varlık keşfi ve fark tespiti: pasif+aktif subdomain/port/teknoloji/endpoint
+  keşfi, kalıcı envanter, periyodik yeniden tarama, yeni varlık bildirimi.
+- [ ] 7.14 Manuel test proxy/replay: istek yakalama/değiştirme/tekrar gönderme, cevap diff'i —
+  IDOR/yetki atlatma/iş mantığı hataları gibi otomatik taramayla bulunamayan sınıflar için.
+- [ ] 7.15 Authenticated test desteği: program test hesabı bilgisinin Secret Manager üzerinden
+  güvenli saklanması ve tarama/replay araçlarına enjeksiyonu.
+- [ ] 7.16 SAFE-mode somut kontroller: subdomain takeover, açık dosya/yanlış yapılandırma
+  tespiti, bilinen CVE eşleştirmesi (güncel veri kaynağı dahil), TLS/sertifika sorunları.
+- [ ] 7.17 Bulgu deduplication: mevcut audit hash-chain deseniyle, daha önce bulunan/bildirilen
+  bulgularla eşleştirme.
+- [ ] 7.18 Rapor öncesi yeniden doğrulama: bulgu ile rapor arasında hedef değişmiş olabilir,
+  göndermeden önce staleness/confidence kontrolü.
+- [ ] 7.19 **Model-yazımı rapor taslağı**: toplanan kanıttan (istek/cevap, replay/diff sonucu)
+  platform formatında (özet, tekrar üretme adımları, etki, önerilen düzeltme, CVSS/severity
+  tahmini) düzyazı rapor taslağı üretme; kullanıcı onayından önce asla gönderilmez (F4 patch
+  akışıyla aynı "önce göster, sonra onay al" deseni). Rapor kalitesi F6 golden set'e zor senaryo
+  olarak eklenebilir.
+- [ ] 7.20 Düzeltme sonrası hedefli yeniden test: tüm taramayı değil yalnız ilgili bulguyu
+  tekrar kontrol etme.
+- [ ] 7.21 Program politika uyumu: "otomatik tarama yasak" gibi kısıtlamaları okuma, izinli test
+  saatleri, rate/runtime limitleri, WAF/engelleme tespiti (hedef aniden 429/503 vermeye
+  başlarsa dur ve haber ver).
+- [ ] 7.22 Program-özel hariç tutulan/düşük değerli bulgu sınıfları filtresi (ör. "self-XSS
+  kabul etmiyoruz") — program politikasından okunur, zaman kaybını önler.
+
+Tamamlanma ölçütü: Kullanıcının sözlü yetki iddiası tek başına yeterli olmamalı; scope runtime
+tarafından enforce edilmeli. Mevcut contract yalnız ilk adımdır; imzalı authorization ve network
+enforcement eklenmeden security tool açılmayacak. 7.10-7.22, 7.1-7.9 tamamlanmadan başlamaz —
+en riskli katman (yetkilendirme + ağ sınırlama) önce sağlamlaşır.
 
 ---
 
