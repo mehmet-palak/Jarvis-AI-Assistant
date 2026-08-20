@@ -941,11 +941,16 @@ fn pentest_scope_rejects_expired_or_ambiguous_targets() {
         .unwrap_err()
         .contains("expired"));
 
+    // 20 Ağustos 2026: *.example.test ve 10.0.0.0/24-and-narrower artık GEÇERLİ scope
+    // girdileri (F7.1 — bug bounty scope'u wildcard/CIDR olmadan ifade edilemez). Yalnız
+    // gerçekten ambiguous/riskli olanlar reddedilmeye devam ediyor.
     for target in [
-        "*.example.test",
-        "10.0.0.0/8",
-        "xn--bcher-kva.example",
-        "bücher.example",
+        "xn--bcher-kva.example", // punycode — homograph riski, bilinçli olarak hâlâ reddediliyor
+        "bücher.example",        // ham Unicode — aynı gerekçe
+        "10.0.0.0/8",            // MIN_PENTEST_CIDR_PREFIX_LEN (/16) altında, çok geniş
+        "10.0.0.5/24",           // host bitleri set edilmiş, ağ adresi değil
+        "*.com",                 // tek etiketli taban, aşırı geniş wildcard
+        "300.0.0.0/24",          // geçersiz oktet
     ] {
         let mut invalid = valid_pentest_scope();
         invalid.targets = vec![target.into()];
@@ -954,6 +959,85 @@ fn pentest_scope_rejects_expired_or_ambiguous_targets() {
             "{target} must be rejected"
         );
     }
+}
+
+/// F7.1 — CIDR desteği: bir /24'ün içindeki her adres eşleşmeli, dışındaki hiçbiri eşleşmemeli.
+/// Sınır (boundary) adresler (ağ adresinin kendisi ve broadcast) özellikle test ediliyor —
+/// off-by-one hataları tam da orada gizlenir.
+#[test]
+fn pentest_cidr_scope_matches_exactly_the_addresses_inside_the_range() {
+    let mut scope = valid_pentest_scope();
+    scope.targets = vec!["203.0.113.0/24".into()];
+    scope.excluded_targets = vec![];
+
+    for inside in [
+        "203.0.113.0",
+        "203.0.113.1",
+        "203.0.113.254",
+        "203.0.113.255",
+    ] {
+        assert!(
+            authorize_pentest_target(&scope, inside, PentestMode::Safe).is_ok(),
+            "{inside} /24 içinde olmalı"
+        );
+    }
+    for outside in ["203.0.112.255", "203.0.114.0", "203.0.113.256", "10.0.0.1"] {
+        assert!(
+            authorize_pentest_target(&scope, outside, PentestMode::Safe).is_err(),
+            "{outside} /24 dışında kalmalı"
+        );
+    }
+}
+
+/// Dar bir /28 sınırının tam kenarını da doğrular — CIDR maskesi yanlış hesaplanmışsa burada
+/// yakalanır (16'lık bloklar hizalanmamışsa komşu bloğa taşma olur).
+#[test]
+fn pentest_cidr_scope_respects_narrower_prefix_boundaries() {
+    let mut scope = valid_pentest_scope();
+    scope.targets = vec!["198.51.100.16/28".into()]; // 198.51.100.16 - .31
+    scope.excluded_targets = vec![];
+
+    assert!(authorize_pentest_target(&scope, "198.51.100.16", PentestMode::Safe).is_ok());
+    assert!(authorize_pentest_target(&scope, "198.51.100.31", PentestMode::Safe).is_ok());
+    assert!(authorize_pentest_target(&scope, "198.51.100.15", PentestMode::Safe).is_err());
+    assert!(authorize_pentest_target(&scope, "198.51.100.32", PentestMode::Safe).is_err());
+}
+
+/// F7.1 — wildcard desteği: `*.example.test` yalnız gerçek alt alanları kapsar, apex'in
+/// (`example.test`) kendisini KAPSAMAZ — bu bilinçli, çünkü wildcard'ın apex'i de kapsaması
+/// yaygın ve tehlikeli bir aşırı-yetkilendirme hatası.
+#[test]
+fn pentest_wildcard_scope_covers_subdomains_but_never_the_apex_itself() {
+    let mut scope = valid_pentest_scope();
+    scope.targets = vec!["*.example.test".into()];
+    scope.excluded_targets = vec![];
+
+    assert!(authorize_pentest_target(&scope, "app.example.test", PentestMode::Safe).is_ok());
+    assert!(authorize_pentest_target(&scope, "a.b.example.test", PentestMode::Safe).is_ok());
+    assert!(
+        authorize_pentest_target(&scope, "example.test", PentestMode::Safe).is_err(),
+        "wildcard apex'in kendisini kapsamamalı"
+    );
+    assert!(
+        authorize_pentest_target(&scope, "evilexample.test", PentestMode::Safe).is_err(),
+        "sahte bir alt dize eşleşmesi olmamalı (evilexample.test, example.test ile bitmiyor)"
+    );
+    assert!(authorize_pentest_target(&scope, "other.test", PentestMode::Safe).is_err());
+}
+
+/// Dışlama, izin verilen daha geniş bir örüntüden her zaman kazanmalı — bir alt alanı hem
+/// wildcard ile içeri alıp hem de ayrıca dışlamak, dışlamanın kazandığı tek anlamlı davranış.
+#[test]
+fn a_narrow_exclusion_wins_over_a_broader_wildcard_allow() {
+    let mut scope = valid_pentest_scope();
+    scope.targets = vec!["*.example.test".into()];
+    scope.excluded_targets = vec!["*.internal.example.test".into()];
+
+    assert!(authorize_pentest_target(&scope, "app.example.test", PentestMode::Safe).is_ok());
+    assert!(
+        authorize_pentest_target(&scope, "db.internal.example.test", PentestMode::Safe).is_err(),
+        "internal.example.test altındaki her şey dışlanmalı"
+    );
 }
 
 #[test]

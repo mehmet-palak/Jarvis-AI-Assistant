@@ -234,9 +234,126 @@ pub fn validate_pentest_scope(scope: &PentestScope) -> Result<(), String> {
         return Err("pentest scope requires a positive runtime limit".into());
     }
     for target in scope.targets.iter().chain(&scope.excluded_targets) {
-        normalize_pentest_target(target)?;
+        parse_pentest_target_pattern(target)?;
     }
     Ok(())
+}
+
+/// F7.1 "CIDR, wildcard, punycode ve DNS pinning/rebinding savunması — bug bounty scope'u
+/// ifade etmek için zorunlu." A bug bounty program's scope is almost never a flat list of exact
+/// hostnames; it is expressed with wildcards (`*.example.com`) and IP ranges (`10.0.0.0/24`).
+/// The scope *list* therefore holds patterns, but the *target actually under test* is always
+/// concrete — you probe one real host, never a pattern — so the two are validated differently:
+/// `parse_pentest_target_pattern` accepts patterns for `scope.targets`/`excluded_targets`,
+/// `normalize_pentest_target` (below) stays exact-only for the live target argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PentestTargetPattern {
+    /// Exact ASCII hostname or IPv4 address, canonical form (lowercase, no trailing dot).
+    ExactHost(String),
+    /// `*.base.tld` — matches any strict subdomain of `base`, never `base` itself. List the
+    /// apex separately (e.g. both `example.com` and `*.example.com`) if it is also in scope;
+    /// treating a wildcard as covering its own apex is a common, dangerous over-grant.
+    Wildcard { base: String },
+    /// IPv4 CIDR range, stored as the network address (host bits already verified zero) and
+    /// prefix length.
+    Cidr { network: u32, prefix_len: u8 },
+}
+
+/// Narrower than a `/16` is rejected as a single scope entry. This is a deliberate safety bound,
+/// not a technical limit: a typo'd or overly generous authorization (`10.0.0.0/8` instead of
+/// `10.0.0.0/24`) would silently put ~16 million addresses in scope. A program that genuinely
+/// authorizes something broader lists multiple `/16` (or narrower) entries instead — that keeps
+/// the size of what one line of scope grants bounded and reviewable.
+const MIN_PENTEST_CIDR_PREFIX_LEN: u8 = 16;
+
+fn parse_pentest_target_pattern(raw: &str) -> Result<PentestTargetPattern, String> {
+    let raw = raw.trim();
+    if let Some((network_part, prefix_part)) = raw.split_once('/') {
+        let network = parse_canonical_ipv4(network_part)
+            .ok_or_else(|| "pentest CIDR target has an invalid network address".to_string())?;
+        let prefix_len: u8 = prefix_part
+            .parse()
+            .map_err(|_| "pentest CIDR target has an invalid prefix length".to_string())?;
+        if prefix_len > 32 {
+            return Err("pentest CIDR prefix length must be between 0 and 32".into());
+        }
+        if prefix_len < MIN_PENTEST_CIDR_PREFIX_LEN {
+            return Err(format!(
+                "pentest CIDR range is too broad — minimum accepted prefix is /{MIN_PENTEST_CIDR_PREFIX_LEN}, use several narrower ranges instead"
+            ));
+        }
+        let mask = cidr_mask(prefix_len);
+        if network & !mask != 0 {
+            return Err(
+                "pentest CIDR network address must not set host bits (e.g. 10.0.0.0/24, not 10.0.0.5/24)"
+                    .into(),
+            );
+        }
+        return Ok(PentestTargetPattern::Cidr {
+            network,
+            prefix_len,
+        });
+    }
+    if let Some(base) = raw.strip_prefix("*.") {
+        let base = validate_pentest_hostname(base)?;
+        if base.split('.').count() < 2 {
+            return Err(
+                "pentest wildcard target is too broad — base domain needs at least two labels (e.g. *.example.com, not *.com)"
+                    .into(),
+            );
+        }
+        return Ok(PentestTargetPattern::Wildcard { base });
+    }
+    Ok(PentestTargetPattern::ExactHost(normalize_pentest_target(
+        raw,
+    )?))
+}
+
+fn pentest_target_pattern_matches(pattern: &PentestTargetPattern, concrete_target: &str) -> bool {
+    match pattern {
+        PentestTargetPattern::ExactHost(host) => host == concrete_target,
+        PentestTargetPattern::Wildcard { base } => concrete_target
+            .strip_suffix(base)
+            .and_then(|prefix| prefix.strip_suffix('.'))
+            .is_some_and(|prefix| !prefix.is_empty()),
+        PentestTargetPattern::Cidr {
+            network,
+            prefix_len,
+        } => parse_canonical_ipv4(concrete_target)
+            .is_some_and(|ip| ip & cidr_mask(*prefix_len) == *network),
+    }
+}
+
+fn cidr_mask(prefix_len: u8) -> u32 {
+    if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    }
+}
+
+/// Rejects non-canonical decimal octets (leading zeros) alongside the usual range check. This
+/// matters for target canonicalization specifically: some parsers read a leading-zero octet
+/// (`010`) as octal, so the *same string* can resolve to two different addresses depending on
+/// which tool reads it — exactly the kind of ambiguity that could let a probe drift outside the
+/// intended target without anyone noticing.
+fn parse_canonical_ipv4(candidate: &str) -> Option<u32> {
+    let labels: Vec<&str> = candidate.split('.').collect();
+    if labels.len() != 4 {
+        return None;
+    }
+    let mut address: u32 = 0;
+    for label in labels {
+        if label.is_empty() || (label.len() > 1 && label.starts_with('0')) {
+            return None;
+        }
+        let octet: u32 = label.parse().ok()?;
+        if octet > 255 {
+            return None;
+        }
+        address = (address << 8) | octet;
+    }
+    Some(address)
 }
 
 pub fn authorize_pentest_target(
@@ -249,17 +366,26 @@ pub fn authorize_pentest_target(
     let excluded = scope
         .excluded_targets
         .iter()
-        .map(|item| normalize_pentest_target(item))
+        .map(|item| parse_pentest_target_pattern(item))
         .collect::<Result<Vec<_>, _>>()?;
-    if excluded.iter().any(|item| item == &target) {
+    // Exclusions are checked first and by pattern: a narrow excluded wildcard (e.g.
+    // `*.internal.example.com`) must win even against a broader allowed wildcard
+    // (`*.example.com`) — excluding something is always safe to honor, allowing something is not.
+    if excluded
+        .iter()
+        .any(|pattern| pentest_target_pattern_matches(pattern, &target))
+    {
         return Err("pentest target is explicitly excluded by scope".into());
     }
     let allowed = scope
         .targets
         .iter()
-        .map(|item| normalize_pentest_target(item))
+        .map(|item| parse_pentest_target_pattern(item))
         .collect::<Result<Vec<_>, _>>()?;
-    if !allowed.iter().any(|item| item == &target) {
+    if !allowed
+        .iter()
+        .any(|pattern| pentest_target_pattern_matches(pattern, &target))
+    {
         return Err("pentest target is outside the authorization allowlist".into());
     }
     if requested_mode > scope.maximum_mode {
@@ -268,14 +394,17 @@ pub fn authorize_pentest_target(
     Ok(())
 }
 
-fn normalize_pentest_target(target: &str) -> Result<String, String> {
-    let target = target.trim().trim_end_matches('.').to_ascii_lowercase();
-    if target.is_empty()
-        || !target.is_ascii()
-        || target.contains('*')
-        || target.contains('/')
-        || target.contains(':')
-        || target.split('.').any(|label| {
+/// Validates a single hostname label sequence — shared by the exact-host path and by the base
+/// domain of a wildcard pattern, so the two can never quietly diverge on what counts as a valid
+/// label.
+fn validate_pentest_hostname(host: &str) -> Result<String, String> {
+    let host = host.to_ascii_lowercase();
+    if host.is_empty()
+        || !host.is_ascii()
+        || host.contains('*')
+        || host.contains('/')
+        || host.contains(':')
+        || host.split('.').any(|label| {
             label.is_empty()
                 || label.len() > 63
                 || label.starts_with('-')
@@ -288,7 +417,14 @@ fn normalize_pentest_target(target: &str) -> Result<String, String> {
     {
         return Err("pentest target must be an exact ASCII hostname or IPv4 address".into());
     }
-    Ok(target)
+    Ok(host)
+}
+
+/// Normalizes the *concrete* target actually under test — never a pattern. A wildcard or CIDR
+/// entry describes what may be tested; the thing you actually connect to is always one exact
+/// host or address, so this rejects `*` and `/` rather than trying to interpret them.
+fn normalize_pentest_target(target: &str) -> Result<String, String> {
+    validate_pentest_hostname(target.trim().trim_end_matches('.'))
 }
 
 pub fn policy_for(capability: &str, _input: &str) -> PolicyResult {
