@@ -15,6 +15,7 @@ pub mod patch_generator;
 pub mod pentest_evidence;
 pub mod pentest_knowledge;
 pub mod pentest_network_gate;
+pub mod pentest_osint;
 pub mod pentest_recon;
 pub mod pentest_replay;
 pub mod pentest_reporting;
