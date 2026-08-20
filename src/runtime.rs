@@ -10,6 +10,10 @@
 //! concern of its own, so an explicit per-symbol import list would just restate the crate's
 //! surface with no added clarity.
 use crate::*;
+use pentest_safe_checks::{
+    PentestExposedFileFinding, PentestTechnologyFingerprint, PentestTlsCheckResult,
+    TakeoverSignatureMatch,
+};
 
 use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -964,6 +968,130 @@ impl Runtime {
     ) -> Result<PentestHttpResponse, String> {
         self.authorize_pentest_action(target, PentestMode::Active)?;
         crate::pentest_replay::send_http_request(target, request)
+    }
+
+    /// F7.5 için paylaşılan yardımcı: `PentestMode::Safe` seviyesinde hedefe basit bir GET
+    /// isteği gönderir. Üç F7.5 kontrolünün (devralma tespiti, teknoloji parmak izi, TLS
+    /// bağlantısı) üçü de tek bir isteğe dayanıyor, bu yüzden "yetkilendir + gönder" mantığı
+    /// burada bir kez var — F7.4'ün diğer kapsamlı isteklerinden (replay) farklı olarak burada
+    /// yalnız `GET /` gönderiliyor, kullanıcı tanımlı bir istek değil. `use_tls`/`port` alanları,
+    /// gerçek dünyada her hedefin standart 443/HTTPS'te olmaması VE testlerin gerçek internete
+    /// çıkmadan yerel bir sunucuya yönelebilmesi için var — `PentestHttpRequest`'in kendi
+    /// tasarımıyla aynı gerekçe.
+    fn send_pentest_safe_get(
+        &self,
+        target: &str,
+        path: &str,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> Result<PentestHttpResponse, String> {
+        self.authorize_pentest_action(target, PentestMode::Safe)?;
+        let request = PentestHttpRequest {
+            method: "GET".into(),
+            path: path.to_string(),
+            headers: vec![],
+            body: vec![],
+            use_tls,
+            port,
+        };
+        crate::pentest_replay::send_http_request(target, &request)
+    }
+
+    /// F7.5 "Subdomain devralma (takeover) tespiti — yalnız DNS/HTTP kontrolü, sömürü yok."
+    /// Hedefin kök sayfasını çekip bilinen bir "terk edilmiş servis" imzasına karşı kontrol
+    /// ediyor — hiçbir devralma denemesi yapmıyor, yalnız zafiyetin var olma OLASILIĞINI
+    /// bildiriyor (F7.7'nin "bulundu" ile "doğrulandı" ayrımı burada da geçerli).
+    pub fn check_pentest_subdomain_takeover(
+        &self,
+        target: &str,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> Result<Option<TakeoverSignatureMatch>, String> {
+        let response = self.send_pentest_safe_get(target, "/", use_tls, port)?;
+        Ok(crate::pentest_safe_checks::detect_takeover_signature(
+            &response.body,
+        ))
+    }
+
+    /// F7.5 "Açığa çıkmış hassas dosya/yanlış yapılandırma tespiti." Bilinen bir yol listesini
+    /// dener; tek bir yolun ağ hatası (zaman aşımı vb.) TÜM taramayı iptal etmiyor — o yol
+    /// atlanıp devam ediliyor. Yetkilendirme yalnız BİR KEZ, döngünün başında kontrol ediliyor
+    /// (scope dışı/iptal edilmiş bir hedefte altı kez aynı reddi denemek yerine).
+    pub fn scan_pentest_exposed_files(
+        &self,
+        target: &str,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> Result<Vec<PentestExposedFileFinding>, String> {
+        self.authorize_pentest_action(target, PentestMode::Safe)?;
+        let mut findings = Vec::new();
+        for (path, description, content_signature) in
+            crate::pentest_safe_checks::sensitive_file_checks()
+        {
+            let request = PentestHttpRequest {
+                method: "GET".into(),
+                path: path.to_string(),
+                headers: vec![],
+                body: vec![],
+                use_tls,
+                port,
+            };
+            let Ok(response) = crate::pentest_replay::send_http_request(target, &request) else {
+                continue;
+            };
+            if response.status == 200 && content_signature(&response.body) {
+                findings.push(PentestExposedFileFinding { path, description });
+            }
+        }
+        Ok(findings)
+    }
+
+    /// F7.3'ün kalan "teknoloji parmak izi" alt maddesi + F7.5'in CVE eşleştirmesinin ön koşulu.
+    /// Yalnız hedefin kendi beyan ettiği başlıkları (`Server`, `X-Powered-By`, vb.) çıkarıyor —
+    /// bu bir kanıt değil bir ipucu (bir sunucu başlığını yanlış/eksik beyan edebilir).
+    pub fn fingerprint_pentest_technology(
+        &self,
+        target: &str,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> Result<PentestTechnologyFingerprint, String> {
+        let response = self.send_pentest_safe_get(target, "/", use_tls, port)?;
+        Ok(crate::pentest_safe_checks::extract_technology_fingerprint(
+            &response.headers,
+        ))
+    }
+
+    /// F7.5 "TLS/sertifika sorunları." **Dürüst sınır:** yalnız "HTTPS bağlantısı (sertifika
+    /// doğrulaması dahil) başarılı oldu mu" sorusuna cevap veriyor — tam olarak hangi sertifika
+    /// sorunuyla karşılaşıldığını (süre dolumu/kendinden imzalı/hostname uyuşmazlığı) ayırt
+    /// edemiyor; bunun için ham TLS handshake'ine inen yeni bir bağımlılık gerekir, bilinçli
+    /// olarak eklenmedi (bkz. `pentest_safe_checks` modül notu). Bu kontrolün amacı gereği
+    /// `use_tls` her zaman `true` — `port` yine de özelleştirilebilir (standart olmayan bir
+    /// HTTPS portu).
+    pub fn check_pentest_tls_connectivity(
+        &self,
+        target: &str,
+        port: Option<u16>,
+    ) -> Result<PentestTlsCheckResult, String> {
+        self.authorize_pentest_action(target, PentestMode::Safe)?;
+        let request = PentestHttpRequest {
+            method: "GET".into(),
+            path: "/".into(),
+            headers: vec![],
+            body: vec![],
+            use_tls: true,
+            port,
+        };
+        match crate::pentest_replay::send_http_request(target, &request) {
+            Ok(_) => Ok(PentestTlsCheckResult {
+                tls_connection_succeeded: true,
+                failure_detail: None,
+            }),
+            Err(error) => Ok(PentestTlsCheckResult {
+                tls_connection_succeeded: false,
+                failure_detail: Some(error),
+            }),
+        }
     }
 
     /// The scope-filtering + persistence half of recon, factored out from the real-network call

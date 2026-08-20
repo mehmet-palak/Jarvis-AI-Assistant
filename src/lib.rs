@@ -15,6 +15,7 @@ pub mod patch_generator;
 pub mod pentest_network_gate;
 pub mod pentest_recon;
 pub mod pentest_replay;
+pub mod pentest_safe_checks;
 mod persistence;
 mod policy;
 mod profile;

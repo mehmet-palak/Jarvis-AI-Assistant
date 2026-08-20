@@ -6226,3 +6226,165 @@ fn authenticated_replay_composes_secret_manager_and_http_replay_without_a_new_me
         "sır değeri, sunucuya GERÇEKTEN ulaşan Authorization başlığında görünmeli"
     );
 }
+
+// --- F7.5: SAFE modun somut kontrolleri ---------------------------------------------------------
+
+/// Gerçek bir HTTP/1.1 sunucusu — istenen yola göre farklı bir sabit yanıt döndürür. Yalnız
+/// istek satırını (`GET /path HTTP/1.1`) ayrıştırıyor, geri kalanını okumuyor (test amacımız
+/// değil). Bilinmeyen bir yol için 404 döner.
+fn start_routing_http_server(routes: Vec<(&'static str, u16, &'static str, &'static str)>) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("test http sunucusu");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            use std::io::{Read, Write};
+            let mut buffer = [0u8; 4096];
+            let count = stream.read(&mut buffer).unwrap_or(0);
+            let request_text = String::from_utf8_lossy(&buffer[..count]);
+            let requested_path = request_text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let (status, extra_headers, body) = routes
+                .iter()
+                .find(|(path, ..)| *path == requested_path)
+                .map(|(_, status, headers, body)| (*status, *headers, *body))
+                .unwrap_or((404, "", "not found"));
+            let status_line = format!("HTTP/1.1 {status} X");
+            // `Connection: close` KRİTİK: bu sunucu tek bağlantı başına tek yanıt veriyor
+            // (keep-alive desteklemiyor). Bunu belirtmezsek istemci (ureq) bağlantıyı yeniden
+            // kullanmayı deneyebilir, sunucu ise zaten yeni bir bağlantı beklemeye geçtiği için
+            // istemci hiç cevap alamayıp zaman aşımına kadar bekler — çok yollu taramalarda
+            // (`scan_pentest_exposed_files`) her istek ayrı bir TCP bağlantısı GEREKTİRİYOR.
+            let response = format!(
+                "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            // Bu test sunucusu yalnız tek bir bağlantı için tasarlandı — döngüden çıkıp thread'i
+            // bitiriyoruz (`scan_pentest_exposed_files` birden çok isteği AYNI bağlantı yerine
+            // her seferinde yeni bir TCP bağlantısıyla gönderiyor, bu yüzden `incoming()` döngüsü
+            // gerçekte gerekiyor — yalnız test bitince thread'in kendiliğinden sonlanması için
+            // `listener`'ın drop edilmesini bekliyoruz, burada özel bir çıkış koşulu yok).
+        }
+    });
+    port
+}
+
+#[test]
+fn check_pentest_subdomain_takeover_detects_a_real_known_signature() {
+    let port = start_routing_http_server(vec![(
+        "/",
+        200,
+        "",
+        "<html>NoSuchBucket - the specified bucket does not exist</html>",
+    )]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let result = runtime
+        .check_pentest_subdomain_takeover("127.0.0.1", false, Some(port))
+        .expect("kontrol çalışmalı");
+    assert_eq!(result.unwrap().service_name, "Amazon S3");
+}
+
+#[test]
+fn check_pentest_subdomain_takeover_returns_none_for_a_real_ordinary_page() {
+    let port = start_routing_http_server(vec![("/", 200, "", "<html>gerçek bir site</html>")]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let result = runtime
+        .check_pentest_subdomain_takeover("127.0.0.1", false, Some(port))
+        .expect("kontrol çalışmalı");
+    assert!(result.is_none());
+}
+
+#[test]
+fn scan_pentest_exposed_files_finds_a_real_exposed_env_file_and_ignores_soft_404s() {
+    let port = start_routing_http_server(vec![
+        ("/", 200, "", "<html>ana sayfa</html>"),
+        (
+            "/.env",
+            200,
+            "",
+            "DATABASE_URL=postgres://user:pass@localhost/db\nAPI_KEY=abc123\n",
+        ),
+        // .git/HEAD için sunucu "her şeye 200" veren bir soft-404 döndürüyor — içerik imzası
+        // uymadığı için bir bulgu OLMAMALI (yanlış pozitif testi).
+        (
+            "/.git/HEAD",
+            200,
+            "",
+            "<html>404 sayfası ama 200 dönüyor</html>",
+        ),
+    ]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let findings = runtime
+        .scan_pentest_exposed_files("127.0.0.1", false, Some(port))
+        .expect("tarama çalışmalı");
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].path, "/.env");
+}
+
+#[test]
+fn fingerprint_pentest_technology_captures_a_real_server_header() {
+    let port = start_routing_http_server(vec![(
+        "/",
+        200,
+        "Server: nginx/1.18.0\r\n",
+        "<html>ana sayfa</html>",
+    )]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let fingerprint = runtime
+        .fingerprint_pentest_technology("127.0.0.1", false, Some(port))
+        .expect("çıkarım çalışmalı");
+    assert_eq!(
+        fingerprint.headers.get("server"),
+        Some(&"nginx/1.18.0".to_string())
+    );
+}
+
+/// TLS bağlantı kontrolünün "başarısız" tarafını GERÇEKTEN tetikliyoruz: düz HTTP konuşan bir
+/// sunucuya `https://` ile bağlanmaya çalışmak, gerçek bir TLS handshake başarısızlığı üretir —
+/// sahte/simüle bir hata değil, gerçek bir bağlantı denemesinin gerçek sonucu.
+#[test]
+fn check_pentest_tls_connectivity_reports_a_real_failure_against_a_plain_http_server() {
+    let port = start_routing_http_server(vec![("/", 200, "", "ok")]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let result = runtime
+        .check_pentest_tls_connectivity("127.0.0.1", Some(port))
+        .expect("kontrolün kendisi bir Result::Err değil, bir sonuç döndürmeli");
+    assert!(!result.tls_connection_succeeded);
+    assert!(result.failure_detail.is_some());
+}
+
+/// F7.5'in tavan gerekçesi: bu kontroller yalnız normal bir tarayıcının yapacağı türden
+/// salt-okunur GET istekleri gönderiyor, bu yüzden SAFE (en düşük) tavanlı bir scope bile bunlara
+/// izin vermeli — F7.4'ün ACTIVE gerektiren maddelerinden (port tarama, replay, JS keşfi) farkı.
+#[test]
+fn f75_checks_succeed_under_a_safe_ceiling_scope_unlike_active_only_checks() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope = active_mode_scope_for("127.0.0.1");
+    scope.maximum_mode = PentestMode::Safe;
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let port = start_routing_http_server(vec![("/", 200, "", "<html>ana sayfa</html>")]);
+    assert!(
+        runtime
+            .fingerprint_pentest_technology("127.0.0.1", false, Some(port))
+            .is_ok(),
+        "SAFE tavanlı scope, SAFE talep eden bir kontrolü reddetmemeli"
+    );
+}
+
+#[test]
+fn scan_pentest_exposed_files_requires_an_active_scope() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .scan_pentest_exposed_files("app.example.test", true, None)
+        .expect_err("aktif scope yokken reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}
