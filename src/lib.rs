@@ -170,6 +170,27 @@ pub enum PentestMode {
     Destructive,
 }
 
+impl PentestMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PentestMode::Safe => "safe",
+            PentestMode::Active => "active",
+            PentestMode::Intrusive => "intrusive",
+            PentestMode::Destructive => "destructive",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "safe" => Some(PentestMode::Safe),
+            "active" => Some(PentestMode::Active),
+            "intrusive" => Some(PentestMode::Intrusive),
+            "destructive" => Some(PentestMode::Destructive),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PentestScope {
     pub schema_version: u16,
@@ -179,6 +200,36 @@ pub struct PentestScope {
     pub expires_at: u64,
     pub maximum_mode: PentestMode,
     pub max_runtime_seconds: u32,
+}
+
+/// F7.1 "Çoklu program/scope yönetimi: aktif scope her zaman açıkça gösterilir; bir programın
+/// scope'u yüklüyken yanlışlıkla başka bir programın hedefine dokunma riski engellenir."
+///
+/// A named, persisted scope plus its lifecycle state. `PentestScope` itself stays the immutable
+/// authorization contract exactly as it was recorded; revocation is tracked here as a separate
+/// event rather than by mutating the scope, the same way the rest of JARVIS treats history as
+/// append-only (the audit hash-chain never edits a past entry either).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPentestScope {
+    /// The program/engagement label the user chose (e.g. "hackerone-acme-corp"); not part of
+    /// the authorization itself, only how it is referred to locally.
+    pub name: String,
+    pub scope: PentestScope,
+    /// At most one stored scope is active at a time — this is the guard against accidentally
+    /// probing program B's assets while program A's scope is the one you meant to be using.
+    pub is_active: bool,
+    pub revoked_at: Option<u64>,
+    pub revoked_reason: Option<String>,
+}
+
+impl StoredPentestScope {
+    /// A scope is usable right now only if it is not revoked. Natural expiry is still checked
+    /// separately by `validate_pentest_scope`/`authorize_pentest_target` — this only covers the
+    /// *explicit* revoke path, which can happen before expiry (a program pulls out, a mistake is
+    /// found in the authorization, the user changes their mind).
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

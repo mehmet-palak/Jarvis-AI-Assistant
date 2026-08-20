@@ -1057,7 +1057,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
 }
 
 #[test]
@@ -4161,7 +4161,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -5402,4 +5402,178 @@ fn the_real_database_reports_its_measurement_state_honestly() {
     println!("uyarı      : {notice:?}");
     // Sözleşme: ikisi tutarlı olmalı — ölçülmüşse uyarı yok, ölçülmemişse uyarı var.
     assert_eq!(measured, notice.is_none());
+}
+
+// --- F7.1: çoklu program/scope yönetimi + revoke ---------------------------------------------
+
+fn stored_scope(name: &str) -> (SqliteStore, PentestScope) {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let scope = valid_pentest_scope();
+    store
+        .save_pentest_scope(name, &scope)
+        .unwrap_or_else(|error| panic!("{name} kaydedilemedi: {error}"));
+    (store, scope)
+}
+
+/// F7.1 "aktif scope her zaman açıkça gösterilir": hiç scope aktif edilmemişken açık bir "yok"
+/// dönmeli — sessizce ilk kaydı varsayılan aktif saymak, kullanıcının hiç seçmediği bir
+/// programa karşı test etmiş gibi davranmak olurdu.
+#[test]
+fn no_scope_is_active_until_explicitly_activated() {
+    let (store, _scope) = stored_scope("hackerone-acme");
+    assert!(store.active_pentest_scope().expect("sorgu").is_none());
+
+    store
+        .set_active_pentest_scope("hackerone-acme")
+        .expect("aktif edilebilmeli");
+    let active = store
+        .active_pentest_scope()
+        .expect("sorgu")
+        .expect("şimdi aktif olmalı");
+    assert_eq!(active.name, "hackerone-acme");
+    assert!(!active.is_revoked());
+}
+
+/// F7.1'in asıl amacı: iki program aynı anda saklanabilir ama yalnız BİRİ aktif olabilir —
+/// diğerine geçmek öncekini otomatik pasifleştirir. Bu, "program A'nın scope'u yüklüyken
+/// yanlışlıkla program B'nin hedefine dokunma" riskinin doğrudan testi.
+#[test]
+fn activating_one_program_deactivates_the_other_no_cross_program_bleed() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope_a = valid_pentest_scope();
+    scope_a.targets = vec!["app.acme.test".into()];
+    let mut scope_b = valid_pentest_scope();
+    scope_b.targets = vec!["app.widgetco.test".into()];
+
+    store.save_pentest_scope("acme", &scope_a).expect("acme");
+    store
+        .save_pentest_scope("widgetco", &scope_b)
+        .expect("widgetco");
+
+    store.set_active_pentest_scope("acme").expect("acme aktif");
+    assert_eq!(store.active_pentest_scope().unwrap().unwrap().name, "acme");
+
+    store
+        .set_active_pentest_scope("widgetco")
+        .expect("widgetco aktif");
+    let active = store.active_pentest_scope().unwrap().unwrap();
+    assert_eq!(
+        active.name, "widgetco",
+        "yalnız en son aktif edilen aktif kalmalı"
+    );
+
+    // acme artık aktif değil ama silinmedi — hâlâ kayıtlı, yalnız pasif.
+    let acme = store.pentest_scope("acme").unwrap().unwrap();
+    assert!(!acme.is_active);
+}
+
+/// F7.1 "expiry/revoke": iptal doğal süre dolumundan (expires_at) BAĞIMSIZ, hemen etkili olmalı
+/// — program yetkiyi geri çekince süresi dolmamış olsa bile artık kullanılamaz.
+#[test]
+fn a_revoked_scope_cannot_authorize_even_before_its_natural_expiry() {
+    let (store, _scope) = stored_scope("acme");
+    store.set_active_pentest_scope("acme").expect("aktif");
+
+    store
+        .revoke_pentest_scope("acme", "program bug bounty'yi durdurdu")
+        .expect("iptal edilebilmeli");
+
+    let revoked = store.pentest_scope("acme").unwrap().unwrap();
+    assert!(revoked.is_revoked());
+    assert!(!revoked.is_active, "iptal aynı zamanda pasifleştirmeli");
+    assert!(store.active_pentest_scope().unwrap().is_none());
+}
+
+/// Bir kez iptal edilen scope tekrar aktif edilememeli — bu, iptalin bilinçli bir
+/// yetki-geri-çekme kararı olduğu, yanlışlıkla geri alınabilecek bir bayrak olmadığı anlamına
+/// gelir.
+#[test]
+fn a_revoked_scope_refuses_to_be_reactivated() {
+    let (store, _scope) = stored_scope("acme");
+    store
+        .revoke_pentest_scope("acme", "yanlış yetki belgesi")
+        .expect("iptal");
+    let error = store
+        .set_active_pentest_scope("acme")
+        .expect_err("iptal edilmiş scope aktif edilememeli");
+    assert!(
+        error.contains("revoked") || error.contains("revoke"),
+        "{error}"
+    );
+}
+
+/// İptal bir gerekçe zorunlu kılar — "neden iptal edildi" sonradan denetlenebilir olmalı,
+/// gerekçesiz bir iptal audit açısından işe yaramaz.
+#[test]
+fn revoking_without_a_reason_is_rejected() {
+    let (store, _scope) = stored_scope("acme");
+    assert!(store.revoke_pentest_scope("acme", "").is_err());
+    assert!(store.revoke_pentest_scope("acme", "   ").is_err());
+}
+
+/// Runtime::authorize_pentest_action — F7'nin gerçek giriş noktası. Hiç aktif scope yokken
+/// güvenli varsayılan: reddet, "özellik eksik" değil "yetki yok" hatası ver.
+#[test]
+fn runtime_denies_pentest_actions_when_no_scope_is_active() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .authorize_pentest_action("app.example.test", PentestMode::Safe)
+        .expect_err("aktif scope yokken reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}
+
+/// Aktif scope varken Runtime üzerinden gerçek bir yetkilendirme akışı: doğru hedef geçer,
+/// kapsam dışı hedef ve izin verilen modu aşan istek reddedilir — hepsi tek giriş noktasından.
+#[test]
+fn runtime_authorizes_through_the_single_active_scope_entry_point() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope = valid_pentest_scope();
+    scope.targets = vec!["app.example.test".into()];
+    scope.maximum_mode = PentestMode::Safe;
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+
+    let runtime = Runtime::with_store(store);
+    let authorized = runtime
+        .authorize_pentest_action("app.example.test", PentestMode::Safe)
+        .expect("kapsam içi hedef geçmeli");
+    assert_eq!(authorized.name, "acme");
+
+    assert!(runtime
+        .authorize_pentest_action("other.example.test", PentestMode::Safe)
+        .is_err());
+    assert!(runtime
+        .authorize_pentest_action("app.example.test", PentestMode::Intrusive)
+        .is_err());
+}
+
+/// Revoke edilen bir scope aktif olarak kaydedilmiş olsa bile Runtime seviyesinde artık
+/// yetkilendirme yapamamalı — çift katman (store + Runtime) savunması gerçekten çalışıyor mu.
+#[test]
+fn runtime_refuses_a_revoked_scope_even_if_it_was_the_active_one() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let scope = valid_pentest_scope();
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    store
+        .revoke_pentest_scope("acme", "program kapandı")
+        .expect("iptal");
+
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .authorize_pentest_action("app.example.test", PentestMode::Safe)
+        .expect_err("iptal edilmiş scope yetkilendirememeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}
+
+/// Geçersiz (ör. süresi dolmuş) bir scope kaydedilmeye çalışıldığında reddedilmeli — hatalı bir
+/// yetkinin diske yazılıp sonra "aktif" edilmesi mümkün olmamalı.
+#[test]
+fn saving_an_invalid_scope_is_rejected_before_it_ever_reaches_disk() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut expired = valid_pentest_scope();
+    expired.expires_at = 0;
+    assert!(store.save_pentest_scope("acme", &expired).is_err());
+    assert!(store.pentest_scope("acme").unwrap().is_none());
 }

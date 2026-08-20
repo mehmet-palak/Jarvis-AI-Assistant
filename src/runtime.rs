@@ -801,6 +801,43 @@ impl Runtime {
         Ok(Some(compare_model_config_runs(previous, current)))
     }
 
+    /// F7.1 — the single entry point any future pentest/security capability must call before
+    /// touching a target. There is deliberately no other way in: a caller cannot pass its own
+    /// `PentestScope` and get a decision, because that would let a stale or hand-typed scope
+    /// override whatever the user actually has active right now. Authorization always comes from
+    /// the stored *active* scope, exactly one of them, looked up fresh on every call — so
+    /// revoking or switching scopes takes effect immediately, with no cached decision anywhere.
+    ///
+    /// "No active scope" is a hard deny, not a missing-feature error: it is the correct, safe
+    /// answer when the user has not explicitly authorized anything yet.
+    pub fn authorize_pentest_action(
+        &self,
+        target: &str,
+        requested_mode: PentestMode,
+    ) -> Result<StoredPentestScope, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest authorization requires an attached local store".to_string())?;
+        let Some(active) = store.active_pentest_scope()? else {
+            return Err(
+                "no active pentest scope — authorize one with /pentest activate <isim> before testing anything"
+                    .to_string(),
+            );
+        };
+        // Defense in depth: `set_active_pentest_scope`/`revoke_pentest_scope` already keep these
+        // two facts from coexisting, but a security gate should never trust "it can't happen" —
+        // it should still refuse if it somehow did.
+        if active.is_revoked() {
+            return Err(format!(
+                "the active pentest scope '{}' has been revoked and cannot authorize anything",
+                active.name
+            ));
+        }
+        authorize_pentest_target(&active.scope, target, requested_mode)?;
+        Ok(active)
+    }
+
     /// SHA-256 of the exact system prompt this build sends. This is the "prompt version" the
     /// registry stores: a commit hash would not notice an uncommitted edit, and a version number
     /// would have to be remembered by hand.

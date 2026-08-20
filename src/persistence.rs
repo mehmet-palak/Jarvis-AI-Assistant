@@ -20,12 +20,12 @@ use crate::{
     reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
     reject_secret_like_workspace_document_name, serialize_embedding, sha256_hex,
     validate_feedback_candidate, validate_memory_record, validate_model_config_run,
-    validate_teacher_example, validate_workspace_document_content,
+    validate_pentest_scope, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     EmbeddingProvider, FeedbackCandidate, FeedbackReview, FeedbackSignal, MemoryNamespace,
-    MemoryProposal, MemoryRecord, ModelConfigRun, Task, TeacherExample, TrustLevel, VerifyStatus,
-    WorkspaceCitation, WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION,
-    MIN_RELEVANT_SIMILARITY,
+    MemoryProposal, MemoryRecord, ModelConfigRun, PentestMode, PentestScope, StoredPentestScope,
+    Task, TeacherExample, TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
+    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -50,7 +50,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 12;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -213,6 +213,19 @@ impl SqliteStore {
                 sensitivity TEXT NOT NULL,
                 provenance TEXT NOT NULL,
                 review TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pentest_scopes (
+                name TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                authorization_ref TEXT NOT NULL,
+                targets TEXT NOT NULL,
+                excluded_targets TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                maximum_mode TEXT NOT NULL,
+                max_runtime_seconds INTEGER NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                revoked_at INTEGER,
+                revoked_reason TEXT
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -290,6 +303,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (12, 'F6 feedback review queue')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (13, 'F7 named pentest scope registry')",
             [],
         )?;
         Ok(())
@@ -717,6 +734,182 @@ impl SqliteStore {
             .map_err(|error| error.to_string())?;
         if changed == 0 {
             return Err(format!("feedback candidate not found: {candidate_id}"));
+        }
+        Ok(())
+    }
+
+    /// F7.1 "Çoklu program/scope yönetimi". Validation happens here (through the single
+    /// policy-gate validator) for the same reason `record_model_config_run` does it here —
+    /// no future caller can persist an invalid scope by skipping the check. `INSERT OR REPLACE`
+    /// is deliberate: re-saving a scope under the same name (e.g. renewing an authorization)
+    /// updates it in place rather than requiring a separate "update" call, but never touches
+    /// `is_active`/`revoked_at` — those are their own explicit actions below, not side effects
+    /// of a save.
+    pub fn save_pentest_scope(&self, name: &str, scope: &PentestScope) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("pentest scope name is required".into());
+        }
+        validate_pentest_scope(scope)?;
+        let was_active: i64 = self
+            .connection
+            .query_row(
+                "SELECT is_active FROM pentest_scopes WHERE name = ?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO pentest_scopes(
+                    name, schema_version, authorization_ref, targets, excluded_targets,
+                    expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)",
+                rusqlite::params![
+                    name,
+                    scope.schema_version,
+                    scope.authorization_ref,
+                    scope.targets.join("\n"),
+                    scope.excluded_targets.join("\n"),
+                    scope.expires_at as i64,
+                    scope.maximum_mode.as_str(),
+                    scope.max_runtime_seconds,
+                    was_active,
+                ],
+            )
+            .map_err(|error| format!("pentest scope persist failed: {error}"))?;
+        Ok(())
+    }
+
+    pub fn pentest_scope(&self, name: &str) -> Result<Option<StoredPentestScope>, String> {
+        self.connection
+            .query_row(
+                "SELECT name, schema_version, authorization_ref, targets, excluded_targets,
+                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                 FROM pentest_scopes WHERE name = ?1",
+                rusqlite::params![name],
+                Self::row_to_stored_pentest_scope,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn pentest_scopes(&self) -> Result<Vec<StoredPentestScope>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT name, schema_version, authorization_ref, targets, excluded_targets,
+                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                 FROM pentest_scopes ORDER BY name ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], Self::row_to_stored_pentest_scope)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
+    }
+
+    fn row_to_stored_pentest_scope(row: &rusqlite::Row) -> SqlResult<StoredPentestScope> {
+        let targets: String = row.get(3)?;
+        let excluded_targets: String = row.get(4)?;
+        let maximum_mode: String = row.get(6)?;
+        let is_active: i64 = row.get(8)?;
+        Ok(StoredPentestScope {
+            name: row.get(0)?,
+            scope: PentestScope {
+                schema_version: row.get(1)?,
+                authorization_ref: row.get(2)?,
+                targets: targets
+                    .split('\n')
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                excluded_targets: excluded_targets
+                    .split('\n')
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                expires_at: row.get::<_, i64>(5)? as u64,
+                maximum_mode: PentestMode::parse(&maximum_mode).unwrap_or(PentestMode::Safe),
+                max_runtime_seconds: row.get(7)?,
+            },
+            is_active: is_active != 0,
+            revoked_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+            revoked_reason: row.get(10)?,
+        })
+    }
+
+    /// F7.1 "aktif scope her zaman açıkça gösterilir". Exactly one scope is active at a time —
+    /// clearing every row before setting the target one, in a single transaction, is what makes
+    /// "which program am I authorized against right now" a single unambiguous answer instead of
+    /// a set that could (through a missed code path) end up with zero or more than one.
+    /// Activating a revoked scope is refused: revocation is a deliberate deauthorization and
+    /// re-activating it would silently undo that decision.
+    pub fn set_active_pentest_scope(&self, name: &str) -> Result<(), String> {
+        let scope = self
+            .pentest_scope(name)?
+            .ok_or_else(|| format!("no stored pentest scope named '{name}'"))?;
+        if scope.is_revoked() {
+            return Err(format!(
+                "pentest scope '{name}' is revoked and cannot be reactivated"
+            ));
+        }
+        validate_pentest_scope(&scope.scope)?;
+        self.connection
+            .execute("UPDATE pentest_scopes SET is_active = 0", [])
+            .map_err(|error| error.to_string())?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE pentest_scopes SET is_active = 1 WHERE name = ?1",
+                rusqlite::params![name],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err(format!("no stored pentest scope named '{name}'"));
+        }
+        Ok(())
+    }
+
+    pub fn deactivate_pentest_scope(&self) -> Result<(), String> {
+        self.connection
+            .execute("UPDATE pentest_scopes SET is_active = 0", [])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn active_pentest_scope(&self) -> Result<Option<StoredPentestScope>, String> {
+        self.connection
+            .query_row(
+                "SELECT name, schema_version, authorization_ref, targets, excluded_targets,
+                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                 FROM pentest_scopes WHERE is_active = 1",
+                [],
+                Self::row_to_stored_pentest_scope,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    /// F7.1 "expiry/revoke". A revoke is its own event, not an edit to the original grant — the
+    /// authorization the user recorded stays exactly as it was; `revoked_at`/`revoked_reason`
+    /// are appended alongside it, mirroring how the audit hash-chain never rewrites a past
+    /// entry. Revoking an active scope also deactivates it immediately: a revoked scope must
+    /// never be the answer to "what am I authorized against right now."
+    pub fn revoke_pentest_scope(&self, name: &str, reason: &str) -> Result<(), String> {
+        if reason.trim().is_empty() {
+            return Err("revoking a pentest scope requires a reason".into());
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE pentest_scopes SET revoked_at = ?2, revoked_reason = ?3, is_active = 0
+                 WHERE name = ?1",
+                rusqlite::params![name, now_epoch() as i64, reason],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err(format!("no stored pentest scope named '{name}'"));
         }
         Ok(())
     }
