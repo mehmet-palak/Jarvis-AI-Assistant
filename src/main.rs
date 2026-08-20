@@ -1,6 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -120,6 +120,12 @@ struct App {
     /// F6: bu oturumda işaretlenmiş dataset örnekleri (silinmiş/zehirli). Export'a veriliyor;
     /// marker uygunluğu ezdiği için işaretli bir örnek hiçbir export'a giremiyor.
     dataset_markers: Vec<jarvis_core::DatasetMarker>,
+    /// Seçim modu: fare yakalama bırakılmış, terminalin kendi metin seçimi çalışıyor ve
+    /// seçilen metin otomatik panoya aktarılıyor.
+    selection_mode: bool,
+    /// Seçim modundayken en son görülen birincil seçim (PRIMARY). Değiştiğinde panoya
+    /// kopyalanıyor; aynı içeriği tekrar tekrar yazmamak için saklanıyor.
+    last_primary_selection: String,
     /// F5 konuşma modu: sıradaki yanıt sesli okunacak mı. Soru sesle geldiyse `true` oluyor —
     /// kanal isteğin kendisinden belli olduğu için kullanıcının ayrıca bir ayar açması gerekmiyor.
     speak_next_reply: bool,
@@ -169,6 +175,8 @@ impl App {
             speech: jarvis_core::SpeechSettings::default(),
             dataset_markers: Vec::new(),
             voice_draft: None,
+            selection_mode: false,
+            last_primary_selection: String::new(),
             speak_next_reply: false,
             pending_patch: None,
             pending_patch_note: None,
@@ -583,6 +591,37 @@ fn run_golden_set_offline_safe(
     summary
 }
 
+/// Seçim modundayken terminalin birincil seçimini (PRIMARY) panoya yansıtır.
+///
+/// Terminal, fareyle seçilen metni kendiliğinden PRIMARY'ye koyuyor; ama `Ctrl+V` CLIPBOARD'dan
+/// yapıştırıyor ve ikisi ayrı tamponlar. Bu yüzden kullanıcı "seçtim ama yapıştıramıyorum"
+/// durumuna düşüyordu. Burada seçilen metin CLIPBOARD'a kopyalanıyor, yani seçmek = kopyalamak.
+///
+/// Yalnız seçim modunda çalışıyor. PRIMARY sistem geneli bir tampon olduğu için sürekli
+/// izlemek, kullanıcının başka uygulamalarda seçtiklerini de kopyalamak olurdu — bu yüzden
+/// izleme kullanıcının açıkça açtığı bir moda bağlı ve mod kapanınca duruyor.
+fn mirror_primary_selection_to_clipboard(app: &mut App) {
+    if !app.selection_mode {
+        return;
+    }
+    let Ok(current) = primary_selection_text() else {
+        return;
+    };
+    if current.trim().is_empty() || current == app.last_primary_selection {
+        return;
+    }
+    app.last_primary_selection = current.clone();
+    match set_clipboard_text(&current) {
+        Ok(()) => {
+            app.status = format!(
+                "Seçilen {} karakter panoya kopyalandı.",
+                current.chars().count()
+            );
+        }
+        Err(error) => app.status = format!("Panoya kopyalanamadı: {error}"),
+    }
+}
+
 fn speak_text(app: &mut App, text: &str) {
     if app.speech.muted {
         return;
@@ -720,6 +759,7 @@ fn event_loop(
     let (sender, receiver) = mpsc::channel::<WorkerReply>();
     while app.running {
         refresh_model_state(&mut app, &provider);
+        mirror_primary_selection_to_clipboard(&mut app);
         while let Ok(reply) = receiver.try_recv() {
             if let Some(message) = app.messages.get_mut(reply.message_index) {
                 message.content = reply.content;
@@ -1203,6 +1243,60 @@ fn kill_to_start_from_cursor(input: &mut String, cursor: &mut usize) {
     let end = char_index_to_byte_index(input, *cursor);
     input.replace_range(0..end, "");
     *cursor = 0;
+}
+
+/// Metni panoya yazar. Okuma tarafı (`wl-paste`) zaten vardı, yazma tarafı yoktu — bu yüzden
+/// kullanıcı JARVIS'in ürettiği bir kodu dışarı çıkaramıyordu.
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("wl-copy çalıştırılamadı: {error}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "wl-copy girdisi açılamadı".to_string())?
+        .write_all(text.as_bytes())
+        .map_err(|error| format!("panoya yazılamadı: {error}"))?;
+    let status = child
+        .wait()
+        .map_err(|error| format!("wl-copy tamamlanamadı: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("wl-copy başarısız".into())
+    }
+}
+
+/// Bir yanıttaki ``` ile çevrili kod bloklarını çıkarır. `/copy kod` bunun için: kullanıcı
+/// genelde açıklamayı değil, kodu başka bir yere taşımak istiyor.
+fn extract_code_blocks(text: &str) -> String {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if inside {
+                blocks.push(current.trim_end().to_string());
+                current.clear();
+            }
+            inside = !inside;
+            continue;
+        }
+        if inside {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if inside && !current.trim().is_empty() {
+        // Kesilmiş (kapanmamış) bir blok da alınmalı: model token sınırına takıldığında kod
+        // yarıda kalıyor ve kullanıcının en çok ihtiyaç duyduğu şey tam da o oluyor.
+        blocks.push(current.trim_end().to_string());
+    }
+    blocks.join("\n\n")
 }
 
 fn clipboard_text() -> Result<String, String> {
@@ -3009,7 +3103,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Kopyalama: /copy (son yanıtın tamamını panoya kopyala), /copy kod (yalnız kod bloklarını), /select (fare seçim modunu aç-kapa — açıkken fareyle seçtiğin her şey otomatik panoya kopyalanır, ama tekerlek kaydırma geçici olarak kapanır; PgUp/PgDn çalışmaya devam eder). Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -3116,6 +3210,65 @@ fn submit(
                     .to_string(),
             );
             app.push_system(lines.join("\n"));
+            return;
+        }
+        "/copy" | "/copy kod" | "/copy code" => {
+            let want_code_only = input.as_str() != "/copy";
+            let Some(last) = app
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == MessageRole::Jarvis)
+            else {
+                app.push_system("Kopyalanacak bir JARVIS yanıtı yok.");
+                return;
+            };
+            let payload = if want_code_only {
+                let code = extract_code_blocks(&last.content);
+                if code.trim().is_empty() {
+                    app.push_system("Son yanıtta kod bloğu yok. Tümünü kopyalamak için: /copy");
+                    return;
+                }
+                code
+            } else {
+                last.content.clone()
+            };
+            let characters = payload.chars().count();
+            match set_clipboard_text(&payload) {
+                Ok(()) => app.push_system(format!(
+                    "Panoya kopyalandı ({characters} karakter{}). Ctrl+V ile yapıştırabilirsin.",
+                    if want_code_only { ", yalnız kod" } else { "" }
+                )),
+                Err(error) => app.push_system(format!("Panoya kopyalanamadı: {error}")),
+            }
+            return;
+        }
+        "/select" => {
+            // Fare yakalama açıkken terminal kendi metin seçimini yapamıyor — olaylar
+            // uygulamaya gidiyor. Bu yüzden seçim modu yakalamayı bırakıyor: seçmeyi
+            // terminalin kendi (zaten test edilmiş) mekanizması yapıyor, biz yalnız sonucu
+            // panoya taşıyoruz. Karşılığında tekerlek kaydırma geçici olarak kapanıyor —
+            // klavye kaydırması (PgUp/PgDn/Home/End) çalışmaya devam ediyor.
+            app.selection_mode = !app.selection_mode;
+            let result = if app.selection_mode {
+                execute!(io::stdout(), DisableMouseCapture)
+            } else {
+                execute!(io::stdout(), EnableMouseCapture)
+            };
+            if let Err(error) = result {
+                app.selection_mode = !app.selection_mode;
+                app.push_system(format!("Fare modu değiştirilemedi: {error}"));
+                return;
+            }
+            if app.selection_mode {
+                app.last_primary_selection = primary_selection_text().unwrap_or_default();
+                app.push_system(
+                    "SEÇİM MODU AÇIK — fareyle seç, seçtiğin şey otomatik panoya kopyalanır. Kapatmak için tekrar /select (tekerlek kaydırma o zaman geri gelir; şimdilik PgUp/PgDn kullan)."
+                        .to_string(),
+                );
+            } else {
+                app.push_system("Seçim modu kapatıldı — fare tekerleği yeniden kaydırıyor.");
+            }
             return;
         }
         "/eval" => {

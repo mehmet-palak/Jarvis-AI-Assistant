@@ -187,6 +187,33 @@ fn stop_model_button_is_armed(armed_at: Option<Instant>) -> bool {
     armed_at.is_some_and(|armed_at| armed_at.elapsed() < STOP_MODEL_CONFIRM_WINDOW)
 }
 
+/// Bir yanıttaki ``` ile çevrili kod bloklarını çıkarır — TUI'deki `/copy kod` ile aynı
+/// sözleşme. Kapanmamış (model token sınırına takılıp kesilmiş) bir blok da alınıyor: kullanıcının
+/// en çok ihtiyaç duyduğu şey tam da o yarım kod oluyor.
+fn extract_code_blocks(text: &str) -> String {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if inside {
+                blocks.push(current.trim_end().to_string());
+                current.clear();
+            }
+            inside = !inside;
+            continue;
+        }
+        if inside {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if inside && !current.trim().is_empty() {
+        blocks.push(current.trim_end().to_string());
+    }
+    blocks.join("\n\n")
+}
+
 impl JarvisDesktop {
     fn new(
         runtime: Arc<Mutex<Runtime>>,
@@ -1211,7 +1238,28 @@ impl JarvisDesktop {
                         .fill(fill)
                         .stroke(Stroke::new(1.0_f32, COLOR_TEAL_DIM))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(label).size(12.0).strong().color(label_color));
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(label).size(12.0).strong().color(label_color),
+                                );
+                                // Metin zaten seçilebilir, ama seçip kopyalamak iki ayrı adım.
+                                // Kod içeren bir yanıtı dışarı taşımak en sık ihtiyaç, bu yüzden
+                                // tek tık: içerik doğrudan panoya gidiyor.
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Kopyala").clicked() {
+                                            ui.ctx().copy_text(message.content.clone());
+                                        }
+                                        if message.content.contains("```")
+                                            && ui.small_button("Kodu kopyala").clicked()
+                                        {
+                                            ui.ctx()
+                                                .copy_text(extract_code_blocks(&message.content));
+                                        }
+                                    },
+                                );
+                            });
                             ui.add(egui::Label::new(&message.content).selectable(true).wrap());
                         });
                     ui.add_space(7.0);

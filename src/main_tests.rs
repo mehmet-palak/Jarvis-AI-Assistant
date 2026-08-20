@@ -1,7 +1,7 @@
 use super::{
     apply_history_key_scroll, apply_history_mouse_scroll, backspace_at_cursor, build_input_lines,
     cursor_visual_position, delete_forward_at_cursor, delete_previous_word, draft_rows,
-    embedding_attach_decision, history_line_count, history_lines, input_view,
+    embedding_attach_decision, extract_code_blocks, history_line_count, history_lines, input_view,
     insert_char_at_cursor, insert_pasted_text_at_cursor, is_clipboard_paste_shortcut,
     is_delete_previous_word_shortcut, is_forward_delete_shortcut, is_insert_newline_shortcut,
     is_kill_to_end_shortcut, is_kill_to_start_shortcut, is_move_to_end_shortcut,
@@ -1851,4 +1851,48 @@ fn embedding_service_is_started_on_demand_only_when_rag_is_actually_in_use() {
          yoksa hibrit retrieval sessizce hiç çalışmaz"
     );
     assert_eq!(embedding_attach_decision(true, 12), EmbeddingAttach::Attach);
+}
+
+/// Kullanıcı JARVIS'in ürettiği kodu dışarı çıkaramıyordu: TUI'de fare yakalama açık olduğu
+/// için terminalin kendi seçimi çalışmıyor, panoya yazma yolu da yoktu. `/copy kod` bu boşluğu
+/// kapatıyor — en sık ihtiyaç açıklamayı değil kodu taşımak.
+#[test]
+fn code_blocks_can_be_extracted_from_a_reply_for_copying() {
+    let reply = "İşte sınıf:\n\n```cpp\nclass Q {\n    int x;\n};\n```\n\nKullanımı kolay.";
+    let code = extract_code_blocks(reply);
+    assert_eq!(code, "class Q {\n    int x;\n};");
+    // Anlatı kısmı kopyalanmamalı — kullanıcı derleyiciye yapıştıracak.
+    assert!(!code.contains("İşte sınıf"));
+    assert!(!code.contains("Kullanımı kolay"));
+}
+
+/// Model token sınırına takıldığında kod bloğu KAPANMADAN kesiliyor (gerçek kullanımda oldu:
+/// C++ sınıfı `consume()` ortasında bitti). Kullanıcının en çok ihtiyaç duyduğu şey tam da o
+/// yarım kod; kapanmamış blok atılırsa elinde hiçbir şey kalmaz.
+#[test]
+fn an_unterminated_code_block_is_still_extracted() {
+    let truncated =
+        "İşte:\n\n```cpp\nvoid consume() {\n    std::unique_lock<std::mutex> lock(mtx_);";
+    let code = extract_code_blocks(truncated);
+    assert!(code.contains("void consume()"), "{code}");
+    assert!(code.contains("unique_lock"), "{code}");
+}
+
+/// Birden fazla blok varsa hepsi alınmalı, aralarında ayrım kalacak şekilde.
+#[test]
+fn multiple_code_blocks_are_joined_not_dropped() {
+    let reply = "Önce:\n```c\nint a;\n```\nSonra:\n```c\nint b;\n```";
+    let code = extract_code_blocks(reply);
+    assert!(code.contains("int a;"), "{code}");
+    assert!(code.contains("int b;"), "{code}");
+    assert!(!code.contains("Önce"), "{code}");
+}
+
+/// Kod bloğu olmayan bir yanıtta `/copy kod` boş dönmeli ki çağıran "kod yok" diyebilsin —
+/// sessizce tüm metni kopyalamak, kullanıcının derleyiciye açıklama yapıştırması demek olurdu.
+#[test]
+fn a_reply_without_code_yields_nothing_to_copy_as_code() {
+    assert!(extract_code_blocks("Sadece düz bir açıklama.")
+        .trim()
+        .is_empty());
 }
