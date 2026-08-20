@@ -134,7 +134,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 15;
+const CURRENT_SCHEMA_VERSION: i64 = 16;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -360,6 +360,11 @@ impl SqliteStore {
             "TEXT NOT NULL DEFAULT 'USER_ASSERTED'",
         )?;
         self.ensure_column("memories", "scope_id", "TEXT")?;
+        // F7.6 "Rapor öncesi yeniden doğrulama": hangi somut parametrenin (ör. `/.env` yolu)
+        // kontrol edildiğini kaydediyor — kategori + hedef tek başına yeterli değil, bazı
+        // kontrol türleri (açığa çıkmış dosya) tam olarak HANGİ yolun bulunduğunu bilmeden
+        // hassas bir şekilde yeniden test edilemez.
+        self.ensure_column("pentest_findings", "check_parameter", "TEXT")?;
         self.deduplicate_legacy_memory_records()?;
         self.backfill_legacy_audit_chain()?;
         if self.repair_concurrent_audit_chain()? {
@@ -426,6 +431,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (15, 'F7.6 pentest finding registry')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (16, 'F7.6 pentest finding check_parameter')",
             [],
         )?;
         Ok(())
@@ -1189,6 +1198,7 @@ impl SqliteStore {
     /// `reject_secret_like_workspace_document_content` ile taranıyor — bariz bir sır/kimlik bilgisi
     /// deseni (PEM anahtar başlığı, bilinen token öneki) içeren bir kanıt reddediliyor; çağıran
     /// önce kanıtı redakte etmeli (ör. "API_KEY=[REDACTED]").
+    #[allow(clippy::too_many_arguments)]
     pub fn record_pentest_finding(
         &self,
         scope_name: &str,
@@ -1197,6 +1207,7 @@ impl SqliteStore {
         title: &str,
         evidence: &str,
         severity_estimate: Risk,
+        check_parameter: Option<&str>,
     ) -> Result<PentestFinding, String> {
         reject_secret_like_workspace_document_content(evidence)?;
         let identity = format!("finding-v1|{scope_name}|{target}|{category}|{title}");
@@ -1206,12 +1217,13 @@ impl SqliteStore {
             .execute(
                 "INSERT INTO pentest_findings(
                     finding_id, scope_name, target, category, title, evidence, severity,
-                    status, recorded_at, confirmed_at, confirmation_evidence
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)
+                    status, recorded_at, confirmed_at, confirmation_evidence, check_parameter
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10)
                  ON CONFLICT(finding_id) DO UPDATE SET
                     evidence = excluded.evidence,
                     severity = excluded.severity,
-                    recorded_at = excluded.recorded_at",
+                    recorded_at = excluded.recorded_at,
+                    check_parameter = excluded.check_parameter",
                 rusqlite::params![
                     finding_id,
                     scope_name,
@@ -1222,6 +1234,7 @@ impl SqliteStore {
                     severity_estimate.as_str(),
                     PentestFindingStatus::Suspected.as_str(),
                     recorded_at,
+                    check_parameter,
                 ],
             )
             .map_err(|error| format!("pentest finding kaydı başarısız: {error}"))?;
@@ -1293,7 +1306,7 @@ impl SqliteStore {
         self.connection
             .query_row(
                 "SELECT finding_id, scope_name, target, category, title, evidence, severity,
-                        status, recorded_at, confirmed_at, confirmation_evidence
+                        status, recorded_at, confirmed_at, confirmation_evidence, check_parameter
                  FROM pentest_findings WHERE finding_id = ?1",
                 [finding_id],
                 Self::row_to_pentest_finding,
@@ -1308,7 +1321,7 @@ impl SqliteStore {
             .connection
             .prepare(
                 "SELECT finding_id, scope_name, target, category, title, evidence, severity,
-                        status, recorded_at, confirmed_at, confirmation_evidence
+                        status, recorded_at, confirmed_at, confirmation_evidence, check_parameter
                  FROM pentest_findings WHERE scope_name = ?1 ORDER BY recorded_at DESC",
             )
             .map_err(|error| error.to_string())?;
@@ -1335,6 +1348,7 @@ impl SqliteStore {
             recorded_at: row.get::<_, i64>(8)? as u64,
             confirmed_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
             confirmation_evidence: row.get(10)?,
+            check_parameter: row.get(11)?,
         })
     }
 

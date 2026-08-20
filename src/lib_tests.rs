@@ -1057,7 +1057,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 15);
+    assert_eq!(store.schema_version().unwrap(), 16);
 }
 
 #[test]
@@ -4161,7 +4161,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 15);
+    assert_eq!(store.schema_version().unwrap(), 16);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -6401,6 +6401,7 @@ fn record_pentest_finding_starts_as_suspected() {
             "Açığa çıkmış .env dosyası",
             "GET /.env -> 200, DATABASE_URL=... görüldü",
             Risk::High,
+            Some("/.env"),
         )
         .expect("kayıt çalışmalı");
     assert_eq!(finding.status, PentestFindingStatus::Suspected);
@@ -6421,6 +6422,7 @@ fn recording_the_same_finding_twice_updates_in_place_instead_of_duplicating() {
             "Açığa çıkmış .env dosyası",
             "ilk kanıt",
             Risk::Medium,
+            Some("/.env"),
         )
         .expect("ilk kayıt");
     let second = runtime
@@ -6430,6 +6432,7 @@ fn recording_the_same_finding_twice_updates_in_place_instead_of_duplicating() {
             "Açığa çıkmış .env dosyası",
             "güncellenmiş kanıt",
             Risk::High,
+            Some("/.env"),
         )
         .expect("ikinci kayıt");
 
@@ -6459,6 +6462,7 @@ fn record_pentest_finding_rejects_evidence_containing_an_obvious_secret() {
             "Açığa çıkmış AWS anahtarı",
             "AKIA1234567890ABCDEF görüldü",
             Risk::Critical,
+            None,
         )
         .expect_err("sır benzeri kanıt reddedilmeli");
     assert!(!error.is_empty());
@@ -6474,6 +6478,7 @@ fn record_pentest_finding_refuses_a_target_outside_scope() {
             "başlık",
             "kanıt",
             Risk::Low,
+            None,
         )
         .expect_err("scope dışı hedef reddedilmeli");
     assert!(
@@ -6490,6 +6495,7 @@ fn record_test_finding(runtime: &Runtime, target: &str) -> PentestFinding {
             "başlık",
             "ilk kanıt",
             Risk::Medium,
+            Some("/.env"),
         )
         .expect("kayıt")
 }
@@ -6557,4 +6563,151 @@ fn reject_pentest_finding_marks_it_rejected_without_deleting_it() {
         .expect("sorgu");
     assert_eq!(all.len(), 1, "bulgu silinmemeli, yalnız durumu değişmeli");
     assert_eq!(all[0].status, PentestFindingStatus::Rejected);
+}
+
+// --- F7.6: rapor öncesi yeniden doğrulama / düzeltme sonrası hedefli yeniden test ---------------
+
+/// F7.6'nın asıl iddiası: bulgu ile yeniden doğrulama arasında hedef GERÇEKTEN değişmiş olabilir
+/// — burada tam olarak bunu simüle ediyoruz. Aynı yerel sunucu portu, önce sızıntıyı sonra
+/// "düzeltilmiş" hâli döndürüyor; `revalidate_pentest_finding` bu ikisini doğru ayırt etmeli.
+#[test]
+fn revalidate_pentest_finding_detects_a_still_present_and_a_fixed_exposed_file() {
+    let leaking_port = start_routing_http_server(vec![(
+        "/.env",
+        200,
+        "",
+        "DATABASE_URL=postgres://user:pass@localhost/db\n",
+    )]);
+    let fixed_port = start_routing_http_server(vec![("/.env", 404, "", "not found")]);
+
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let finding = runtime
+        .record_pentest_finding(
+            "127.0.0.1",
+            pentest_safe_checks::FINDING_CATEGORY_EXPOSED_SENSITIVE_FILE,
+            "Açığa çıkmış .env dosyası",
+            "ilk kanıt",
+            Risk::High,
+            Some("/.env"),
+        )
+        .expect("kayıt");
+
+    let still_present = runtime
+        .revalidate_pentest_finding(&finding.finding_id, false, Some(leaking_port))
+        .expect("yeniden doğrulama çalışmalı");
+    assert_eq!(still_present, PentestFindingRevalidation::StillPresent);
+
+    let now_fixed = runtime
+        .revalidate_pentest_finding(&finding.finding_id, false, Some(fixed_port))
+        .expect("yeniden doğrulama çalışmalı");
+    assert_eq!(now_fixed, PentestFindingRevalidation::NoLongerPresent);
+}
+
+#[test]
+fn revalidate_pentest_finding_detects_a_still_present_subdomain_takeover() {
+    let port = start_routing_http_server(vec![(
+        "/",
+        200,
+        "",
+        "<html>NoSuchBucket - the specified bucket does not exist</html>",
+    )]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let finding = runtime
+        .record_pentest_finding(
+            "127.0.0.1",
+            pentest_safe_checks::FINDING_CATEGORY_SUBDOMAIN_TAKEOVER,
+            "Subdomain devralma riski",
+            "ilk kanıt",
+            Risk::Critical,
+            None,
+        )
+        .expect("kayıt");
+
+    let result = runtime
+        .revalidate_pentest_finding(&finding.finding_id, false, Some(port))
+        .expect("yeniden doğrulama çalışmalı");
+    assert_eq!(result, PentestFindingRevalidation::StillPresent);
+}
+
+#[test]
+fn revalidate_pentest_finding_requires_check_parameter_for_exposed_file_findings() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            pentest_safe_checks::FINDING_CATEGORY_EXPOSED_SENSITIVE_FILE,
+            "başlık",
+            "kanıt",
+            Risk::High,
+            None, // check_parameter kasıtlı olarak eksik
+        )
+        .expect("kayıt");
+    let error = runtime
+        .revalidate_pentest_finding(&finding.finding_id, true, None)
+        .expect_err("check_parameter olmadan yeniden doğrulama reddedilmeli");
+    assert!(error.contains("check_parameter"), "{error}");
+}
+
+#[test]
+fn revalidate_pentest_finding_reports_unsupported_for_an_unknown_category() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "idor",
+            "başlık",
+            "kanıt",
+            Risk::Medium,
+            None,
+        )
+        .expect("kayıt");
+    let result = runtime
+        .revalidate_pentest_finding(&finding.finding_id, true, None)
+        .expect("yeniden doğrulama çağrısının kendisi hata vermemeli");
+    assert_eq!(result, PentestFindingRevalidation::CheckNotSupported);
+}
+
+// --- F7.6: modelin rapor taslağı üretmesi ------------------------------------------------------
+
+#[test]
+fn draft_pentest_finding_report_requires_a_confirmed_finding_not_just_suspected() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test"); // hâlâ Suspected
+    let error = runtime
+        .draft_pentest_finding_report(&finding.finding_id, "özet", "adımlar", "etki", "düzeltme")
+        .expect_err("Suspected bir bulgu için rapor taslağı üretilememeli");
+    assert!(error.contains("confirmed"), "{error}");
+}
+
+#[test]
+fn draft_pentest_finding_report_rejects_an_incomplete_draft() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    runtime
+        .confirm_pentest_finding(&finding.finding_id, "yeniden üretme kanıtı", true)
+        .expect("doğrulama");
+    let error = runtime
+        .draft_pentest_finding_report(&finding.finding_id, "özet", "adımlar", "", "düzeltme")
+        .expect_err("eksik bölümlü taslak reddedilmeli");
+    assert!(error.contains("etki analizi"), "{error}");
+}
+
+#[test]
+fn draft_pentest_finding_report_succeeds_for_a_confirmed_finding_with_a_complete_draft() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    runtime
+        .confirm_pentest_finding(&finding.finding_id, "yeniden üretme kanıtı", true)
+        .expect("doğrulama");
+    let draft = runtime
+        .draft_pentest_finding_report(
+            &finding.finding_id,
+            "Hedefte açığa çıkmış bir .env dosyası bulundu.",
+            "1. GET /.env isteği gönder. 2. Yanıtı incele.",
+            "Veritabanı kimlik bilgileri sızabilir.",
+            "Sunucu yapılandırmasından .env dosyasına erişimi engelleyin.",
+        )
+        .expect("tam taslak kabul edilmeli");
+    assert_eq!(draft.finding_id, finding.finding_id);
+    assert_eq!(draft.severity_estimate, finding.severity_estimate);
 }

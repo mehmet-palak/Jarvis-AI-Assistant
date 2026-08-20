@@ -15,6 +15,7 @@ pub mod patch_generator;
 pub mod pentest_network_gate;
 pub mod pentest_recon;
 pub mod pentest_replay;
+pub mod pentest_reporting;
 pub mod pentest_safe_checks;
 mod persistence;
 mod policy;
@@ -362,6 +363,12 @@ pub struct PentestFinding {
     /// `"exposed_sensitive_file"`, `"idor"`) — F7.5/F7.4'ün kontrol adlarıyla hizalı olması
     /// önerilir ama zorunlu bir enum değil, yeni bulgu türleri kod değişikliği gerektirmesin diye.
     pub category: String,
+    /// Yalnız bazı kategoriler için dolu — `category` + `target` tek başına yeterli olmadığında
+    /// (ör. `exposed_sensitive_file`'da HANGİ yolun bulunduğu, `/.env` gibi) hassas bir yeniden
+    /// doğrulama için gereken somut parametre. F7.6'nın "rapor öncesi yeniden doğrulama"
+    /// maddesinin dayanağı — bu olmadan yalnız "bu kategoriden BİR ŞEY hâlâ var mı" gibi
+    /// belirsiz bir kontrol yapılabilirdi.
+    pub check_parameter: Option<String>,
     pub title: String,
     /// Ham kanıt metni — istek/cevap çiftleri, eşleşen imza, vb. `record_pentest_finding`
     /// bunu kaydetmeden önce bariz sır benzeri içeriğe karşı tarıyor (aynı kontrol, workspace RAG
@@ -375,6 +382,41 @@ pub struct PentestFinding {
     pub confirmed_at: Option<u64>,
     /// Yalnız `status == Confirmed` ise dolu — doğrulama sırasında toplanan taze kanıt.
     pub confirmation_evidence: Option<String>,
+}
+
+/// F7.6 "Rapor öncesi yeniden doğrulama" + "Düzeltme sonrası hedefli yeniden test" —
+/// `Runtime::revalidate_pentest_finding`'in döndüğü şey. İki ayrı plan maddesi AYNI mekanizmayı
+/// paylaşıyor: bulgu ile rapor yazma arasında hedef değişmiş olabilir (rapor öncesi) VEYA program
+/// "düzelttik, doğrular mısın" demiş olabilir (düzeltme sonrası) — her iki durumda da soru aynı:
+/// "bu bulgu hâlâ gerçekten orada mı".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PentestFindingRevalidation {
+    /// Kontrol tekrar çalıştırıldı ve bulgu hâlâ gözlemleniyor.
+    StillPresent,
+    /// Kontrol tekrar çalıştırıldı ve bulgu artık gözlemlenmiyor — düzeltilmiş olabilir (ya da
+    /// hedef geçici olarak erişilemez olabilir; bu ayrımı yapmak insanın işi, bu yalnız bir
+    /// sinyal).
+    NoLongerPresent,
+    /// Bu kategori için otomatik bir yeniden doğrulama kontrolü henüz yok — elle kontrol gerekir.
+    CheckNotSupported,
+}
+
+/// F7.6 "Modelin kendisi raporu yazabilmeli, iyi bir şekilde." — bir bulgunun gönderilmeye hazır
+/// rapor taslağı. Düzyazı bölümlerin KENDİSİ burada üretilmiyor (bu, model/sohbet zamanında
+/// olması gereken bir şey — sabit bir Rust şablonuna hardcode edilmiş metin, gerçek bir rapor
+/// yazma yeteneği DEĞİLDİR); bu yapı yalnız modelin doldurması gereken sözleşmeyi tanımlıyor ve
+/// `validate_pentest_report_draft_completeness` bunun mekanik olarak kontrol edilebilmesini
+/// sağlıyor (F7.6'nın kendi notu: "golden set'e yeni bir zor senaryo olarak eklenebilir").
+/// Asla kalıcı olarak saklanmıyor/gönderilmiyor — F4'ün patch akışındaki "önce göster, sonra
+/// onay al" deseniyle aynı, kullanıcı gözden geçirmeden JARVIS hiçbir yere göndermez.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestFindingReportDraft {
+    pub finding_id: String,
+    pub summary: String,
+    pub reproduction_steps: String,
+    pub impact_analysis: String,
+    pub suggested_fix: String,
+    pub severity_estimate: Risk,
 }
 
 /// F7.4 "Manuel test araçları": gönderilecek isteğin tam tanımı — bir kullanıcının/modelin "bu

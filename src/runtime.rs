@@ -1028,22 +1028,44 @@ impl Runtime {
         for (path, description, content_signature) in
             crate::pentest_safe_checks::sensitive_file_checks()
         {
-            let request = PentestHttpRequest {
-                method: "GET".into(),
-                path: path.to_string(),
-                headers: vec![],
-                body: vec![],
+            if Self::exposed_file_path_is_still_present(
+                target,
+                path,
+                *content_signature,
                 use_tls,
                 port,
-            };
-            let Ok(response) = crate::pentest_replay::send_http_request(target, &request) else {
-                continue;
-            };
-            if response.status == 200 && content_signature(&response.body) {
+            ) {
                 findings.push(PentestExposedFileFinding { path, description });
             }
         }
         Ok(findings)
+    }
+
+    /// Bir tek yolu kontrol eder — `scan_pentest_exposed_files`'ın döngüsü ve
+    /// `revalidate_pentest_finding`'in hassas yeniden doğrulaması BU tek fonksiyonu paylaşıyor,
+    /// aynı mantık iki kez yazılmadı. Ağ hatası (zaman aşımı vb.) sessizce "bulunamadı" sayılır —
+    /// çağıranların ikisi de bunu farklı ele alıyor (tarama atlar, yeniden doğrulama da "artık
+    /// yok" der; bu, hedefe geçici olarak ulaşılamamasını "düzeltildi" ile karıştırma riski taşır,
+    /// ama F7.6'nın kendi notu gereği amaç zaten yalnız "hâlâ var mı" sorusuna hızlı bir cevap).
+    fn exposed_file_path_is_still_present(
+        target: &str,
+        path: &str,
+        content_signature: fn(&[u8]) -> bool,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> bool {
+        let request = PentestHttpRequest {
+            method: "GET".into(),
+            path: path.to_string(),
+            headers: vec![],
+            body: vec![],
+            use_tls,
+            port,
+        };
+        let Ok(response) = crate::pentest_replay::send_http_request(target, &request) else {
+            return false;
+        };
+        response.status == 200 && content_signature(&response.body)
     }
 
     /// F7.3'ün kalan "teknoloji parmak izi" alt maddesi + F7.5'in CVE eşleştirmesinin ön koşulu.
@@ -1106,6 +1128,7 @@ impl Runtime {
         title: &str,
         evidence: &str,
         severity_estimate: Risk,
+        check_parameter: Option<&str>,
     ) -> Result<PentestFinding, String> {
         let active = self.authorize_pentest_action(target, PentestMode::Safe)?;
         let store = self
@@ -1119,6 +1142,7 @@ impl Runtime {
             title,
             evidence,
             severity_estimate,
+            check_parameter,
         )
     }
 
@@ -1158,6 +1182,116 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| "pentest findings require an attached local store".to_string())?
             .pentest_findings(scope_name)
+    }
+
+    /// F7.6 "Rapor öncesi yeniden doğrulama" + "Düzeltme sonrası hedefli yeniden test" — aynı
+    /// mekanizma, iki farklı zamanlama için (bkz. `PentestFindingRevalidation`'ın kendi notu).
+    /// Bulgunun `category`'sine göre F7.5'in İLGİLİ tek kontrolünü tekrar çalıştırıyor —
+    /// `scan_pentest_ports`/`scan_pentest_exposed_files` gibi TÜM taramayı değil, yalnız o bulguyu.
+    /// Hedefin hâlâ scope içinde olduğu (defense in depth, her yerde uygulanan ilke) yine
+    /// kontrol ediliyor.
+    pub fn revalidate_pentest_finding(
+        &self,
+        finding_id: &str,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> Result<PentestFindingRevalidation, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest findings require an attached local store".to_string())?;
+        let finding = store
+            .pentest_finding(finding_id)?
+            .ok_or_else(|| format!("'{finding_id}' adında bir bulgu yok"))?;
+        self.authorize_pentest_action(&finding.target, PentestMode::Safe)?;
+
+        match finding.category.as_str() {
+            pentest_safe_checks::FINDING_CATEGORY_SUBDOMAIN_TAKEOVER => {
+                let result =
+                    self.check_pentest_subdomain_takeover(&finding.target, use_tls, port)?;
+                Ok(if result.is_some() {
+                    PentestFindingRevalidation::StillPresent
+                } else {
+                    PentestFindingRevalidation::NoLongerPresent
+                })
+            }
+            pentest_safe_checks::FINDING_CATEGORY_TLS_CONNECTIVITY => {
+                let result = self.check_pentest_tls_connectivity(&finding.target, port)?;
+                Ok(if result.tls_connection_succeeded {
+                    PentestFindingRevalidation::NoLongerPresent
+                } else {
+                    PentestFindingRevalidation::StillPresent
+                })
+            }
+            pentest_safe_checks::FINDING_CATEGORY_EXPOSED_SENSITIVE_FILE => {
+                let Some(path) = finding.check_parameter.as_deref() else {
+                    return Err(
+                        "bu bulgu için hangi yolun kontrol edileceği kaydedilmemiş (check_parameter boş)"
+                            .into(),
+                    );
+                };
+                let Some((_, _, content_signature)) = pentest_safe_checks::sensitive_file_checks()
+                    .iter()
+                    .find(|(candidate_path, ..)| *candidate_path == path)
+                else {
+                    return Err(format!(
+                        "'{path}' F7.5'in bilinen hassas dosya listesinde değil, yeniden doğrulanamıyor"
+                    ));
+                };
+                let still_present = Self::exposed_file_path_is_still_present(
+                    &finding.target,
+                    path,
+                    *content_signature,
+                    use_tls,
+                    port,
+                );
+                Ok(if still_present {
+                    PentestFindingRevalidation::StillPresent
+                } else {
+                    PentestFindingRevalidation::NoLongerPresent
+                })
+            }
+            _ => Ok(PentestFindingRevalidation::CheckNotSupported),
+        }
+    }
+
+    /// F7.6 "Modelin kendisi raporu yazabilmeli, iyi bir şekilde." Düzyazı bölümlerin kendisi
+    /// çağırandan (model) geliyor — bu yalnız iki koruma ekliyor: (1) yalnız `Confirmed`
+    /// durumundaki bir bulgu için taslak üretilebilir (bir `Suspected` şüphe için "göndermeye
+    /// hazır" bir rapor yazmak, F7.7'nin `confirm_finding` sözleşmesini atlamak olurdu), (2)
+    /// döndürülen taslak `validate_pentest_report_draft_completeness`'ten geçmek ZORUNDA — eksik
+    /// bir bölümle üretilen bir taslak asla döndürülmüyor.
+    pub fn draft_pentest_finding_report(
+        &self,
+        finding_id: &str,
+        summary: &str,
+        reproduction_steps: &str,
+        impact_analysis: &str,
+        suggested_fix: &str,
+    ) -> Result<PentestFindingReportDraft, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest findings require an attached local store".to_string())?;
+        let finding = store
+            .pentest_finding(finding_id)?
+            .ok_or_else(|| format!("'{finding_id}' adında bir bulgu yok"))?;
+        if finding.status != PentestFindingStatus::Confirmed {
+            return Err(format!(
+                "yalnız doğrulanmış (confirmed) bulgular için rapor taslağı üretilebilir — '{finding_id}' şu an '{}' durumunda",
+                finding.status.as_str()
+            ));
+        }
+        let draft = PentestFindingReportDraft {
+            finding_id: finding_id.to_string(),
+            summary: summary.to_string(),
+            reproduction_steps: reproduction_steps.to_string(),
+            impact_analysis: impact_analysis.to_string(),
+            suggested_fix: suggested_fix.to_string(),
+            severity_estimate: finding.severity_estimate,
+        };
+        crate::pentest_reporting::validate_pentest_report_draft_completeness(&draft)?;
+        Ok(draft)
     }
 
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
