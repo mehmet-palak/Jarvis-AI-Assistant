@@ -23,9 +23,9 @@ use crate::{
     validate_pentest_scope, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     EmbeddingProvider, FeedbackCandidate, FeedbackReview, FeedbackSignal, MemoryNamespace,
-    MemoryProposal, MemoryRecord, ModelConfigRun, PentestFinding, PentestFindingStatus,
-    PentestMode, PentestScope, Risk, StoredPentestAsset, StoredPentestScope, Task, TeacherExample,
-    TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
+    MemoryProposal, MemoryRecord, ModelConfigRun, PentestCoverageEntry, PentestFinding,
+    PentestFindingStatus, PentestMode, PentestScope, Risk, StoredPentestAsset, StoredPentestScope,
+    Task, TeacherExample, TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
     CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
 };
 
@@ -134,7 +134,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 16;
+const CURRENT_SCHEMA_VERSION: i64 = 17;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -337,6 +337,15 @@ impl SqliteStore {
                 recorded_at INTEGER NOT NULL,
                 confirmed_at INTEGER,
                 confirmation_evidence TEXT
+            );
+            CREATE TABLE IF NOT EXISTS pentest_coverage (
+                scope_name TEXT NOT NULL,
+                target TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                parameter TEXT NOT NULL,
+                vulnerability_class TEXT NOT NULL,
+                tested_at INTEGER NOT NULL,
+                PRIMARY KEY (scope_name, target, endpoint, parameter, vulnerability_class)
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -435,6 +444,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (16, 'F7.6 pentest finding check_parameter')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (17, 'F7.7 pentest coverage matrix')",
             [],
         )?;
         Ok(())
@@ -1350,6 +1363,84 @@ impl SqliteStore {
             confirmation_evidence: row.get(10)?,
             check_parameter: row.get(11)?,
         })
+    }
+
+    /// F7.7 "Kapsam matrisi": bir `(hedef, endpoint, parametre, zafiyet_sınıfı)` kombinasyonunun
+    /// test edildiğini kaydeder. `INSERT OR REPLACE` — aynı kombinasyon tekrar test edilirse
+    /// yalnız `tested_at` tazelenir, yeni satır oluşmaz (bir kombinasyon ya test edilmiştir ya
+    /// edilmemiştir, "kaç kez" bu tablonun sorusu değil).
+    pub fn record_pentest_coverage(
+        &self,
+        scope_name: &str,
+        target: &str,
+        endpoint: &str,
+        parameter: &str,
+        vulnerability_class: &str,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO pentest_coverage(
+                    scope_name, target, endpoint, parameter, vulnerability_class, tested_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    scope_name,
+                    target,
+                    endpoint,
+                    parameter,
+                    vulnerability_class,
+                    now_epoch() as i64,
+                ],
+            )
+            .map_err(|error| format!("pentest coverage kaydı başarısız: {error}"))?;
+        Ok(())
+    }
+
+    /// Belirli bir kombinasyonun daha önce test edilip edilmediği — "sıradaki iş" önerisinin
+    /// zaten yapılmışı önermemesi için.
+    pub fn pentest_coverage_contains(
+        &self,
+        scope_name: &str,
+        target: &str,
+        endpoint: &str,
+        parameter: &str,
+        vulnerability_class: &str,
+    ) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT 1 FROM pentest_coverage
+                 WHERE scope_name = ?1 AND target = ?2 AND endpoint = ?3
+                   AND parameter = ?4 AND vulnerability_class = ?5",
+                rusqlite::params![scope_name, target, endpoint, parameter, vulnerability_class],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Bir scope'un tüm kapsam kayıtları — en son test edilen önce.
+    pub fn pentest_coverage(&self, scope_name: &str) -> Result<Vec<PentestCoverageEntry>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT scope_name, target, endpoint, parameter, vulnerability_class, tested_at
+                 FROM pentest_coverage WHERE scope_name = ?1 ORDER BY tested_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([scope_name], |row| {
+                Ok(PentestCoverageEntry {
+                    scope_name: row.get(0)?,
+                    target: row.get(1)?,
+                    endpoint: row.get(2)?,
+                    parameter: row.get(3)?,
+                    vulnerability_class: row.get(4)?,
+                    tested_at: row.get::<_, i64>(5)? as u64,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
     }
 
     /// F6 registry write path. Validation happens here (through the single policy-gate

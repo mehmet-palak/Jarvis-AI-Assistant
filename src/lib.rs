@@ -217,6 +217,58 @@ impl PentestMode {
     }
 }
 
+/// F7.7 "Otonomi modeli netleştirmesi": `PentestMode` "NE yapılabilir" sorusunu cevaplıyor
+/// (safe/active/...); bu, ona DİK ikinci eksen — "NE KADAR gözetim gerekir". İkisi birbirinin
+/// yerine geçmez: bir eylem hem `Active` (ne) hem `Manual` (her adımda onay iste) olabilir.
+/// `Ord` bilinçli: daha yüksek değer = daha az insan gözetimi = daha fazla otomatik yürütme
+/// yetkisi, tıpkı `PentestMode`'un daha yüksek = daha invaziv olması gibi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PentestAutonomy {
+    /// Her tool çağrısından önce açık insan onayı. En güvenli, en yavaş — varsayılan.
+    Manual,
+    /// Planı model kurar, kullanıcı onaylar; düşük riskli read-only adımlar (SAFE) otomatik yürür,
+    /// hedefe gerçekten dokunan (ACTIVE+) her adım yine onay ister.
+    SupervisedAutonomy,
+    /// Yazılı scope + süre + bütçe önceden tanımlı; worker yalnız allowlist'teki capability'leri
+    /// kullanır, scope dışı/yüksek riskli (INTRUSIVE+) bir adımda otomatik durur. En fazla
+    /// otomasyon, yalnız önceden sıkıca sınırlanmış bir kutu içinde.
+    BoundedAutonomy,
+}
+
+impl PentestAutonomy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PentestAutonomy::Manual => "manual",
+            PentestAutonomy::SupervisedAutonomy => "supervised_autonomy",
+            PentestAutonomy::BoundedAutonomy => "bounded_autonomy",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "manual" => Some(PentestAutonomy::Manual),
+            "supervised_autonomy" => Some(PentestAutonomy::SupervisedAutonomy),
+            "bounded_autonomy" => Some(PentestAutonomy::BoundedAutonomy),
+            _ => None,
+        }
+    }
+
+    /// İki eksenin birleşimi: verilen otonomi seviyesinde, verilen `PentestMode`'daki bir adım
+    /// insan onayı OLMADAN otomatik yürüyebilir mi? Bu, F7.7'nin "iki eksen birbirinin yerine
+    /// geçmez" ilkesinin somut kuralı — otonomi ne kadar yüksek olursa olsun, yeterince invaziv
+    /// bir adım her zaman onay ister.
+    pub fn allows_unattended(&self, action_mode: PentestMode) -> bool {
+        match self {
+            // Manual: hiçbir şey otomatik değil, en zararsız read-only adım bile onay ister.
+            PentestAutonomy::Manual => false,
+            // Supervised: yalnız gerçekten dokunmayan (SAFE) adımlar otomatik; ACTIVE+ onay ister.
+            PentestAutonomy::SupervisedAutonomy => action_mode <= PentestMode::Safe,
+            // Bounded: önceden sınırlanmış kutu içinde ACTIVE'e kadar otomatik; INTRUSIVE+ durur.
+            PentestAutonomy::BoundedAutonomy => action_mode <= PentestMode::Active,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PentestScope {
     pub schema_version: u16,
@@ -270,6 +322,22 @@ impl StoredPentestScope {
 /// F7.3 "Varlık envanteri kalıcı kaydı" — bir scope altında kaydedilmiş tek bir keşfedilmiş
 /// varlık (şimdilik yalnız alt alan adları; F7.3'ün diğer maddeleri, ör. port/servis keşfi,
 /// gelecekte aynı tabloya farklı bir `source` değeriyle yazacak, yeni bir tablo icat edilmeyecek).
+/// F7.7 "Kapsam matrisi (coverage tuple)": `(hedef, endpoint, parametre, zafiyet_sınıfı)`
+/// dörtlüsünün tek bir satırı — hangi kombinasyonun test EDİLDİĞİNİ kaydediyor. Bu, "sıradaki
+/// iş" önerisinin temeli: neyin test edilmediği, neyin edildiğini bilmeden görünmez. Bir bulgu
+/// (`PentestFinding`) "bir şey BULUNDU" der; bu ise "bir şey KONTROL EDİLDİ (bulunsun ya da
+/// bulunmasın)" der — ikisi ayrı, çünkü test edilip temiz çıkan bir kombinasyon da değerli
+/// bilgidir (aynı işi iki kez yapmamak için).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestCoverageEntry {
+    pub scope_name: String,
+    pub target: String,
+    pub endpoint: String,
+    pub parameter: String,
+    pub vulnerability_class: String,
+    pub tested_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPentestAsset {
     pub scope_name: String,

@@ -1312,6 +1312,72 @@ impl Runtime {
         )
     }
 
+    /// F7.7 "Kapsam matrisi": bir `(hedef, endpoint, parametre, zafiyet_sınıfı)` kombinasyonunun
+    /// test edildiğini kaydeder. Hedef, F7.1'in aynı tek giriş noktasından geçiyor (SAFE tavanı —
+    /// kayıt hedefe dokunmuyor ama scope dışı bir hedef için kapsam tutmak anlamsız/yanıltıcı
+    /// olurdu).
+    pub fn record_pentest_coverage(
+        &self,
+        target: &str,
+        endpoint: &str,
+        parameter: &str,
+        vulnerability_class: &str,
+    ) -> Result<(), String> {
+        let active = self.authorize_pentest_action(target, PentestMode::Safe)?;
+        self.store
+            .as_ref()
+            .ok_or_else(|| "pentest coverage requires an attached local store".to_string())?
+            .record_pentest_coverage(
+                &active.name,
+                target,
+                endpoint,
+                parameter,
+                vulnerability_class,
+            )
+    }
+
+    /// F7.7 "sıradaki iş önerisi yalnız ... daha önce test edilmemiş kombinasyonları önerir."
+    /// Verilen aday kombinasyonlardan, bu scope için HENÜZ test edilmemiş olanları döner —
+    /// zaten yapılmış işi önermemek için. Adaylar çağırandan geliyor (endpoint/parametre keşfi
+    /// F7.3'ün işi); bu yalnız "bunlardan hangisi yeni" sorusunu cevaplıyor.
+    pub fn untested_pentest_coverage(
+        &self,
+        target: &str,
+        candidate_endpoint_parameter_class_tuples: &[(String, String, String)],
+    ) -> Result<Vec<(String, String, String)>, String> {
+        let active = self.authorize_pentest_action(target, PentestMode::Safe)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest coverage requires an attached local store".to_string())?;
+        let mut untested = Vec::new();
+        for (endpoint, parameter, vulnerability_class) in candidate_endpoint_parameter_class_tuples
+        {
+            if !store.pentest_coverage_contains(
+                &active.name,
+                target,
+                endpoint,
+                parameter,
+                vulnerability_class,
+            )? {
+                untested.push((
+                    endpoint.clone(),
+                    parameter.clone(),
+                    vulnerability_class.clone(),
+                ));
+            }
+        }
+        Ok(untested)
+    }
+
+    /// Bir scope'un tüm kapsam kayıtları.
+    pub fn pentest_coverage(&self, scope_name: &str) -> Result<Vec<PentestCoverageEntry>, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "pentest coverage requires an attached local store".to_string())?
+            .pentest_coverage(scope_name)
+    }
+
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
     /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
     /// own split (a thin real-network wrapper around a pure, offline-tested function). Every F7.3

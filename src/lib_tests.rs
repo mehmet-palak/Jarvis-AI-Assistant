@@ -1057,7 +1057,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 16);
+    assert_eq!(store.schema_version().unwrap(), 17);
 }
 
 #[test]
@@ -4161,7 +4161,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 16);
+    assert_eq!(store.schema_version().unwrap(), 17);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -6751,4 +6751,105 @@ fn pentest_findings_for_report_excludes_program_disallowed_categories_but_keeps_
         .pentest_findings(&self_xss.scope_name)
         .expect("sorgu");
     assert_eq!(all.len(), 2, "dışlama bulguyu silmemeli");
+}
+
+// --- F7.7: otonomi modeli (ikinci eksen) -------------------------------------------------------
+
+/// F7.7'nin asıl iddiası: iki eksen birbirinin yerine geçmez. Otonomi ne kadar yüksek olursa
+/// olsun, yeterince invaziv bir adım her zaman onay ister — bu tabloyu doğrudan test ediyoruz.
+#[test]
+fn pentest_autonomy_axis_is_independent_of_the_mode_axis() {
+    // Manual: en zararsız read-only adım bile otomatik yürümez.
+    assert!(!PentestAutonomy::Manual.allows_unattended(PentestMode::Safe));
+
+    // Supervised: SAFE otomatik, ama ACTIVE+ onay ister.
+    assert!(PentestAutonomy::SupervisedAutonomy.allows_unattended(PentestMode::Safe));
+    assert!(!PentestAutonomy::SupervisedAutonomy.allows_unattended(PentestMode::Active));
+
+    // Bounded: ACTIVE'e kadar otomatik, ama INTRUSIVE+ durur.
+    assert!(PentestAutonomy::BoundedAutonomy.allows_unattended(PentestMode::Safe));
+    assert!(PentestAutonomy::BoundedAutonomy.allows_unattended(PentestMode::Active));
+    assert!(!PentestAutonomy::BoundedAutonomy.allows_unattended(PentestMode::Intrusive));
+    assert!(!PentestAutonomy::BoundedAutonomy.allows_unattended(PentestMode::Destructive));
+}
+
+#[test]
+fn pentest_autonomy_ordering_reflects_increasing_automation() {
+    assert!(PentestAutonomy::Manual < PentestAutonomy::SupervisedAutonomy);
+    assert!(PentestAutonomy::SupervisedAutonomy < PentestAutonomy::BoundedAutonomy);
+}
+
+#[test]
+fn pentest_autonomy_str_roundtrip() {
+    for autonomy in [
+        PentestAutonomy::Manual,
+        PentestAutonomy::SupervisedAutonomy,
+        PentestAutonomy::BoundedAutonomy,
+    ] {
+        assert_eq!(PentestAutonomy::parse(autonomy.as_str()), Some(autonomy));
+    }
+    assert_eq!(PentestAutonomy::parse("bogus"), None);
+}
+
+// --- F7.7: kapsam matrisi (coverage tuple) -----------------------------------------------------
+
+/// F7.7'nin asıl iddiası: "sıradaki iş" önerisi zaten test edilmiş bir kombinasyonu önermemeli.
+#[test]
+fn untested_pentest_coverage_returns_only_the_not_yet_tested_combinations() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    runtime
+        .record_pentest_coverage("app.example.test", "/api/users", "id", "idor")
+        .expect("kayıt");
+
+    let candidates = vec![
+        (
+            "/api/users".to_string(),
+            "id".to_string(),
+            "idor".to_string(),
+        ), // zaten test edildi
+        (
+            "/api/users".to_string(),
+            "role".to_string(),
+            "idor".to_string(),
+        ), // yeni parametre
+        (
+            "/api/orders".to_string(),
+            "id".to_string(),
+            "idor".to_string(),
+        ), // yeni endpoint
+    ];
+    let untested = runtime
+        .untested_pentest_coverage("app.example.test", &candidates)
+        .expect("sorgu");
+    assert_eq!(untested.len(), 2, "{untested:?}");
+    assert!(!untested.contains(&(
+        "/api/users".to_string(),
+        "id".to_string(),
+        "idor".to_string()
+    )));
+}
+
+#[test]
+fn recording_the_same_coverage_tuple_twice_does_not_duplicate() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    runtime
+        .record_pentest_coverage("app.example.test", "/api/users", "id", "idor")
+        .expect("ilk kayıt");
+    runtime
+        .record_pentest_coverage("app.example.test", "/api/users", "id", "idor")
+        .expect("ikinci kayıt");
+    let all = runtime.pentest_coverage("acme").expect("sorgu");
+    assert_eq!(all.len(), 1, "aynı dörtlü tek satır olmalı");
+}
+
+#[test]
+fn record_pentest_coverage_refuses_a_target_outside_scope() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .record_pentest_coverage("not-in-scope.example.test", "/x", "y", "idor")
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
 }
