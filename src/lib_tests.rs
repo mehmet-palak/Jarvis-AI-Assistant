@@ -6711,3 +6711,44 @@ fn draft_pentest_finding_report_succeeds_for_a_confirmed_finding_with_a_complete
     assert_eq!(draft.finding_id, finding.finding_id);
     assert_eq!(draft.severity_estimate, finding.severity_estimate);
 }
+
+/// F7.6 "Program-özel hariç tutulan bulgu sınıfları filtresi" — uçtan uca: iki farklı kategoride
+/// bulgu kaydedilip, biri program politikasınca dışlanınca rapor görünümünden çıkıyor ama
+/// envanterde kalıyor.
+#[test]
+fn pentest_findings_for_report_excludes_program_disallowed_categories_but_keeps_them_in_inventory()
+{
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "idor",
+            "Gerçek bir IDOR",
+            "kanıt",
+            Risk::High,
+            None,
+        )
+        .expect("idor kaydı");
+    let self_xss = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "self_xss",
+            "Program kabul etmiyor",
+            "kanıt",
+            Risk::Low,
+            None,
+        )
+        .expect("self_xss kaydı");
+
+    let for_report = runtime
+        .pentest_findings_for_report(&self_xss.scope_name, &["self_xss".to_string()])
+        .expect("filtre çalışmalı");
+    assert_eq!(for_report.len(), 1, "self_xss rapordan çıkarılmalı");
+    assert_eq!(for_report[0].category, "idor");
+
+    // Ama envanterde hâlâ iki bulgu var — dışlama silme değil.
+    let all = runtime
+        .pentest_findings(&self_xss.scope_name)
+        .expect("sorgu");
+    assert_eq!(all.len(), 2, "dışlama bulguyu silmemeli");
+}

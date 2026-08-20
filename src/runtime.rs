@@ -1294,6 +1294,24 @@ impl Runtime {
         Ok(draft)
     }
 
+    /// F7.6 "Program-özel hariç tutulan/düşük değerli bulgu sınıfları filtresi." Bir scope'un tüm
+    /// bulgularından, programın kabul etmediği kategorileri (ör. `"self_xss"`) çıkararak "rapora
+    /// girecekler" listesini döner. Bulguları SİLMİYOR — envanter olduğu gibi kalıyor, yalnız bu
+    /// görünüm süzülüyor (bir programın politikası değişebilir).
+    pub fn pentest_findings_for_report(
+        &self,
+        scope_name: &str,
+        excluded_categories: &[String],
+    ) -> Result<Vec<PentestFinding>, String> {
+        let all = self.pentest_findings(scope_name)?;
+        Ok(
+            crate::pentest_reporting::filter_findings_by_excluded_categories(
+                &all,
+                excluded_categories,
+            ),
+        )
+    }
+
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
     /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
     /// own split (a thin real-network wrapper around a pure, offline-tested function). Every F7.3

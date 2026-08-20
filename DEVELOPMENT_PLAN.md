@@ -912,7 +912,12 @@ Dördü de `PentestMode::Safe` (F7.1'in en düşük tavanı) ile yetkilendiriliy
   - **Dürüst kapsam:** Düzyazı bölümlerin KENDİSİ Rust'ta üretilmedi — sabit bir şablona hardcode edilmiş metin gerçek bir rapor yazma yeteneği olmazdı, bu model/sohbet zamanında olması gereken bir şey. Bunun yerine `PentestFindingReportDraft` sözleşmesi (özet, adım adım tekrar üretme, etki analizi, önerilen düzeltme, şiddet tahmini) ve `validate_pentest_report_draft_completeness` (plan metninin kendi önerdiği "mekanik kontrol") gerçek ve test edilmiş.
   - **İki koruma:** `Runtime::draft_pentest_finding_report` yalnız `Confirmed` durumundaki bir bulgu için taslak üretilmesine izin veriyor (bir `Suspected` şüphe için "göndermeye hazır" bir rapor yazmak, F7.7'nin `confirm_finding` sözleşmesini atlamak olurdu) VE döndürülen taslak eksiksizlik kontrolünden geçmek zorunda — eksik bir bölümle üretilen taslak asla döndürülmüyor. Gerçek testle kanıtlandı: `Suspected` bir bulgu reddediliyor, eksik bölümlü bir taslak reddediliyor, tam bir taslak kabul ediliyor.
   - **Test:** 3 (Runtime) + 4 (pentest_reporting.rs, saf mantık) = 7 yeni test.
-- [ ] Program-özel hariç tutulan/düşük değerli bulgu sınıfları filtresi (ör. "self-XSS kabul etmiyoruz") — program politikasından okunur, zaman kaybını önler.
+- [x] Program-özel hariç tutulan/düşük değerli bulgu sınıfları filtresi (ör. "self-XSS kabul etmiyoruz") — program politikasından okunur, zaman kaybını önler.
+  - **Kanıt:** `Runtime::pentest_findings_for_report` bir scope'un bulgularından, programın kabul etmediği kategorileri (`filter_findings_by_excluded_categories`, saf fonksiyon) çıkararak "rapora girecekler" listesini döner. Bulguyu SİLMİYOR — envanterde kalıyor, yalnız bu görünüm süzülüyor (bir programın politikası değişebilir). Gerçek testle kanıtlandı: `self_xss` kategorili bir bulgu rapordan çıkarılıyor ama envanterde iki bulgu da kalıyor.
+  - **Dürüst kapsam:** Hangi kategorilerin dışlanacağı çağırandan geliyor — program politikası METNİNİ otomatik ayrıştırmak (bir program sayfasını okuyup "self-XSS kabul edilmiyor" cümlesini çıkarmak) ayrı, henüz yapılmamış bir iş; burada politika kararı bir kategori listesi olarak zaten verilmiş kabul ediliyor.
+  - **Test:** 2 (saf filtre) + 1 (Runtime uçtan uca) = 3 yeni test.
+
+**F7.6 durumu:** Tüm maddeler tamamlandı. Program politikası metnini otomatik ayrıştırma dışında (yukarıda dürüst sınır olarak not edildi) F7.6 kapandı.
 
 #### F7.7 — Dış araç araştırmasından ve genişletilmiş veri planından alınan somut ekler
 
