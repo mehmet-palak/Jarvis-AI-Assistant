@@ -14,6 +14,7 @@ mod model_quality_eval;
 pub mod patch_generator;
 pub mod pentest_network_gate;
 pub mod pentest_recon;
+pub mod pentest_replay;
 mod persistence;
 mod policy;
 mod profile;
@@ -287,6 +288,48 @@ pub struct PentestEndpointDiscoveryResult {
     /// Bulunan, gerçekçi görünen endpoint yolları — "bulundu" anlamında, "erişilebilir/doğrulandı"
     /// anlamında değil (F7.7'nin kendi ayrımı, burada da geçerli).
     pub endpoints: Vec<String>,
+}
+
+/// F7.4 "Manuel test araçları": gönderilecek isteğin tam tanımı — bir kullanıcının/modelin "bu
+/// isteği değiştirip tekrar gönder" dediğinde elinde olması gereken her şey.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestHttpRequest {
+    /// `GET`, `POST`, `PUT`, `DELETE`, ... — büyük/küçük harf duyarlı değil, gönderilirken büyük
+    /// harfe çevriliyor.
+    pub method: String,
+    /// `/` ile başlamalı — tam bir URL değil, yalnız yol + varsa sorgu dizesi.
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// `false` ise `http://`, `true` ise `https://` kullanılır. Gerçek dünyada her pentest
+    /// hedefi TLS arkasında olmuyor; bu alan olmadan yalnız HTTPS hedefleri desteklenirdi.
+    pub use_tls: bool,
+}
+
+/// F7.4: gerçekten alınan cevap — durum kodu, başlıklar, gövde.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestHttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// F7.4 "cevapları karşılaştırma" — iki cevap arasındaki fark. Tam bir satır-satır diff motoru
+/// DEĞİL (o, ayrı ve daha büyük bir iş); yalnız "ne değişti" sorusuna hızlı, doğru bir ilk cevap:
+/// durum kodu değişti mi, hangi başlıklar eklendi/kaldırıldı/değişti, gövde birebir aynı mı ve ne
+/// kadar büyüklük farkı var.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestHttpResponseDiff {
+    pub status_changed: bool,
+    pub old_status: u16,
+    pub new_status: u16,
+    pub headers_added: Vec<(String, String)>,
+    pub headers_removed: Vec<(String, String)>,
+    /// `(başlık adı, eski değer, yeni değer)`.
+    pub headers_changed: Vec<(String, String, String)>,
+    pub body_identical: bool,
+    pub old_body_len: usize,
+    pub new_body_len: usize,
 }
 
 /// F7.3 "Pasif keşif" bir sorgunun sonucu — `Runtime::discover_pentest_assets_via_certificate_transparency`.

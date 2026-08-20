@@ -6104,3 +6104,57 @@ fn js_endpoint_discovery_requires_an_active_scope() {
         .expect_err("aktif scope yokken reddedilmeli");
     assert!(error.contains("no active pentest scope"), "{error}");
 }
+
+// --- F7.4: manuel test araçları (istek yakalama/değiştirme/tekrar gönderme) --------------------
+//
+// Gerçek bir ağ çağrısı gerektirmeyen testler: `authorize_pentest_action` her zaman
+// `send_http_request`'ten ÖNCE çalışıyor, bu yüzden reddedilme senaryoları hiç ağa çıkmıyor —
+// port taraması/JS keşfiyle aynı desen. Gerçek gönderim/alım yolu `pentest_replay.rs`'nin kendi
+// testlerinde (yerel bir HTTP sunucusuyla) zaten kanıtlandı.
+
+fn get_request(path: &str) -> PentestHttpRequest {
+    PentestHttpRequest {
+        method: "GET".into(),
+        path: path.into(),
+        headers: vec![],
+        body: vec![],
+        use_tls: false,
+    }
+}
+
+#[test]
+fn http_replay_requires_active_mode_not_just_safe() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope = active_mode_scope_for("app.example.test");
+    scope.maximum_mode = PentestMode::Safe;
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let error = runtime
+        .replay_pentest_http_request("app.example.test", &get_request("/api/users"))
+        .expect_err("SAFE tavanlı scope ACTIVE gerektiren isteğe izin vermemeli");
+    assert!(error.contains("exceeds the authorization scope"), "{error}");
+}
+
+#[test]
+fn http_replay_refuses_a_target_outside_scope() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .replay_pentest_http_request("not-in-scope.example.test", &get_request("/api/users"))
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
+}
+
+#[test]
+fn http_replay_requires_an_active_scope() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .replay_pentest_http_request("app.example.test", &get_request("/api/users"))
+        .expect_err("aktif scope yokken reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}

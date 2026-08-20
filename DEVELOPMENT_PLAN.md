@@ -867,7 +867,10 @@ Amaç: "sızma testi yapabilen" değil, yalnız yazılı yetki ve teknik sınır
 
 #### F7.4 — Manuel test araçları (en yüksek getirili kategori)
 
-- [ ] İstek yakalama/değiştirme/tekrar gönderme (proxy/replay) ve cevapları karşılaştırma (diff). En yüksek ödemeli bug sınıfları (IDOR, yetki atlatma, iş mantığı hataları) neredeyse hiç otomatik taramayla bulunmuyor; bunsuz F7 yalnız "otomatik keşif + bilinen açık eşleştirme" aracı kalır.
+- [x] İstek yakalama/değiştirme/tekrar gönderme (replay) ve cevapları karşılaştırma (diff). En yüksek ödemeli bug sınıfları (IDOR, yetki atlatma, iş mantığı hataları) neredeyse hiç otomatik taramayla bulunmuyor; bunsuz F7 yalnız "otomatik keşif + bilinen açık eşleştirme" aracı kalırdı.
+  - **Kanıt:** `Runtime::replay_pentest_http_request` — bir isteği (metot, yol, başlıklar, gövde, TLS açık/kapalı) hedefe gerçekten gönderip GERÇEK cevabı yakalıyor. `pentest_replay.rs`'nin kendi test paketi bunu gerçek bir yerel HTTP sunucusuyla (internete çıkmadan) kanıtlıyor — gerçek bir 403 durumunun bir `Err` değil GERÇEK bir cevap olarak döndüğü de dahil (pentest'in ilgilendiği tam olarak bu: bir hedefin hata durumunda ne döndürdüğü de bir bulgu kaynağı). `diff_http_responses` iki cevabı karşılaştırıp durum kodu/başlık ekleme-kaldırma-değişikliği/gövde eşitliğini çıkarıyor — gerçek testle kanıtlandı: bir yanıt başlığının değişmesi (ör. `x-user-role: guest` → `admin`), IDOR/yetki atlatma sınıfı bulguların tam olarak bulunduğu yer.
+  - **Mimari not:** Bu bir MITM proxy DEĞİL — trafiği yakalamıyor, kullanıcı/model isteği elle tanımlıyor, JARVIS gönderip cevabı getiriyor. Gerçek bir istek gönderdiği için (JS endpoint keşfiyle aynı gerekçe) F7.1'in aynı tek giriş noktasından `PentestMode::Active` talep ederek geçiyor.
+  - **Test:** 6 (pentest_replay.rs: diff mantığı × 3, gerçek yerel HTTP sunucusuyla gönder/al × 2, geçersiz path reddi × 1) + 3 (Runtime yetkilendirmesi: mod tavanı, scope dışı hedef, aktif scope zorunluluğu) = 9 yeni test.
 - [ ] Oturum açmış (authenticated) test desteği: program tarafından verilen test hesabı bilgisinin güvenli saklanması ve tarama/replay araçlarına enjekte edilmesi — mevcut Secret Manager'a bağlanır ([[jarvis-layered-memory-architecture]]), yeni bir mekanizma icat edilmez.
 
 #### F7.5 — SAFE modun somut ilk kontrolleri

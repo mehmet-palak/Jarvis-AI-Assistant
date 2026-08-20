@@ -951,6 +951,21 @@ impl Runtime {
         })
     }
 
+    /// F7.4 "Manuel test araçları: istek yakalama/değiştirme/tekrar gönderme". Aynı tavan
+    /// gerekçesi: gerçek bir istek hedefe gönderiliyor, `PentestMode::Active` gerektiriyor.
+    /// Kullanıcı/model bunu farklı istek gövdesi/başlıklarla iki kez çağırıp sonuçları
+    /// `diff_pentest_http_responses`'a vererek "ne değişti" sorusunu cevaplayabilir — bu, F7.4'ün
+    /// en yüksek değerli iş akışı (IDOR/yetki atlatma gibi bulgular genelde tam olarak burada
+    /// bulunuyor, otomatik taramayla değil).
+    pub fn replay_pentest_http_request(
+        &self,
+        target: &str,
+        request: &PentestHttpRequest,
+    ) -> Result<PentestHttpResponse, String> {
+        self.authorize_pentest_action(target, PentestMode::Active)?;
+        crate::pentest_replay::send_http_request(target, request)
+    }
+
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
     /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
     /// own split (a thin real-network wrapper around a pure, offline-tested function). Every F7.3
