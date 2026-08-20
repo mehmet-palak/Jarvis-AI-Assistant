@@ -830,7 +830,10 @@ Amaç: "sızma testi yapabilen" değil, yalnız yazılı yetki ve teknik sınır
 
 #### F7.2 — Ağ sınırlama (en kritik güvenlik parçası)
 
-- [ ] Network-scoped sandbox worker: yalnız allowlist egress, kill switch, dry-run ve gerçek cancellation/cleanup.
+- [x] Network-scoped sandbox worker'ın temel taşı: allowlist egress gate.
+  - **Tasarım:** F4'ün izole worker'ı zaten `--unshare-net` kullanıyor (`workbench::isolated_worker_command`) — worker'ın kendi başına hiç ağ erişimi yok. F7.2 bunun üstüne inşa ediyor: worker'a doğrudan ağ vermek yerine, JARVIS'in kontrolündeki bir SOCKS5 proxy (`pentest_network_gate.rs`) tek çıkış kapısı oluyor. Her bağlantı isteğinde, gerçek bağlantı açılmadan ÖNCE F7.1'in tek giriş noktasına (`Runtime::authorize_pentest_action`) soruluyor; izinsiz bir hedefe hiçbir paket gitmiyor çünkü oraya hiç gidilmiyor.
+  - **Kanıt:** 6 gerçek test — izinli hedefe GERÇEK bir TCP bağlantısı kurulup veri iletiliyor (sahte değil, gerçek bir echo sunucusuyla); izinsiz hedef "not allowed by ruleset" (SOCKS5 0x02) ile reddediliyor — "host unreachable" (0x04) DEĞİL, bu fark bağlantının hiç denenmediğinin kanıtı (denenip reddedilseydi farklı bir kod dönerdi); aktif scope yokken güvenli varsayılan (ret); scope'un izin verdiği modu aşan istek reddediliyor; süre bütçesi (`max_runtime_seconds`) dolmuşsa kapsam içi bir hedef bile reddediliyor; kapı yalnız loopback'e bağlanıyor (dışarıdan erişilemez).
+  - **Kalan (henüz yapılmadı):** Bu gate'in `isolated_worker_command`'a gerçekten bağlanması (sandboxed bir pentest worker'ın bu proxy'yi kullanacak şekilde başlatılması) — şu an bağımsız, kendi başına doğrulanmış bir bileşen, henüz bir worker'a takılmadı. Rate limiting (madde altta) ve dry-run modu da henüz yok.
 - [ ] Rate/runtime limitleri — agresif tarama çoğu bug bounty programında otomatik ban sebebi.
 - [ ] WAF/engelleme tespiti: hedef aniden farklı davranmaya (sürekli 429/503) başlarsa kör devam etmek yerine dur ve haber ver.
 - [ ] Programın kendi politika metnini okuma: "otomatik tarama yasak" gibi kısıtlamalara uyum, izin verilen test saatleri.

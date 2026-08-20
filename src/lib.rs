@@ -12,6 +12,7 @@ mod memory_intent;
 mod model;
 mod model_quality_eval;
 pub mod patch_generator;
+pub mod pentest_network_gate;
 mod persistence;
 mod policy;
 mod profile;
