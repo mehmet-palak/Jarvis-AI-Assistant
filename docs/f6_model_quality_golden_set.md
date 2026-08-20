@@ -215,3 +215,49 @@ senaryolarla genişletilmeli. Aksi halde indirme yapılır, karşılaştırma ko
 **Karşılaştırma altyapısı tarafında eksik yok:** ölçüm, kayıt (registry), ve verdict üretimi
 (F6 madde 5 kuralı: bir senaryo kaybı hızlanmayla telafi edilemez) uçtan uca çalıştı. Yeni bir
 aday eklemek yalnız ikinci bir sunucu başlatıp aynı testi koşmak demek.
+
+---
+
+## Zor senaryolar (Z) — 20 Ağustos 2026'da eklendi
+
+Setin ayrım gücü olmadığı **iki bağımsız kanıtla** belirlenmişti: kullanıcının "amatör kod
+yazıyor" şikayeti K01-K05'te yeniden üretilemedi, ve 3B'lik CPU modeli 8B'lik GPU modeliyle
+5/5 berabere kaldı. Yani set, bir model seçimi kararını destekleyemiyordu.
+
+Zor senaryolar bu boşluğu kapatıyor. **Regresyon korumasından ayrı tutuluyorlar** ve bu ayrım
+yapısal (`EvalScenario::hard`):
+
+| Senaryo türü | Düşerse ne demek | Test kırmızı olur mu |
+| --- | --- | --- |
+| Regresyon koruması (K, R) | Çalışan bir davranış **kırıldı** | Evet |
+| Zor / ölçüm (Z) | Modelin sınırı — beklenen sonuç | Hayır |
+
+Ayrım olmadan zor senaryo eklemek testi kalıcı kırmızı yapardı; insanlar kırmızıyı görmezden
+gelmeye başlar ve o noktada regresyon koruması da işe yaramaz hale gelir.
+
+### Z01 — derlenebilir, şablonlu, düzgün kapatılabilen thread-safe kuyruk
+
+İstem, kullanıcının gerçek kullanımda sesli olarak verdiği görevin aynısı (dört açık şart:
+şablon, çoklu üretici/tüketici, `close` metodu, kapatıldığında kalan öğeler okunabilsin).
+
+Doğrulama **mekanik**: yanıttaki kod blokları çıkarılıp gerçekten `g++ -std=c++17 -fsyntax-only`
+ile derleniyor, ve `template` + `close` içerdiği kontrol ediliyor. Derleyici yoksa senaryo
+atlanıyor — eksik bir araç, model kalitesizliği gibi raporlanmamalı.
+
+**İlk koşum sonucu: `FAIL`.** İki farklı üretimde iki farklı hata görüldü:
+- `derlenmedi: 'runtime_error', 'std' nin bir üyesi değil` — `<stdexcept>` include edilmemiş
+- başka bir koşumda hiç kod bloğu üretilmedi
+
+Ayrıca bu görev gerçek kullanımda elle de ölçüldü (aynı istem, sesli verildi). Sonuç:
+
+| Ölçüm | Sonuç |
+| --- | --- |
+| Kilitlenme (4 üretici + 4 tüketici, kapasite 10, 2000 işlem) | ✅ yok |
+| ThreadSanitizer veri yarışı | ✅ temiz |
+| Derleme | ❌ `void produce(int item) {{` — çift süslü parantez |
+| Şablon | ❌ `std::queue<int>` |
+| `close()` metodu | ❌ üretilmedi |
+| Kapatınca kalan öğeler okunabiliyor mu | ❌ **10/10 öğe kayboldu** (ölçüldü) |
+
+Yani model eşzamanlılık primitiflerini doğru kullanıyor (`wait` + predicate, `notify_all`) ama
+gereksinimleri takip etmiyor ve işi bitiremiyor. **Setin aradığı ayrım tam olarak bu.**

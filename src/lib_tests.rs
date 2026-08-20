@@ -5130,6 +5130,11 @@ fn the_shared_golden_set_definition_is_internally_consistent() {
             "{} açıklamasız",
             scenario.id
         );
+        // Zor senaryolar açıkça işaretlenmeli: işaretlenmemiş bir zor senaryo, regresyon
+        // koruması sanılıp testi kalıcı kırmızı yapar.
+        if scenario.id.starts_with('Z') {
+            assert!(scenario.hard, "{} zor olarak işaretlenmeli", scenario.id);
+        }
         // RAG senaryoları korpus gerektirdiğini bildirmeli; aksi halde korpus indekslenmemişken
         // sessizce koşulur ve kaçınılmaz olarak düşerler.
         if scenario.id.starts_with('R') {
