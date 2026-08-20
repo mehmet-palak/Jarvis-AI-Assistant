@@ -103,7 +103,13 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | F8 | MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile | BEKLENİYOR | F3, F7 trust/permission temeli |
 | F9 | Operasyonel olgunluk, release ve uzun dönem bakım | BEKLENİYOR | F2–F8 boyunca sürekli yürür |
 
-Programın bitiş tanımı: F2–F9'un zorunlu maddeleri, güvenlik/kalite kapıları ve kullanıcı kabul senaryoları tamamlanmış olacak. F10 araştırma/deney alanı ise ürünün zorunlu teslim kriteri değildir; yalnız stabil sürümden sonra kontrollü deneyler içindir.
+Programın bitiş tanımı (v1): F2–F9'un zorunlu maddeleri, güvenlik/kalite kapıları ve kullanıcı kabul senaryoları tamamlanmış olacak.
+
+**F10 — 20 Ağustos 2026'da kullanıcı tarafından netleştirildi: bu ürünün uzun vadeli, gerçek ve taahhüt edilmiş hedefidir, "belki bir gün" değil.** JARVIS, [docs/security_and_engineering_vision.md](docs/security_and_engineering_vision.md)'de (44 bölüm) ve [docs/f7_security_tool_research.md](docs/f7_security_tool_research.md)'de (11 araç incelemesi) tanımlanan **her yetkinliğe** sahip olacak: web/mobil/desktop/cloud/offensive pentest güvenliği, malware analizi, tersine mühendislik, OSINT, tehdit istihbaratı, kurumsal güvenlik, yetkili full red-team — ve ayrıca çok-dilli/çok-framework'lü coding agent, veri mühendisliği, model adaptasyonu, veritabanı/PostgreSQL, dağıtık sistemler, DevOps/SRE, performans, UI/UX/erişilebilirlik, paketleme, gizlilik/yönetişim ve kişisel günlük asistan yetkinlikleri.
+
+**Kullanıcının açık sıralama kuralı: "JARVIS adam gibi çalışmadan mobile geçilmeyecek."** Yani F8'in mobil/uzak istemci kısmı, çekirdek (F0-F9, özellikle F2/F7/F9 istikrarı) gerçekten sağlam çalışmadan açılmaz — bu, F8'in F3+F7 güven temeline bağımlı olduğu mevcut faz tablosuyla zaten tutarlı, burada yalnız kullanıcının kendi sözleriyle kesinleştirildi.
+
+Kaynak belgenin kendi önceliklendirmesi (bölüm 41) korunuyor: en yüksek bütçe offensive security + AI/data engineering; orta bütçe mobile/web/PostgreSQL/otomasyon; destek bütçesi DevOps/SRE/UX/release/performans/uyumluluk. Her alan aynı anda "tam uzman" olmayı hedeflemez (bölüm 20'nin kademeli teslim modeli) — ortak provenance/policy/evidence/eval altyapısı önce kurulur, sonra alan alan derinleştirilir; her yeni yetkinlik JARVIS'in mevcut Request→Policy→Task→Tool→Verifier→Audit zincirinden geçer, istisnasız.
 
 ### Mevcut mimari backlog eşlemesi
 
@@ -847,6 +853,24 @@ Amaç: "sızma testi yapabilen" değil, yalnız yazılı yetki ve teknik sınır
 - [ ] Düzeltme sonrası hedefli yeniden test: program "düzelttik, doğrular mısın" dediğinde tüm taramayı değil yalnız o bulguyu tekrar kontrol etme.
 - [ ] Program-özel hariç tutulan/düşük değerli bulgu sınıfları filtresi (ör. "self-XSS kabul etmiyoruz") — program politikasından okunur, zaman kaybını önler.
 
+#### F7.7 — Dış araç araştırmasından ve genişletilmiş veri planından alınan somut ekler
+
+20 Ağustos 2026'da 11 dış pentest/OSINT aracının incelemesi ([docs/f7_security_tool_research.md](docs/f7_security_tool_research.md)) ve web/mobil/desktop/offensive pentest veri planının F7'yle ilgili bölümleri ([docs/security_and_engineering_vision.md](docs/security_and_engineering_vision.md) bölüm 1-8, 13) F7'ye somut fikirler ekledi. **Hiçbir aracın kodu kopyalanmıyor** — yalnız davranış/mimari fikri alınıyor, her biri kendi lisans notuyla kaynak belgede kayıtlı.
+
+- [ ] **Otonomi modeli netleştirmesi:** mevcut SAFE/ACTIVE/INTRUSIVE/DESTRUCTIVE merdiveni "ne yapılabilir" sorusunu cevaplıyor; buna dik bir ikinci eksen eklenmeli — "ne kadar gözetim gerekir": `MANUAL` (her tool çağrısından önce onay), `SUPERVISED_AUTONOMY` (planı model kurar, kullanıcı onaylar, düşük riskli read-only adımlar otomatik yürür, aktif adım onay ister), `BOUNDED_AUTONOMY` (yazılı scope+süre+bütçe önceden tanımlı, worker yalnız allowlist'teki capability'leri kullanır, scope dışı/yüksek riskli adımda otomatik durur). İki eksen birbirinin yerine geçmez.
+- [ ] **Görev kontrolü (steering) ve devam ettirme:** kullanıcı çalışan bir güvenlik görevine "yalnızca auth akışına odaklan", "bu endpoint'i kapsam dışına al" veya "dur" diyebilmeli; uzun süren iş yarıda kalırsa state kaybetmeden devam edebilmeli (F3'ün session/resume desenine bağlanır).
+- [ ] **Kapsam matrisi (coverage tuple):** `(hedef, endpoint, parametre, zafiyet_sınıfı)` dörtlüsü izlenir — hangi kombinasyonun test edildiği, hangisinin edilmediği görünür olur; "sıradaki iş" önerisi yalnız kapsam içinde ve daha önce test edilmemiş kombinasyonları önerir.
+- [ ] **`confirm_finding` sözleşmesi:** bir bulgu yeniden üretme kanıtı olmadan "confirmed" durumuna geçemez — "model şüphelendi" ile "doğrulandı" ayrı, karıştırılmayan durumlar (F7.6'nın evidence-based finding maddesiyle aynı ilke, burada ayrı bir sözleşme olarak netleştirildi).
+- [ ] **Bilgi paketleri (knowledge packs):** konu/teknoloji/risk/önkoşul/güvenli-doğrulama/remediation metadata'sı taşıyan, yalnız görev kapsamına uygun olanı yüklenen bilgi paketleri — bilgi ile tool authority tamamen ayrı kalır. **Lisans sınırı:** kaynak içerikler (ör. HackTricks, CC BY-NC 4.0) kopyalanmaz, yalnız konu başlıkları ve JARVIS'in kendi özgün notları kullanılır.
+- [ ] **OSINT — F7'nin resmi bir alt-alanı:** domain/kullanıcı adı/telefon pivotlarını tek bir görev grafiğinde ilişkilendiren, salt-okunur bir capability. Her iddia kaynak URL + fetch zamanı + confidence + "bulunamadı" ile "bilinmiyor" ayrımı taşır. **Varsayılan mod `PASSIVE_PUBLIC_ONLY`**; login bypass, CAPTCHA atlatma, kapalı grup erişimi, credential kullanımı, toplu scraping ve kişisel profil çıkarımı yasak. Breach-intelligence kaynakları varsayılan kapalı, yalnız açık onay + hukuki uygunluk kontrolüyle açılır.
+- [ ] **Yetkili evidence snapshot (web mirroring) capability'si:** yetkili bir hedefin dinamik testten önce HTML/CSS/JS/görsel/bağlantı yapısıyla hash'lenmiş, değişmez bir kopyasını alma — provenance ve "snapshot ile gerçek hedef arasındaki fark" raporlama için. **Bu "web kopyalama" değil "yetkili kanıt görüntüsü" olarak adlandırılmalı.** Sınırlar: maksimum boyut, host allowlist, MIME allowlist, disk kotası, robots/yetki kararı, retention, credential redaction; indirilen içerik modele doğrudan verilmez, untrusted attachment/data envelope olarak tutulur.
+- [ ] **Pasif kaynak keşfi genişletmesi:** CDN/WAF arkasındaki olası origin IP'ler (CNAME/CT kayıtları, HTTP fingerprint, favicon, MX/TXT/PTR gibi pasif sinyallerle) ve tarihsel URL/endpoint arşivleri (Wayback/Common Crawl benzeri kaynaklardan) — "aday origin" ile "doğrulanmış açık" ayrı tutulur; arşivlenmiş response'lar sır/PII barındırabileceği için ham hali modele verilmez, redaction + boyut sınırı + "tarihsel veri" etiketiyle işlenir.
+- [ ] **HTML/JS/HAR'dan endpoint/parametre çıkarımı:** Burp/ZAP/Caido export'ları dahil çeşitli girdilerden endpoint/parametre/path-word çıkarıp normalize bir asset grafiğine yazma; scope prefix/filter parser seviyesinde zorunlu; "bulundu" ile "erişilebilir/doğrulandı" durumları ayrı; 403/429/timeout oranı yükselince zarif durma + eksik-sonuç uyarısı.
+- [ ] **F4/F7 worker'ı için somut regresyon test sınıfları** (bir aracın kendi güvenlik denetiminden alınan dersler — kod değil, test kapsamı): DNS rebinding ve resolve/connect TOCTOU, symlink/realpath tabanlı hassas-yol atlatma, tool çıktısı/MCP sonucu için gerçek transport-seviyeli boyut sınırı, capture/evidence store için OOM sınırı, iptal edilen tool-call oturumlarının bozuk geçmiş bırakmaması, akan (streaming) tool-call parçalarının doğru birleştirilmesi, URL userinfo/JWT/Authorization sır redaction'ı, terminal escape/kontrol-bayt temizliği, atomik bulgu oluşturma ve eşzamanlı ekleme güvenliği.
+- [ ] **Kaynak/araç risk sınıflandırması:** her potansiyel araç fikri capability manifest'i (risk seviyesi, ağ etkisi, credential ihtiyacı, çıktı formatı) ile kayıt altına alınır; aynı hedef için tekrar eden tarama sonuçları normalize edilir; hiçbir araç kendi threat model'i, sandbox'ı, scope testi ve regresyon testinden geçmeden registry'ye girmez.
+
+**Önerilen ilk entegrasyon sırası** (kaynak belgeden): (1) bilgi paketi formatı, (2) pasif URL/endpoint kanıt grafiği, (3) pasif origin/asset aday kayıtları, (4) F4 worker'ı üzerinden düşük riskli read-only parser'lar, (5) F7'de scope'lu aktif keşif + doğrulanmış PoC capability'leri, (6) OSINT için gizlilik/rıza/hukuki sınır çalışması.
+
 Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda üretilen her bulgu kanıt ve audit ile ilişkilidir. Bu gate geçmeden aktif test capability'si eklenmez. F7.1-F7.2 (yetkilendirme + ağ sınırlama) tamamlanmadan F7.3 ve sonrası açılmaz — sıra bilinçli, en riskli katman en önce sağlamlaştırılır.
 
 ### F8 — MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile
@@ -875,13 +899,25 @@ Durum: BEKLENİYOR — F2 ile birlikte başlar, ürün yayınından önce kapan�
 
 Tamamlanma ölçütü: Yeni sürüm kurulabilir, geri alınabilir, yedekten döndürülebilir ve kritik kullanıcı akışları kanıtlı biçimde çalışır.
 
-### F10 — Kontrollü araştırma ve uzun vadeli evrim
+### F10 — Uzun vadeli yetkinlik genişlemesi (taahhüt edilmiş hedef)
 
-Durum: BEKLENİYOR — v1 teslimi değildir
+Durum: BEKLENİYOR — çekirdek (F0-F9) istikrarına bağımlı, ama **kapsam dışı/opsiyonel değil**
 
-- [ ] Daha büyük/özel modeller, çoklu ajan koordinasyonu, federated/on-device learning ve ileri perception yalnız benchmark + threat model + maliyet değerlendirmesi sonrası deney dalında değerlendirilir.
-- [ ] Her araştırma deneyi ana sürümden feature flag, ayrı artifact ve rollback ile ayrılır; kullanıcı verisi deney setine varsayılan olarak girmez.
-- [ ] Başarılı deneyler yalnız F6 eval kapısını ve F9 release kapısını geçerse ana ürüne taşınır.
+Amaç: JARVIS'i tek bir alanda değil, [docs/security_and_engineering_vision.md](docs/security_and_engineering_vision.md)'deki tüm alanlarda (aşağıdaki liste) gerçekten yetkin, kanıtlı ve güvenli sınırlar içinde çalışan bir sisteme dönüştürmek.
+
+**Taahhüt edilen yetkinlik alanları** (tam ayrıntı kaynak belgede, bölüm numaralarıyla):
+
+- Offensive/defensive güvenlik: web (1), mobil (2), desktop (3), ofansif pentest (4), cloud security (9), malware analizi (10), tersine mühendislik (11), OSINT (13), threat intelligence (14), ağ güvenliği (17), enterprise security (18), yetkili full red-team (19), infrastructure/platform security (15), AI security (16).
+- Yazılım geliştirme: coding agent (22), veri mühendisliği (23), model eğitimi/adaptasyon/eval (24), mobil uygulama geliştirme (27), web geliştirme (28), cloud geliştirme (29), çoklu platform golden set (30), geniş dil/framework kapsamı (31), veritabanı/PostgreSQL (33), dağıtık sistemler (34), QA/test mühendisliği (35), DevOps/SRE/release (36), performans/kaynak optimizasyonu (37), UI/UX/erişilebilirlik/lokalizasyon (38), paketleme/dağıtım (39), privacy/uyumluluk/yönetişim (40).
+- Günlük yaşam: kişisel günlük yardımcı ve yaşam iş akışları (42), ileri Windows/Linux sistem yönetimi (44).
+- Mimari: local-first çoklu cihaz agent mimarisi — desktop ileri seviye, Android orta seviye (26); harici AI araçlarını öğrenme/karşılaştırma kaynağı olarak kullanma, kopyalamadan (43).
+
+**Sıralama kuralı (kullanıcı tarafından netleştirildi, 20 Ağustos 2026):** Mobil (F8'in Android/uzak istemci kısmı) yalnız çekirdek (F0-F9, özellikle F2/F7/F9) gerçekten sağlam çalıştıktan sonra açılır. Alan önceliği kaynak belgenin kendi bütçe sıralamasını izler: önce offensive security + AI/data engineering, sonra mobile/web/PostgreSQL/otomasyon, en son DevOps/SRE/UX/release/performans/uyumluluk destek katmanı.
+
+- [ ] Her yeni yetkinlik alanı, F7/F4 desenindeki gibi kendi capability manifest'i, policy kararı, izole worker'ı, provenance şeması ve eval kapısıyla açılır — hiçbiri "model istedi, çalıştı" şeklinde bağlanmaz.
+- [ ] Daha büyük/özel modeller, çoklu ajan koordinasyonu, federated/on-device learning ve ileri perception; benchmark + threat model + maliyet değerlendirmesi sonrası devreye girer.
+- [ ] Her yeni alan/deney ana sürümden feature flag, ayrı artifact ve rollback ile ayrılır; kullanıcı verisi deney setine varsayılan olarak girmez.
+- [ ] Bir alan yalnız F6 eval kapısını ve F9 release kapısını geçerse "aktif" sayılır — kapsamlı kilitli eval matrisi, farklı platform/dil varyantları, adversarial test, scope ihlali sıfır ve kritik unsafe action'da sıfır tolerans hedeflenir (kaynak belge bölüm 20'nin ileri seviye kabul kriterleri).
 
 ### Önerilen uygulama sırası
 
