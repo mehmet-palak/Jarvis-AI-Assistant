@@ -6013,3 +6013,51 @@ fn scan_pentest_ports_does_not_stop_early_when_the_deadline_has_not_passed() {
     assert!(!result.stopped_early_due_to_runtime_budget);
     assert_eq!(result.open_ports, vec![open_port]);
 }
+
+// --- F7.3: aktif keşif (subdomain brute-force) --------------------------------------------------
+
+/// DNS bruteforce'un asıl mod-tavanı iddiası: yalnız SAFE'e izin veren bir scope, GERÇEK DNS
+/// sorgusu atmadan önce reddedilmeli — port taramasının aynı ilkesi, burada da uygulanmış mı.
+#[test]
+fn dns_bruteforce_requires_active_mode_not_just_safe() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .save_pentest_scope("acme", &wildcard_scope_for("example.test"))
+        .expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let error = runtime
+        .discover_pentest_assets_via_dns_bruteforce("example.test", &["www".to_string()])
+        .expect_err("SAFE tavanlı scope ACTIVE gerektiren brute-force'a izin vermemeli");
+    assert!(error.contains("ACTIVE"), "{error}");
+}
+
+#[test]
+fn dns_bruteforce_rejects_an_empty_wordlist() {
+    let runtime = runtime_with_active_mode_scope("example.test");
+    let error = runtime
+        .discover_pentest_assets_via_dns_bruteforce("example.test", &[])
+        .expect_err("boş kelime listesi reddedilmeli");
+    assert!(error.contains("boş"), "{error}");
+}
+
+#[test]
+fn dns_bruteforce_rejects_more_than_the_per_call_word_cap() {
+    let runtime = runtime_with_active_mode_scope("example.test");
+    let too_many: Vec<String> = (0..2001).map(|i| format!("word{i}")).collect();
+    let error = runtime
+        .discover_pentest_assets_via_dns_bruteforce("example.test", &too_many)
+        .expect_err("tavanı aşan kelime listesi reddedilmeli");
+    assert!(error.contains("2000"), "{error}");
+}
+
+#[test]
+fn dns_bruteforce_requires_an_active_scope() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .discover_pentest_assets_via_dns_bruteforce("example.test", &["www".to_string()])
+        .expect_err("aktif scope yokken reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}

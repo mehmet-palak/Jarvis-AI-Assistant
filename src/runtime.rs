@@ -26,6 +26,10 @@ const MAX_PENTEST_PORTS_PER_SCAN: usize = 200;
 /// yanlış raporlamak) ne çok uzun (yavaş/filtrelenmiş bir port taramayı gereksiz uzatmak).
 const PENTEST_PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 
+/// F7.3 "Aktif keşif: subdomain brute-force" — aynı kendi-kendini-sınırlama disiplini port
+/// taramasıyla aynı: tek bir çağrı binlerce DNS sorgusu üretemez.
+const MAX_PENTEST_DNS_BRUTEFORCE_WORDS: usize = 2000;
+
 #[derive(Debug)]
 pub struct Runtime {
     pub tasks: HashMap<String, Task>,
@@ -890,12 +894,51 @@ impl Runtime {
         self.record_pentest_recon_candidates(apex_domain, "certificate_transparency", candidates)
     }
 
+    /// F7.3 "Aktif keşif: subdomain brute-force". Plan metninin kendi sınıflandırmasıyla bu,
+    /// yukarıdaki sertifika şeffaflık sorgusundan farklı bir tavan gerektiriyor: hedefin kendi
+    /// sunucusuna hiçbir paket gitmese de (yalnız DNS altyapısına sorgu gidiyor), scope'un
+    /// `maximum_mode`'unun en az `Active` olması zorunlu — yalnız hedef eşleşmesi yeterli değil.
+    /// Bu kontrol burada, tüm brute-force işlemi için BİR KEZ yapılıyor (her aday için ayrı ayrı
+    /// değil) çünkü "bu tür bir keşfe izin var mı" sorusunun cevabı işlemin tamamı için aynı.
+    pub fn discover_pentest_assets_via_dns_bruteforce(
+        &self,
+        apex_domain: &str,
+        subdomain_wordlist: &[String],
+    ) -> Result<PentestReconResult, String> {
+        if subdomain_wordlist.is_empty() {
+            return Err("alt alan adı kelime listesi boş olamaz".into());
+        }
+        if subdomain_wordlist.len() > MAX_PENTEST_DNS_BRUTEFORCE_WORDS {
+            return Err(format!(
+                "bir seferde en fazla {MAX_PENTEST_DNS_BRUTEFORCE_WORDS} kelime denenebilir (istenen: {})",
+                subdomain_wordlist.len()
+            ));
+        }
+        let active = self.active_verified_pentest_scope()?;
+        if active.scope.maximum_mode < PentestMode::Active {
+            return Err(format!(
+                "subdomain brute-force ACTIVE yetki gerektirir — scope '{}' yalnız '{}' seviyesine kadar izin veriyor",
+                active.name,
+                active.scope.maximum_mode.as_str()
+            ));
+        }
+        let candidates =
+            crate::pentest_recon::build_dns_bruteforce_candidates(apex_domain, subdomain_wordlist);
+        let resolved: Vec<String> = candidates
+            .into_iter()
+            .filter(|candidate| crate::pentest_recon::dns_name_resolves(candidate))
+            .collect();
+        self.record_pentest_recon_candidates(apex_domain, "dns_bruteforce", resolved)
+    }
+
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
     /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
-    /// own split (a thin real-network wrapper around a pure, offline-tested function). Any future
-    /// F7.3 passive source (technology fingerprinting, historical URL archives) funnels through
-    /// this same method with its own `source` label, so the "in scope vs. out of scope, new vs.
-    /// already known" logic exists exactly once.
+    /// own split (a thin real-network wrapper around a pure, offline-tested function). Every F7.3
+    /// discovery source (certificate transparency, DNS brute-force, and any future one —
+    /// technology fingerprinting, historical URL archives) funnels its raw candidate names
+    /// through this same method with its own `source` label, so the "in scope vs. out of scope,
+    /// new vs. already known" logic exists exactly once regardless of where the names came from
+    /// or whether that source itself needed a higher mode ceiling to run.
     pub(crate) fn record_pentest_recon_candidates(
         &self,
         queried_domain: &str,
