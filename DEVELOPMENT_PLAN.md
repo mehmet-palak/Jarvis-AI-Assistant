@@ -94,8 +94,8 @@ Bu noktadan sonra mimariyi yeniden tasarlamak yerine aşağıdaki dikey dilimler
 | --- | --- | --- | --- |
 | F0 | Mimari, typed core, persistence ve güvenlik contractları | TAMAMLANDI | — |
 | F1 | Local-first Desktop MVP | TAMAMLANDI | F0 |
-| F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | DEVAM EDİYOR | F1 |
-| F3 | Kontrollü bellek, profil ve gerçek RAG | BEKLENİYOR — F2 exit gate | F2 attachment/provenance temeli |
+| F2 | Günlük masaüstü ürün deneyimi, native UI ve görsel/dosya ekleri | TAMAMLANDI (F2.0 + F2.1, 15 Ağustos 2026) | F1 |
+| F3 | Kontrollü bellek, profil ve gerçek RAG | TAMAMLANDI (18/18 madde, 15-16 Ağustos 2026) | F2 attachment/provenance temeli |
 | F4 | Onaylı, izole coding ve yerel iş workbench'i | TAMAMLANDI (15/15 madde `[x]`: plan(varsayım/soru/risk dahil)→patch→onay→uygula→test zinciri, taban çizgili regresyon tespiti + seçilebilir dosya scope'lu patch preview dahil, uçtan uca TUI'de çalışıyor, 7 senaryolu eval seti geçiyor, `LocalTool` çerçevesi 2 gerçek tool'la ve genel bir `workflow.rs` çok-adımlı orkestratörü kanıtlandı; gerçek cgroup v2 (RAM/CPU) + `WorkspaceWriteMode::Overlay` (disk bütçesi dahil) + gerçek seccomp-bpf allowlist filtresi eklendi, izole worker (bwrap+cgroup+overlay+seccomp) ilk kez gerçek makinede tamamen uçtan uca kanıtlandı — 2 gerçek bug (RLIMIT_NPROC per-UID yanlış hesap, tmpfs/bind mount sırası) bulunup düzeltildi) | F2 + OS-isolated worker |
 | F5 | Push-to-talk ses ve çoklu algı arayüzü | TAMAMLANDI (11/11 madde; gerçek bas-tut + canlı seviye göstergesi, whisper.cpp STT + Piper TTS, sesli onay güvenlik sınırı, wake word bilinçli olarak reddedildi — ADR-0007; sıfır yeni Rust bağımlılığı) | F2 native UI |
 | F6 | Benchmark, dataset governance ve geri alınabilir model adaptasyonu | TAMAMLANDI (7/7 madde; golden set + dataset governance + config registry + regresyon/rollback + geri bildirim intake'i + LoRA kararı ADR-0006 + model karşılaştırması — hepsi gerçek modelle kanıtlı, hiçbir indirme yapılmadan) | F3/F4 gerçek eval verisi |
