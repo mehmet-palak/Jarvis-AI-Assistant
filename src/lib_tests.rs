@@ -5877,3 +5877,139 @@ fn recon_candidates_are_refused_immediately_after_the_active_scope_is_revoked() 
         .expect_err("iptal edilmiş scope reddedilmeli");
     assert!(error.contains("no active pentest scope"), "{error}");
 }
+
+// --- F7.3: aktif keşif (port/servis tarama) ---------------------------------------------------
+
+fn active_mode_scope_for(target: &str) -> PentestScope {
+    PentestScope {
+        schema_version: 1,
+        authorization_ref: "signed-authorization:portscan-demo".into(),
+        targets: vec![target.to_string()],
+        excluded_targets: vec![],
+        expires_at: now_epoch() + 3600,
+        maximum_mode: PentestMode::Active,
+        max_runtime_seconds: 300,
+    }
+}
+
+fn runtime_with_active_mode_scope(target: &str) -> Runtime {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .save_pentest_scope("acme", &active_mode_scope_for(target))
+        .expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    Runtime::with_store(store)
+}
+
+/// F7.3'ün asıl iddiası: gerçek dinleyen portlar "açık", dinlemeyen bir port "kapalı" olarak
+/// GERÇEK bir TCP bağlantı denemesiyle raporlanıyor — sahte/simüle değil.
+#[test]
+fn scan_pentest_ports_reports_real_open_and_closed_ports() {
+    let listener_a = std::net::TcpListener::bind("127.0.0.1:0").expect("dinleyici a");
+    let listener_b = std::net::TcpListener::bind("127.0.0.1:0").expect("dinleyici b");
+    let open_port_a = listener_a.local_addr().unwrap().port();
+    let open_port_b = listener_b.local_addr().unwrap().port();
+    // Kasıtlı olarak dinlemeyen bir port: bağlanıp hemen bırakıyoruz, port serbest kalıyor ama
+    // artık hiçbir şey onu dinlemiyor.
+    let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("geçici dinleyici");
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let result = runtime
+        .scan_pentest_ports("127.0.0.1", &[open_port_a, open_port_b, closed_port])
+        .expect("tarama çalışmalı");
+
+    assert_eq!(result.target, "127.0.0.1");
+    assert_eq!(result.scanned_port_count, 3);
+    assert!(!result.stopped_early_due_to_runtime_budget);
+    let mut open = result.open_ports.clone();
+    open.sort();
+    let mut expected = vec![open_port_a, open_port_b];
+    expected.sort();
+    assert_eq!(
+        open, expected,
+        "yalnız gerçekten dinleyen portlar açık raporlanmalı"
+    );
+    assert!(!result.open_ports.contains(&closed_port));
+}
+
+/// Scope yalnız SAFE moda izin veriyorsa, ACTIVE gerektiren bir port taraması reddedilmeli —
+/// F7.1'in mod tavanı kuralının port tarama üzerinden de gerçekten uygulandığının kanıtı.
+#[test]
+fn scan_pentest_ports_requires_active_mode_not_just_safe() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope = active_mode_scope_for("127.0.0.1");
+    scope.maximum_mode = PentestMode::Safe;
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let error = runtime
+        .scan_pentest_ports("127.0.0.1", &[80])
+        .expect_err("SAFE tavanlı scope ACTIVE taramaya izin vermemeli");
+    assert!(error.contains("exceeds the authorization scope"), "{error}");
+}
+
+#[test]
+fn scan_pentest_ports_refuses_a_target_outside_scope() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .scan_pentest_ports("not-in-scope.example.test", &[80])
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
+}
+
+#[test]
+fn scan_pentest_ports_rejects_an_empty_port_list() {
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let error = runtime
+        .scan_pentest_ports("127.0.0.1", &[])
+        .expect_err("boş port listesi reddedilmeli");
+    assert!(error.contains("boş"), "{error}");
+}
+
+/// Tek bir çağrının binlerce portu tarayan bir araca dönüşememesi için — F7.2'nin hız sınırı
+/// gerekçesiyle aynı disiplin: yetkili olmak, sınırsız hızda/miktarda dövmenin güvenli olduğu
+/// anlamına gelmiyor.
+#[test]
+fn scan_pentest_ports_rejects_more_than_the_per_call_port_cap() {
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let too_many_ports: Vec<u16> = (1..=201).collect();
+    let error = runtime
+        .scan_pentest_ports("127.0.0.1", &too_many_ports)
+        .expect_err("tavanı aşan port listesi reddedilmeli");
+    assert!(error.contains("200"), "{error}");
+}
+
+/// F7.2'de kurulan disiplinin aynısı burada da geçerli: süre bütçesi tükendiyse tarama, istenen
+/// portların tamamına ulaşmadan durmalı — sessizce yetkilendirilen sürenin ötesine geçmemeli.
+/// Gerçek, yavaşça başarısız olan bir port beklemek yerine (ki bu network zamanlamasına bağlı,
+/// asla deterministik olmazdı) — `pentest_network_gate`'in kendi testlerinin yaptığı gibi,
+/// zaten SÜRESİ DOLMUŞ bir deadline doğrudan veriliyor.
+#[test]
+fn scan_pentest_ports_stops_early_once_the_deadline_has_already_passed() {
+    let expired_deadline = std::time::Instant::now() - Duration::from_secs(1);
+    let result = Runtime::scan_pentest_ports_until("127.0.0.1", &[80, 443, 8080], expired_deadline);
+    assert_eq!(result.scanned_port_count, 0);
+    assert!(result.stopped_early_due_to_runtime_budget);
+    assert!(result.open_ports.is_empty());
+}
+
+/// Süresi henüz dolmamış normal bir deadline'da tarama erken durmamalı — yukarıdaki testin
+/// tersini de doğrulayarak, `stopped_early_due_to_runtime_budget`'ın yalnızca gerçekten süre
+/// dolduğunda `true` olduğundan emin oluyoruz.
+#[test]
+fn scan_pentest_ports_does_not_stop_early_when_the_deadline_has_not_passed() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("dinleyici");
+    let open_port = listener.local_addr().unwrap().port();
+    let generous_deadline = std::time::Instant::now() + Duration::from_secs(30);
+
+    let result = Runtime::scan_pentest_ports_until("127.0.0.1", &[open_port], generous_deadline);
+    assert_eq!(result.scanned_port_count, 1);
+    assert!(!result.stopped_early_due_to_runtime_budget);
+    assert_eq!(result.open_ports, vec![open_port]);
+}

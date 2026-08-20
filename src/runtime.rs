@@ -12,7 +12,19 @@
 use crate::*;
 
 use std::collections::HashMap;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// F7.3 "Aktif keşif" port taramasının kendi kendini sınırlaması: bir çağrının tek başına
+/// birinin sunucusuna yönelik sınırsız bir tarama aracına dönüşemeyeceği tavan. Ayrı ayrı çok
+/// sayıda çağrı yapılabilir (o zaman devreye scope'un `max_runtime_seconds`'ı girer), ama TEK
+/// bir çağrı asla binlerce portu art arda deneyemez.
+const MAX_PENTEST_PORTS_PER_SCAN: usize = 200;
+
+/// Tek bir port denemesi için bağlanma zaman aşımı — ne çok kısa (açık bir portu "kapalı" gibi
+/// yanlış raporlamak) ne çok uzun (yavaş/filtrelenmiş bir port taramayı gereksiz uzatmak).
+const PENTEST_PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -915,6 +927,74 @@ impl Runtime {
             new_assets,
             out_of_scope_count,
         })
+    }
+
+    /// F7.3 "Aktif keşif: port/servis tarama". Unlike the certificate-transparency lookup above,
+    /// this genuinely touches the target — a real TCP connect attempt per port — so it goes
+    /// through the *same* single authorization entry point every other action-on-a-target uses
+    /// (`authorize_pentest_action`), requested at `PentestMode::Active` (not `Safe`): a scope
+    /// whose `maximum_mode` is only `Safe` must refuse this, exactly like it refuses any other
+    /// active action. No sandboxed worker exists yet to route this through F7.2's SOCKS5 gate
+    /// (that wiring is still the deferred item noted in F7.2/F7.3's own plan text) — this method
+    /// connects directly, from JARVIS's own process, the same honest scope the certificate-
+    /// transparency lookup above already has.
+    ///
+    /// Bounded on two independent axes so a single call can never turn into an unbounded scan of
+    /// someone else's host: `MAX_PENTEST_PORTS_PER_SCAN` caps how many ports one call may probe at
+    /// all, and the scope's own `max_runtime_seconds` is enforced as a wall-clock deadline over
+    /// the whole loop (checked before every connect attempt) — a scan that is still running when
+    /// the authorized time budget runs out stops there, reporting how far it got rather than
+    /// silently continuing past what was authorized.
+    pub fn scan_pentest_ports(
+        &self,
+        target: &str,
+        ports: &[u16],
+    ) -> Result<PentestPortScanResult, String> {
+        if ports.is_empty() {
+            return Err("taranacak port listesi boş olamaz".into());
+        }
+        if ports.len() > MAX_PENTEST_PORTS_PER_SCAN {
+            return Err(format!(
+                "bir seferde en fazla {MAX_PENTEST_PORTS_PER_SCAN} port taranabilir (istenen: {})",
+                ports.len()
+            ));
+        }
+        let active = self.authorize_pentest_action(target, PentestMode::Active)?;
+        let deadline =
+            Instant::now() + Duration::from_secs(active.scope.max_runtime_seconds as u64);
+        Ok(Self::scan_pentest_ports_until(target, ports, deadline))
+    }
+
+    /// The timed loop itself, factored out from validation/authorization above specifically so
+    /// the "stop once the deadline has passed" behavior is directly testable — a caller can pass
+    /// an already-expired `Instant` (exactly the way `pentest_network_gate`'s own tests pass an
+    /// already-expired deadline into `accept_one`) instead of needing a real port that is
+    /// genuinely slow to fail, which no test could make deterministic without depending on real
+    /// network timing.
+    pub(crate) fn scan_pentest_ports_until(
+        target: &str,
+        ports: &[u16],
+        deadline: Instant,
+    ) -> PentestPortScanResult {
+        let mut open_ports = Vec::new();
+        let mut scanned_port_count = 0usize;
+        let mut stopped_early_due_to_runtime_budget = false;
+        for &port in ports {
+            if Instant::now() >= deadline {
+                stopped_early_due_to_runtime_budget = true;
+                break;
+            }
+            scanned_port_count += 1;
+            if pentest_tcp_port_is_open(target, port, PENTEST_PORT_CONNECT_TIMEOUT) {
+                open_ports.push(port);
+            }
+        }
+        PentestPortScanResult {
+            target: target.to_string(),
+            open_ports,
+            scanned_port_count,
+            stopped_early_due_to_runtime_budget,
+        }
     }
 
     /// SHA-256 of the exact system prompt this build sends. This is the "prompt version" the
@@ -1893,4 +1973,18 @@ pub struct RegressionCheckedPatch {
     /// applied — the only failures actually attributed to the patch itself.
     pub regressions: Vec<String>,
     pub kept: bool,
+}
+
+/// A real TCP connect attempt — `true` only if the connection genuinely succeeded within
+/// `timeout`. DNS/parse failures and connection failures are both treated as "not open" rather
+/// than propagated as errors: a port scan's job is to report state per port, not to abort the
+/// whole scan because one hostname briefly failed to resolve.
+fn pentest_tcp_port_is_open(target: &str, port: u16, timeout: Duration) -> bool {
+    let Ok(mut addrs) = (target, port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, timeout).is_ok()
 }

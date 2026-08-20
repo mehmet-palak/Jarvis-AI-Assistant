@@ -258,6 +258,23 @@ pub struct StoredPentestAsset {
     pub last_seen: u64,
 }
 
+/// F7.3 "Aktif keşif: port/servis tarama" bir taramanın sonucu —
+/// `Runtime::scan_pentest_ports`. Yalnız hangi portların açık olduğunu, kaç tanesinin
+/// gerçekten denendiğini raporluyor — servis parmak izi/banner alma bu maddede yok (o, ayrı bir
+/// F7.3 alt maddesi, "teknoloji parmak izi").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestPortScanResult {
+    pub target: String,
+    pub open_ports: Vec<u16>,
+    /// Gerçekten denenmiş port sayısı — `stopped_early_due_to_runtime_budget` doğruysa bu,
+    /// çağıranın istediği port listesinin tamamından küçük olabilir.
+    pub scanned_port_count: usize,
+    /// `true` ise scope'un `max_runtime_seconds` bütçesi tükendiği için tarama, istenen tüm
+    /// portlara ulaşmadan durdu — bu, sessizce yetkilendirilen sürenin ötesine geçmek yerine
+    /// dürüst bir "buraya kadar yapabildim" raporu.
+    pub stopped_early_due_to_runtime_budget: bool,
+}
+
 /// F7.3 "Pasif keşif" bir sorgunun sonucu — `Runtime::discover_pentest_assets_via_certificate_transparency`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PentestReconResult {
