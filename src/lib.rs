@@ -304,6 +304,12 @@ pub struct PentestHttpRequest {
     /// `false` ise `http://`, `true` ise `https://` kullanılır. Gerçek dünyada her pentest
     /// hedefi TLS arkasında olmuyor; bu alan olmadan yalnız HTTPS hedefleri desteklenirdi.
     pub use_tls: bool,
+    /// `None` ise şemanın varsayılan portu (`use_tls`'e göre 443/80). Scope yetkilendirmesi
+    /// (`authorize_pentest_action`) her zaman ÇIPLAK hostname'e karşı kontrol edilir — port
+    /// hedef kimliğinin bir parçası değil (port taramasıyla aynı model: `scan_pentest_ports`
+    /// port'u da ayrı bir parametre olarak alıyor) — bu yüzden aynı yetkili host'un standart
+    /// olmayan bir portundaki bir servisi test etmek scope'u yeniden yazmayı gerektirmiyor.
+    pub port: Option<u16>,
 }
 
 /// F7.4: gerçekten alınan cevap — durum kodu, başlıklar, gövde.

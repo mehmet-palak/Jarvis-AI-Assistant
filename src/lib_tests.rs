@@ -6119,6 +6119,7 @@ fn get_request(path: &str) -> PentestHttpRequest {
         headers: vec![],
         body: vec![],
         use_tls: false,
+        port: None,
     }
 }
 
@@ -6157,4 +6158,71 @@ fn http_replay_requires_an_active_scope() {
         .replay_pentest_http_request("app.example.test", &get_request("/api/users"))
         .expect_err("aktif scope yokken reddedilmeli");
     assert!(error.contains("no active pentest scope"), "{error}");
+}
+
+/// F7.4 "Oturum açmış (authenticated) test desteği" — plan metninin kendi notu gereği YENİ bir
+/// mekanizma icat edilmedi: mevcut Secret Manager (`remember_secret`/`reveal_secret`) ve
+/// `PentestHttpRequest.headers`'ın serbest biçimli olması zaten bunu mümkün kılıyor. Bu test,
+/// bu bileşimin GERÇEKTEN uçtan uca çalıştığını kanıtlıyor: bir program test hesabı sırrı
+/// kaydediliyor, açığa çıkarılıyor, bir Authorization başlığına konup GERÇEKTEN gönderiliyor —
+/// yerel bir sunucu aldığı başlığı geri yansıtıp değerin gerçekten ulaştığını doğruluyor.
+/// `reveal_secret`'ın kendi belgelenmiş kuralı ("yalnız kullanıcının kendi açık talebiyle
+/// çağrılmalı") burada da geçerli: bu çağrı testin kendisinde, açık bir adım olarak yapılıyor —
+/// `replay_pentest_http_request`'in içinde OTOMATİK olarak asla çağrılmıyor.
+#[test]
+fn authenticated_replay_composes_secret_manager_and_http_replay_without_a_new_mechanism() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("authorization-echo sunucusu");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0u8; 4096];
+            let count = stream.read(&mut buffer).unwrap_or(0);
+            let request_text = String::from_utf8_lossy(&buffer[..count]);
+            let authorization = request_text
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .map(|line| {
+                    line.split_once(':')
+                        .map(|(_, v)| v)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_else(|| "NONE".to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{authorization}",
+                authorization.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let mut runtime = runtime_with_active_mode_scope("127.0.0.1");
+    runtime
+        .remember_secret("bugcrowd-acme-test-token", "s3cr3t-test-account-token")
+        .expect("sır kaydedilmeli");
+    let token = runtime
+        .reveal_secret("bugcrowd-acme-test-token")
+        .expect("sır sorgulanabilmeli")
+        .expect("sır bulunmalı");
+
+    let request = PentestHttpRequest {
+        method: "GET".into(),
+        path: "/api/private".into(),
+        headers: vec![("Authorization".to_string(), format!("Bearer {token}"))],
+        body: vec![],
+        use_tls: false,
+        port: Some(port),
+    };
+    let response = runtime
+        .replay_pentest_http_request("127.0.0.1", &request)
+        .expect("kimlik doğrulamalı istek gönderilebilmeli");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        format!("Bearer {token}").as_bytes(),
+        "sır değeri, sunucuya GERÇEKTEN ulaşan Authorization başlığında görünmeli"
+    );
 }
