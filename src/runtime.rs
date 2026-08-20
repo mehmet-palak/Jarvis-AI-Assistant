@@ -10,6 +10,7 @@
 //! concern of its own, so an explicit per-symbol import list would just restate the crate's
 //! surface with no added clarity.
 use crate::*;
+use pentest_evidence::PentestEvidenceSnapshot;
 use pentest_safe_checks::{
     PentestExposedFileFinding, PentestTechnologyFingerprint, PentestTlsCheckResult,
     TakeoverSignatureMatch,
@@ -33,6 +34,10 @@ const PENTEST_PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
 /// F7.3 "Aktif keşif: subdomain brute-force" — aynı kendi-kendini-sınırlama disiplini port
 /// taramasıyla aynı: tek bir çağrı binlerce DNS sorgusu üretemez.
 const MAX_PENTEST_DNS_BRUTEFORCE_WORDS: usize = 2000;
+
+/// F7.7 "Yetkili evidence snapshot" için üst boyut sınırı — bir hedefin devasa bir dosya döndürüp
+/// kanıt deposunu (ve belleği) şişirmesini önlüyor. 5MB, bir HTML/JS kanıtı için fazlasıyla yeterli.
+const MAX_PENTEST_EVIDENCE_SNAPSHOT_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -1376,6 +1381,36 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| "pentest coverage requires an attached local store".to_string())?
             .pentest_coverage(scope_name)
+    }
+
+    /// F7.7 "Yetkili evidence snapshot." Yetkili bir hedeften bir yolu çekip, boyut sınırı + MIME
+    /// allowlist + sır redaksiyonundan geçmiş, hash'lenmiş değişmez bir kanıt görüntüsü üretir.
+    /// Host allowlist F7.1'in aynı tek giriş noktasıyla (SAFE tavanı — bu yalnız bir GET, hedefe
+    /// dokunuyor ama sömürü yok). Döndürülen `Vec<u8>` redakte edilmiş ham içerik (untrusted data
+    /// envelope — çağıran bunu modele DOĞRUDAN vermemeli); `PentestEvidenceSnapshot` ise modele
+    /// verilebilir güvenli metadata.
+    pub fn capture_pentest_evidence_snapshot(
+        &self,
+        target: &str,
+        path: &str,
+        use_tls: bool,
+        port: Option<u16>,
+    ) -> Result<(PentestEvidenceSnapshot, Vec<u8>), String> {
+        let response = self.send_pentest_safe_get(target, path, use_tls, port)?;
+        let content_type = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        crate::pentest_evidence::build_evidence_snapshot(
+            target,
+            path,
+            &content_type,
+            &response.body,
+            MAX_PENTEST_EVIDENCE_SNAPSHOT_BYTES,
+            now_epoch(),
+        )
     }
 
     /// The scope-filtering + persistence half of recon, factored out from the real-network call

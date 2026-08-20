@@ -6853,3 +6853,45 @@ fn record_pentest_coverage_refuses_a_target_outside_scope() {
         "{error}"
     );
 }
+
+// --- F7.7: yetkili evidence snapshot -----------------------------------------------------------
+
+#[test]
+fn capture_pentest_evidence_snapshot_fetches_hashes_and_redacts_from_a_real_server() {
+    let port = start_routing_http_server(vec![(
+        "/config.js",
+        200,
+        "Content-Type: application/javascript\r\n",
+        "var key = 'AKIAIOSFODNN7EXAMPLE'; var ok = 1;",
+    )]);
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let (snapshot, stored) = runtime
+        .capture_pentest_evidence_snapshot("127.0.0.1", "/config.js", false, Some(port))
+        .expect("snapshot alınmalı");
+
+    assert_eq!(snapshot.target, "127.0.0.1");
+    assert_eq!(snapshot.path, "/config.js");
+    assert_eq!(snapshot.content_sha256.len(), 64);
+    assert!(
+        snapshot.redacted,
+        "gerçek sunucudan gelen AKIA anahtarı redakte edilmeli"
+    );
+    let stored_text = String::from_utf8_lossy(&stored);
+    assert!(
+        !stored_text.contains("AKIAIOSFODNN7EXAMPLE"),
+        "{stored_text}"
+    );
+    assert!(stored_text.contains("[REDACTED]"), "{stored_text}");
+}
+
+#[test]
+fn capture_pentest_evidence_snapshot_refuses_a_target_outside_scope() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .capture_pentest_evidence_snapshot("not-in-scope.example.test", "/", true, None)
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
+}
