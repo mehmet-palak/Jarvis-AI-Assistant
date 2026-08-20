@@ -220,6 +220,15 @@ pub struct StoredPentestScope {
     pub is_active: bool,
     pub revoked_at: Option<u64>,
     pub revoked_reason: Option<String>,
+    /// F7.1 "İmzalı authorization/scope manifest". An HMAC-SHA256 over the scope's canonical
+    /// bytes, keyed by a signing key this machine generated and never exposes (see
+    /// `SqliteStore::pentest_signing_key`). This is not proof the bug bounty program authorized
+    /// anything — no local system can attest to that — it is proof the scope on disk is exactly
+    /// what was written by `save_pentest_scope` on *this* machine and has not been edited since
+    /// (by a direct database edit, a restored backup from elsewhere, or any other path that
+    /// bypasses the typed contract). `authorize_pentest_action` refuses to authorize anything
+    /// against a scope whose signature does not verify.
+    pub signature: String,
 }
 
 impl StoredPentestScope {

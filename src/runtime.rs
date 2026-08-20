@@ -834,6 +834,17 @@ impl Runtime {
                 active.name
             ));
         }
+        // F7.1 "İmzalı authorization/scope manifest": verified on every call, not only at save
+        // time, so a scope edited on disk after being saved (a direct database edit, a restored
+        // backup from a different machine) is caught the moment it would matter — right before
+        // it authorizes anything — not merely when it happened to be re-saved.
+        if !store.pentest_scope_signature_is_valid(&active.name)? {
+            return Err(format!(
+                "the active pentest scope '{}' failed signature verification — it was modified \
+                 outside JARVIS and cannot be trusted; re-save it to reauthorize",
+                active.name
+            ));
+        }
         authorize_pentest_target(&active.scope, target, requested_mode)?;
         Ok(active)
     }

@@ -42,6 +42,89 @@ pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, even
     format!("{:x}", hasher.finalize())
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Constant-time byte comparison. Comparing a signature with `==` would short-circuit on the
+/// first differing byte, which leaks (via timing) how many leading bytes an attacker's guess got
+/// right — the standard reason signature/MAC comparisons never use the ordinary equality check.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Minimal HMAC-SHA256 (RFC 2104) over the `Sha256` primitive already used by `audit_hash` —
+/// this project has no cryptography crate dependency, and one construction on top of an already
+/// vetted hash function does not justify adding one.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut block_key = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed = Sha256::digest(key);
+        block_key[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; BLOCK_SIZE];
+    let mut opad = [0x5cu8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        ipad[index] ^= block_key[index];
+        opad[index] ^= block_key[index];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
+
+/// Length-prefixes every field before hashing, exactly like `audit_hash` does — without the
+/// length prefix, `("ab", "c")` and `("a", "bc")` would hash identically wherever two adjacent
+/// fields are simply concatenated, which is exactly the kind of boundary ambiguity a signature
+/// is supposed to rule out.
+fn canonical_pentest_scope_bytes(name: &str, scope: &PentestScope) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let fields = [
+        name.to_string(),
+        scope.schema_version.to_string(),
+        scope.authorization_ref.clone(),
+        scope.targets.join("\n"),
+        scope.excluded_targets.join("\n"),
+        scope.expires_at.to_string(),
+        scope.maximum_mode.as_str().to_string(),
+        scope.max_runtime_seconds.to_string(),
+    ];
+    for field in fields {
+        bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(field.as_bytes());
+    }
+    bytes
+}
+
 /// Durable task and audit storage for the implementation baseline.
 #[derive(Debug)]
 pub struct SqliteStore {
@@ -225,7 +308,13 @@ impl SqliteStore {
                 max_runtime_seconds INTEGER NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 0,
                 revoked_at INTEGER,
-                revoked_reason TEXT
+                revoked_reason TEXT,
+                signature TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS pentest_signing_key (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                key_hex TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -738,18 +827,69 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// F7.1 "İmzalı authorization/scope manifest". Not proof of what the bug bounty program
+    /// granted — no local process can attest to that — but proof that the scope stored under
+    /// `name` is exactly what `save_pentest_scope` wrote and has not changed since (a direct
+    /// database edit, a restored backup from a different machine, or any path that bypasses the
+    /// typed contract). The key is generated once per machine with `/dev/urandom` (this project
+    /// has no cryptography crate dependency; HMAC-SHA256 needs only the `sha2` hasher already
+    /// used by `audit_hash`, so this avoids adding one for a single construction) and is never
+    /// exposed through any user-facing command — it lives in its own table, deliberately not the
+    /// `secrets` table `/secret show` can read, so there is no command that could ever display or
+    /// delete it by accident.
+    fn pentest_signing_key(&self) -> Result<[u8; 32], String> {
+        let existing: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT key_hex FROM pentest_signing_key WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(hex_key) = existing {
+            return decode_hex_32(&hex_key)
+                .ok_or_else(|| "stored pentest signing key is corrupt".to_string());
+        }
+        let mut key = [0u8; 32];
+        {
+            use std::io::Read;
+            let mut urandom = std::fs::File::open("/dev/urandom")
+                .map_err(|error| format!("could not open /dev/urandom: {error}"))?;
+            urandom
+                .read_exact(&mut key)
+                .map_err(|error| format!("could not read /dev/urandom: {error}"))?;
+        }
+        self.connection
+            .execute(
+                "INSERT INTO pentest_signing_key(id, key_hex, created_at) VALUES (1, ?1, ?2)",
+                rusqlite::params![encode_hex(&key), now_epoch() as i64],
+            )
+            .map_err(|error| format!("pentest signing key persist failed: {error}"))?;
+        Ok(key)
+    }
+
+    fn sign_pentest_scope(&self, name: &str, scope: &PentestScope) -> Result<String, String> {
+        let key = self.pentest_signing_key()?;
+        Ok(encode_hex(&hmac_sha256(
+            &key,
+            &canonical_pentest_scope_bytes(name, scope),
+        )))
+    }
+
     /// F7.1 "Çoklu program/scope yönetimi". Validation happens here (through the single
     /// policy-gate validator) for the same reason `record_model_config_run` does it here —
     /// no future caller can persist an invalid scope by skipping the check. `INSERT OR REPLACE`
     /// is deliberate: re-saving a scope under the same name (e.g. renewing an authorization)
     /// updates it in place rather than requiring a separate "update" call, but never touches
     /// `is_active`/`revoked_at` — those are their own explicit actions below, not side effects
-    /// of a save.
+    /// of a save. Re-saving also re-signs: the signature always covers whatever is on disk now.
     pub fn save_pentest_scope(&self, name: &str, scope: &PentestScope) -> Result<(), String> {
         if name.trim().is_empty() {
             return Err("pentest scope name is required".into());
         }
         validate_pentest_scope(scope)?;
+        let signature = self.sign_pentest_scope(name, scope)?;
         let was_active: i64 = self
             .connection
             .query_row(
@@ -762,8 +902,9 @@ impl SqliteStore {
             .execute(
                 "INSERT OR REPLACE INTO pentest_scopes(
                     name, schema_version, authorization_ref, targets, excluded_targets,
-                    expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)",
+                    expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at,
+                    revoked_reason, signature
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, ?10)",
                 rusqlite::params![
                     name,
                     scope.schema_version,
@@ -774,17 +915,33 @@ impl SqliteStore {
                     scope.maximum_mode.as_str(),
                     scope.max_runtime_seconds,
                     was_active,
+                    signature,
                 ],
             )
             .map_err(|error| format!("pentest scope persist failed: {error}"))?;
         Ok(())
     }
 
+    /// True only if the stored scope's signature matches what `pentest_signing_key` would
+    /// produce for its current on-disk content right now. A tampered row (edited outside
+    /// `save_pentest_scope`) fails this — that is the entire point.
+    pub fn pentest_scope_signature_is_valid(&self, name: &str) -> Result<bool, String> {
+        let Some(stored) = self.pentest_scope(name)? else {
+            return Ok(false);
+        };
+        let expected = self.sign_pentest_scope(name, &stored.scope)?;
+        Ok(constant_time_eq(
+            expected.as_bytes(),
+            stored.signature.as_bytes(),
+        ))
+    }
+
     pub fn pentest_scope(&self, name: &str) -> Result<Option<StoredPentestScope>, String> {
         self.connection
             .query_row(
                 "SELECT name, schema_version, authorization_ref, targets, excluded_targets,
-                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason,
+                        signature
                  FROM pentest_scopes WHERE name = ?1",
                 rusqlite::params![name],
                 Self::row_to_stored_pentest_scope,
@@ -798,7 +955,8 @@ impl SqliteStore {
             .connection
             .prepare(
                 "SELECT name, schema_version, authorization_ref, targets, excluded_targets,
-                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason,
+                        signature
                  FROM pentest_scopes ORDER BY name ASC",
             )
             .map_err(|error| error.to_string())?;
@@ -836,6 +994,7 @@ impl SqliteStore {
             is_active: is_active != 0,
             revoked_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
             revoked_reason: row.get(10)?,
+            signature: row.get(11)?,
         })
     }
 
@@ -882,7 +1041,8 @@ impl SqliteStore {
         self.connection
             .query_row(
                 "SELECT name, schema_version, authorization_ref, targets, excluded_targets,
-                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason
+                        expires_at, maximum_mode, max_runtime_seconds, is_active, revoked_at, revoked_reason,
+                        signature
                  FROM pentest_scopes WHERE is_active = 1",
                 [],
                 Self::row_to_stored_pentest_scope,

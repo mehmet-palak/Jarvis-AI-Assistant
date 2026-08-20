@@ -5577,3 +5577,113 @@ fn saving_an_invalid_scope_is_rejected_before_it_ever_reaches_disk() {
     assert!(store.save_pentest_scope("acme", &expired).is_err());
     assert!(store.pentest_scope("acme").unwrap().is_none());
 }
+
+// --- F7.1: imzalı scope manifest (HMAC-SHA256 bütünlük koruması) -------------------------------
+
+/// Kaydedilen bir scope, kaydedildiği anda geçerli bir imza taşımalı — bu, doğrulamanın gerçekten
+/// çalıştığının en temel kanıtı: her şey yolundayken "geçersiz" dememeli.
+#[test]
+fn a_freshly_saved_scope_carries_a_valid_signature() {
+    let (store, _scope) = stored_scope("acme");
+    assert!(
+        store.pentest_scope_signature_is_valid("acme").unwrap(),
+        "yeni kaydedilmiş bir scope'un imzası geçerli olmalı"
+    );
+    let stored = store.pentest_scope("acme").unwrap().unwrap();
+    assert_eq!(
+        stored.signature.len(),
+        64,
+        "HMAC-SHA256 hex olarak 64 karakter olmalı"
+    );
+}
+
+/// F7.1'in asıl amacı: veritabanına JARVIS'in kendi kod yolunun DIŞINDA yapılan bir değişiklik
+/// (elle SQL UPDATE gibi) yakalanmalı. Burada gerçekten ham SQL ile bir alanı değiştirip
+/// imzanın düştüğünü kanıtlıyoruz — varsayım değil, gerçek kurcalama denemesi.
+#[test]
+fn tampering_with_a_stored_scope_outside_the_typed_api_is_detected() {
+    let (store, _scope) = stored_scope("acme");
+    assert!(store.pentest_scope_signature_is_valid("acme").unwrap());
+
+    // save_pentest_scope'u bypass edip doğrudan SQL ile hedef listesini değiştiriyoruz — tam
+    // olarak "birisi veritabanı dosyasını elle düzenledi" senaryosu.
+    store
+        .raw_connection()
+        .execute(
+            "UPDATE pentest_scopes SET targets = 'evil.example.test' WHERE name = 'acme'",
+            [],
+        )
+        .expect("ham SQL güncellemesi çalışmalı");
+
+    assert!(
+        !store.pentest_scope_signature_is_valid("acme").unwrap(),
+        "kurcalanan scope'un imzası artık geçersiz olmalı"
+    );
+}
+
+/// İmzalama anahtarı bir kez üretilip saklanıyor mu, yoksa her seferinde yeniden mi
+/// üretiliyor? Yeniden üretilseydi, aynı store'daki iki farklı scope aynı anahtarla
+/// imzalanamaz, hatta aynı scope'un ardışık iki doğrulaması bile tutarsız olurdu.
+#[test]
+fn the_signing_key_is_generated_once_and_reused_across_scopes() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let scope_a = valid_pentest_scope();
+    let mut scope_b = valid_pentest_scope();
+    scope_b.targets = vec!["other.example.test".into()];
+
+    store.save_pentest_scope("a", &scope_a).expect("a");
+    store.save_pentest_scope("b", &scope_b).expect("b");
+
+    // İkisi de aynı anahtarla imzalanmış olmalı — yeniden doğrulama tutarlı sonuç vermeli.
+    assert!(store.pentest_scope_signature_is_valid("a").unwrap());
+    assert!(store.pentest_scope_signature_is_valid("b").unwrap());
+    // Ve tekrar tekrar çağrılması aynı sonucu vermeli (anahtar her çağrıda değişmiyor).
+    assert!(store.pentest_scope_signature_is_valid("a").unwrap());
+}
+
+/// Runtime::authorize_pentest_action, imzası bozulmuş bir aktif scope'u REDDETMELİ — bu,
+/// F7.1'in gerçek güvenlik garantisinin uçtan uca (persistence + Runtime) kanıtı.
+#[test]
+fn runtime_refuses_to_authorize_against_a_tampered_active_scope() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let scope = valid_pentest_scope();
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+
+    store
+        .raw_connection()
+        .execute(
+            "UPDATE pentest_scopes SET maximum_mode = 'destructive' WHERE name = 'acme'",
+            [],
+        )
+        .expect("ham SQL güncellemesi çalışmalı");
+
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .authorize_pentest_action("app.example.test", PentestMode::Safe)
+        .expect_err("kurcalanan aktif scope yetkilendirememeli");
+    assert!(
+        error.contains("signature verification"),
+        "hata imza doğrulamasından bahsetmeli: {error}"
+    );
+}
+
+/// Aynı isimle tekrar kaydetmek (ör. yetkiyi yenilemek) her seferinde diskteki içeriği kapsayan
+/// TAZE bir imza üretmeli — eski imza yeni içerikle asla eşleşmemeli.
+#[test]
+fn re_saving_a_scope_under_the_same_name_re_signs_the_new_content() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope = valid_pentest_scope();
+    store.save_pentest_scope("acme", &scope).expect("ilk kayıt");
+    let first_signature = store.pentest_scope("acme").unwrap().unwrap().signature;
+
+    scope.targets = vec!["renewed.example.test".into()];
+    store.save_pentest_scope("acme", &scope).expect("yenileme");
+    let second = store.pentest_scope("acme").unwrap().unwrap();
+
+    assert_ne!(
+        first_signature, second.signature,
+        "farklı içerik farklı imza üretmeli"
+    );
+    assert!(store.pentest_scope_signature_is_valid("acme").unwrap());
+}
