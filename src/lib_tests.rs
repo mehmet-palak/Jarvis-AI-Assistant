@@ -6946,3 +6946,41 @@ fn concurrent_finding_writes_to_the_same_db_never_duplicate() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// --- F7.7: görev kontrolü (steering) -----------------------------------------------------------
+
+/// F7.7'nin steering şartı: kullanıcı "dur"/"odaklan"/"kapsam dışına al" diyebilmeli ve bu
+/// yönlendirmeler doğru öncelikle uygulanmalı (dur > dışlama > odak).
+#[test]
+fn pentest_steering_applies_stop_exclude_and_focus_in_the_right_order() {
+    // Varsayılan (boş) yönlendirme her endpoint'e izin verir.
+    let open = PentestSteering::default();
+    assert!(open.permits_endpoint("/api/anything"));
+
+    // "dur" her şeyi durdurur.
+    let stopped = PentestSteering {
+        stopped: true,
+        ..Default::default()
+    };
+    assert!(!stopped.permits_endpoint("/api/users"));
+
+    // Odak: yalnız /api/auth ile başlayanlar.
+    let focused = PentestSteering {
+        focus_endpoint_prefixes: vec!["/api/auth".to_string()],
+        ..Default::default()
+    };
+    assert!(focused.permits_endpoint("/api/auth/login"));
+    assert!(!focused.permits_endpoint("/api/orders"));
+
+    // Dışlama odaktan bile kazanır.
+    let focused_but_excluded = PentestSteering {
+        focus_endpoint_prefixes: vec!["/api".to_string()],
+        excluded_endpoint_prefixes: vec!["/api/admin".to_string()],
+        ..Default::default()
+    };
+    assert!(focused_but_excluded.permits_endpoint("/api/users"));
+    assert!(
+        !focused_but_excluded.permits_endpoint("/api/admin/delete"),
+        "açıkça dışlanan, odakta olsa bile reddedilmeli"
+    );
+}

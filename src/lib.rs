@@ -272,6 +272,47 @@ impl PentestAutonomy {
     }
 }
 
+/// F7.7 "Görev kontrolü (steering) ve devam ettirme." Kullanıcı çalışan bir güvenlik görevine
+/// "yalnızca auth akışına odaklan", "bu endpoint'i kapsam dışına al" veya "dur" diyebilmeli. Bu,
+/// o yönlendirmelerin tipli, kalıcılaştırılabilir (dolayısıyla devam ettirilebilir — F3 session/
+/// resume desenine bağlanır) hâli. **Karar mantığı burada gerçek ve test edilebilir; onu canlı
+/// bir çalışan görev döngüsüne bağlamak (worker'ın her adımdan önce buna danışması) gerçek bir
+/// orkestrasyon katmanı geldiğinde yapılacak.** Bir bulgu/kanıt değil, bir görev yönetim durumu.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PentestSteering {
+    /// `true` ise kullanıcı "dur" dedi — hiçbir yeni adım yürütülmemeli.
+    pub stopped: bool,
+    /// Boş değilse kullanıcı odağı daralttı ("yalnızca şunlara odaklan") — yalnız bu ön eklerle
+    /// başlayan endpoint'ler yürütülebilir. Boşsa odak sınırı yok.
+    pub focus_endpoint_prefixes: Vec<String>,
+    /// Kullanıcının açıkça kapsam dışına aldığı endpoint ön ekleri — her zaman kazanır (odakta
+    /// olsa bile).
+    pub excluded_endpoint_prefixes: Vec<String>,
+}
+
+impl PentestSteering {
+    /// Verilen bir endpoint üzerinde, mevcut yönlendirme altında bir adım yürütülebilir mi?
+    /// Sıra önemli: önce "dur", sonra dışlama (her zaman kazanır), sonra odak.
+    pub fn permits_endpoint(&self, endpoint: &str) -> bool {
+        if self.stopped {
+            return false;
+        }
+        if self
+            .excluded_endpoint_prefixes
+            .iter()
+            .any(|prefix| endpoint.starts_with(prefix.as_str()))
+        {
+            return false;
+        }
+        if self.focus_endpoint_prefixes.is_empty() {
+            return true;
+        }
+        self.focus_endpoint_prefixes
+            .iter()
+            .any(|prefix| endpoint.starts_with(prefix.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PentestScope {
     pub schema_version: u16,
