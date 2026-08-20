@@ -5172,3 +5172,150 @@ fn rag_scenarios_are_skipped_rather_than_failed_when_no_corpus_is_indexed() {
         "RAG senaryoları atlanmalıydı"
     );
 }
+
+/// F6 ölçüm zincirinin son halkası: bir ölçüm yapıldı ama kimse bakmıyorsa zincir kopuktur.
+/// Model veya prompt değiştiğinde golden set'i koşmayı hatırlamak insana bırakılan bir
+/// disiplindi ve kaçınılmaz olarak unutuluyordu — artık araç hatırlatıyor.
+#[test]
+fn an_unmeasured_configuration_is_announced_and_a_measured_one_is_not() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    // Hiç ölçüm yokken uyarı çıkmalı ve nasıl ölçüleceğini söylemeli.
+    let notice = runtime
+        .unmeasured_configuration_notice("Qwen3-8B-Q4_K_M")
+        .expect("ölçülmemiş konfigürasyon bildirilmeli");
+    assert!(notice.contains("/eval"), "{notice}");
+    assert!(notice.contains("Qwen3-8B-Q4_K_M"), "{notice}");
+    assert!(!runtime
+        .configuration_is_measured("Qwen3-8B-Q4_K_M")
+        .expect("sorgulanabilmeli"));
+
+    // Aynı model + AYNI prompt ile bir koşum kaydedilince uyarı susmalı.
+    runtime
+        .record_model_config_run(&ModelConfigRun {
+            schema_version: 1,
+            run_id: "run-1".into(),
+            recorded_at: 1_000,
+            provider_id: "llama-server".into(),
+            model_id: "Qwen3-8B-Q4_K_M".into(),
+            model_fingerprint: "abc123".into(),
+            prompt_fingerprint: Runtime::active_prompt_fingerprint(),
+            server_settings: "-ngl 28".into(),
+            scenarios_passed: 10,
+            scenarios_failed: 0,
+            median_latency_ms: 3000,
+            notes: "test".into(),
+            rollback_target: None,
+        })
+        .expect("kayıt");
+
+    assert!(runtime
+        .configuration_is_measured("Qwen3-8B-Q4_K_M")
+        .expect("sorgulanabilmeli"));
+    assert!(runtime
+        .unmeasured_configuration_notice("Qwen3-8B-Q4_K_M")
+        .is_none());
+}
+
+/// Prompt parmak izi commit hash'i değil METNİN KENDİSİNİN SHA-256'sı. Bu yüzden farklı bir
+/// prompt'la yapılmış bir ölçüm, güncel prompt'u ölçmüş sayılmamalı — yoksa kullanıcı prompt'u
+/// değiştirip "ölçüldü" görür ve sessizce yanlış bir güvene kapılır.
+#[test]
+fn a_run_recorded_under_a_different_prompt_does_not_count_as_measured() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    runtime
+        .record_model_config_run(&ModelConfigRun {
+            schema_version: 1,
+            run_id: "eski-prompt".into(),
+            recorded_at: 1_000,
+            provider_id: "llama-server".into(),
+            model_id: "Qwen3-8B-Q4_K_M".into(),
+            model_fingerprint: "abc123".into(),
+            prompt_fingerprint: "baska-bir-prompt-parmak-izi".into(),
+            server_settings: "-ngl 28".into(),
+            scenarios_passed: 10,
+            scenarios_failed: 0,
+            median_latency_ms: 3000,
+            notes: "eski prompt".into(),
+            rollback_target: None,
+        })
+        .expect("kayıt");
+
+    assert!(
+        !runtime
+            .configuration_is_measured("Qwen3-8B-Q4_K_M")
+            .expect("sorgulanabilmeli"),
+        "farklı prompt'la yapılmış ölçüm, güncel prompt'u ölçmüş sayılmamalı"
+    );
+    assert!(runtime
+        .unmeasured_configuration_notice("Qwen3-8B-Q4_K_M")
+        .is_some());
+}
+
+/// Başka bir MODEL için yapılmış ölçüm de bu modeli ölçmüş sayılmamalı.
+#[test]
+fn a_run_recorded_for_a_different_model_does_not_count_either() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+
+    runtime
+        .record_model_config_run(&ModelConfigRun {
+            schema_version: 1,
+            run_id: "baska-model".into(),
+            recorded_at: 1_000,
+            provider_id: "llama-server".into(),
+            model_id: "Qwen2.5-VL-3B".into(),
+            model_fingerprint: "def456".into(),
+            prompt_fingerprint: Runtime::active_prompt_fingerprint(),
+            server_settings: "-ngl 0".into(),
+            scenarios_passed: 5,
+            scenarios_failed: 0,
+            median_latency_ms: 9000,
+            notes: "aday".into(),
+            rollback_target: None,
+        })
+        .expect("kayıt");
+
+    assert!(!runtime
+        .configuration_is_measured("Qwen3-8B-Q4_K_M")
+        .expect("sorgulanabilmeli"));
+    // Ama kendi modeli için ölçülmüş sayılmalı.
+    assert!(runtime
+        .configuration_is_measured("Qwen2.5-VL-3B")
+        .expect("sorgulanabilmeli"));
+}
+
+/// Store bağlı değilken uyarı SUSMALI: registry olmadan ölçüm zaten mümkün değil ve kullanıcıyı
+/// çözemeyeceği bir şey için uyarmak gürültüdür.
+#[test]
+fn no_notice_is_shown_when_there_is_no_registry_to_measure_into() {
+    let runtime = Runtime::default();
+    assert!(runtime
+        .unmeasured_configuration_notice("Qwen3-8B-Q4_K_M")
+        .is_none());
+}
+
+/// Gerçek kullanıcı veritabanına karşı uçtan uca: bugün hiç ölçüm kaydı yok, dolayısıyla
+/// açılışta uyarı çıkmalı. Bu test kaydı silmez/eklemez — yalnız okur.
+#[test]
+#[ignore = "kullanıcının gerçek jarvis.db'sini okur"]
+fn the_real_database_reports_its_measurement_state_honestly() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("jarvis.db");
+    if !path.is_file() {
+        println!("gerçek DB yok, atlanıyor");
+        return;
+    }
+    let store = SqliteStore::open(path.to_str().expect("utf-8")).expect("gerçek DB açılmalı");
+    let runtime = Runtime::with_store(store);
+    let measured = runtime
+        .configuration_is_measured("Qwen3-8B-Q4_K_M")
+        .expect("sorgulanabilmeli");
+    let notice = runtime.unmeasured_configuration_notice("Qwen3-8B-Q4_K_M");
+    println!("ölçüldü mü : {measured}");
+    println!("uyarı      : {notice:?}");
+    // Sözleşme: ikisi tutarlı olmalı — ölçülmüşse uyarı yok, ölçülmemişse uyarı var.
+    assert_eq!(measured, notice.is_none());
+}

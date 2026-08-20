@@ -11,6 +11,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions};
+use jarvis_core::ModelProvider as _;
 use jarvis_core::{
     attachment_receipt_manifest, default_desktop_preferences_path, default_profile_files_dir,
     ensure_profile_files_exist, inspect_local_attachment, load_desktop_preferences,
@@ -134,6 +135,9 @@ struct JarvisDesktop {
     speech: jarvis_core::SpeechSettings,
     /// F5 konuşma modu: sıradaki yanıt sesli okunacak mı (soru sesle geldiyse).
     speak_next_reply: bool,
+    /// F6: bu model+prompt bileşimi golden set ile ölçüldü mü. Açılışta bir kez bakılıyor —
+    /// her karede registry sorgulamak (birkaç COUNT/SELECT) gereksiz.
+    configuration_measured: bool,
     /// Ses yığınının kurulu olup olmadığı — **bir kez** açılışta ölçülüyor.
     ///
     /// İlk hâlinde her karede yeniden sorgulanıyordu ve `availability()` içindeki
@@ -223,6 +227,12 @@ impl JarvisDesktop {
         context: &egui::Context,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
+        // Struct literalinden ÖNCE hesaplanıyor: orada `runtime`/`provider` taşınmış oluyor.
+        let configuration_measured = runtime
+            .lock()
+            .ok()
+            .and_then(|guard| guard.configuration_is_measured(provider.model_id()).ok())
+            .unwrap_or(true);
         let preferences_path = default_desktop_preferences_path();
         let (preferences, preferences_status) = match preferences_path.as_deref() {
             Some(path) => match load_desktop_preferences(path) {
@@ -303,6 +313,7 @@ impl JarvisDesktop {
             voice_recording: None,
             speech: jarvis_core::SpeechSettings::default(),
             speak_next_reply: false,
+            configuration_measured,
             voice_availability: jarvis_core::VoiceStackPaths::local_default().availability(),
             queued_attachments: vec![],
             sent_attachment_receipts: vec![],
@@ -1044,6 +1055,22 @@ impl JarvisDesktop {
         hud_status_row(ui, "MODEL", &self.model_status, model_color);
         hud_status_row(ui, "DONANIM", "GPU (VULKAN) 28/36", COLOR_TEAL_DIM);
         hud_status_row(ui, "ERİŞİM", "LOOPBACK", COLOR_TEAL_DIM);
+        // F6: bu model+prompt bileşimi hiç ölçülmediyse görünür olsun — bir kalite şikayetini
+        // değerlendirirken "hiç ölçmedik" bilgisi kritik.
+        hud_status_row(
+            ui,
+            "ÖLÇÜM",
+            if self.configuration_measured {
+                "YAPILDI"
+            } else {
+                "YOK (/eval)"
+            },
+            if self.configuration_measured {
+                COLOR_TEAL_DIM
+            } else {
+                COLOR_GOLD
+            },
+        );
         let voice = self.voice_availability;
         hud_status_row(
             ui,

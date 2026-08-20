@@ -804,6 +804,38 @@ impl Runtime {
     /// SHA-256 of the exact system prompt this build sends. This is the "prompt version" the
     /// registry stores: a commit hash would not notice an uncommitted edit, and a version number
     /// would have to be remembered by hand.
+    /// Şu anki model + prompt bileşiminin hiç ölçülüp ölçülmediği.
+    ///
+    /// F6'nın kurduğu ölçüm zincirinin son halkası: bir ölçüm yapıldı ama kimse ona bakmıyorsa
+    /// zincir kopuk demektir. Bir model veya prompt değiştiğinde kullanıcının bunu *hatırlaması*
+    /// gerekiyordu; hatırlamak insana bırakılan bir disiplin ve kaçınılmaz olarak unutuluyor.
+    ///
+    /// Prompt parmak izi commit hash'i değil metnin kendisinin SHA-256'sı olduğu için,
+    /// commit edilmemiş bir prompt düzenlemesi bile "yeni konfigürasyon" olarak görünüyor —
+    /// prompt'u kurcalayıp sonucu ölçmek tam da yapılacak şey.
+    pub fn configuration_is_measured(&self, model_id: &str) -> Result<bool, String> {
+        let prompt = Self::active_prompt_fingerprint();
+        Ok(self.model_config_runs(200)?.iter().any(|run| {
+            run.prompt_fingerprint == prompt
+                && (run.model_id == model_id || run.model_fingerprint == model_id)
+        }))
+    }
+
+    /// Ölçülmemiş bir konfigürasyon için kullanıcıya gösterilecek uyarı; ölçülmüşse `None`.
+    ///
+    /// Uyarı bir *hata* değil, bir bilgi: JARVIS çalışmaya devam ediyor. Ama "bu ayarın nasıl
+    /// davrandığını hiç ölçmedik" bilgisi, bir kalite şikayetini değerlendirirken kritik.
+    /// Store bağlı değilse sessiz kalıyor — registry olmadan ölçüm zaten mümkün değil ve
+    /// kullanıcıyı çözemeyeceği bir şey için uyarmak gürültüdür.
+    pub fn unmeasured_configuration_notice(&self, model_id: &str) -> Option<String> {
+        match self.configuration_is_measured(model_id) {
+            Ok(true) | Err(_) => None,
+            Ok(false) => Some(format!(
+                "Bu konfigürasyon ({model_id} + güncel sistem prompt'u) hiç ölçülmedi — `/eval` ile golden set'i koşabilirsin."
+            )),
+        }
+    }
+
     pub fn active_prompt_fingerprint() -> String {
         crate::sha256_hex(crate::model::JARVIS_SYSTEM_PROMPT)
     }
