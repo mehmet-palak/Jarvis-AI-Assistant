@@ -6061,3 +6061,46 @@ fn dns_bruteforce_requires_an_active_scope() {
         .expect_err("aktif scope yokken reddedilmeli");
     assert!(error.contains("no active pentest scope"), "{error}");
 }
+
+// --- F7.3: aktif keşif (JS analiziyle endpoint keşfi) — yalnız yetkilendirme kapısı ------------
+//
+// Gerçek bir ağ çağrısı gerektirmeyen testler: `authorize_pentest_action` her zaman
+// `fetch_javascript_source`'tan ÖNCE çalışıyor, bu yüzden reddedilme senaryoları hiç ağa
+// çıkmıyor — tıpkı `scan_pentest_ports`'un aynı deseniyle.
+
+#[test]
+fn js_endpoint_discovery_requires_active_mode_not_just_safe() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let mut scope = active_mode_scope_for("app.example.test");
+    scope.maximum_mode = PentestMode::Safe;
+    store.save_pentest_scope("acme", &scope).expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let error = runtime
+        .discover_pentest_endpoints_via_javascript("app.example.test", "/app.js")
+        .expect_err("SAFE tavanlı scope ACTIVE gerektiren JS analizine izin vermemeli");
+    assert!(error.contains("exceeds the authorization scope"), "{error}");
+}
+
+#[test]
+fn js_endpoint_discovery_refuses_a_target_outside_scope() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .discover_pentest_endpoints_via_javascript("not-in-scope.example.test", "/app.js")
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
+}
+
+#[test]
+fn js_endpoint_discovery_requires_an_active_scope() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .discover_pentest_endpoints_via_javascript("app.example.test", "/app.js")
+        .expect_err("aktif scope yokken reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}

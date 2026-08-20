@@ -275,6 +275,20 @@ pub struct PentestPortScanResult {
     pub stopped_early_due_to_runtime_budget: bool,
 }
 
+/// F7.3 "Aktif keşif: JS analiziyle endpoint keşfi" bir sorgunun sonucu —
+/// `Runtime::discover_pentest_endpoints_via_javascript`. Bulunanlar hostname envanterine
+/// (`pentest_assets`) YAZILMIYOR — bir endpoint yolu bir hostname değil, F7.1'in host tabanlı
+/// scope eşleştirmesine uymuyor; bu yalnız çağırana dönen, kalıcı olmayan bir sonuç.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestEndpointDiscoveryResult {
+    pub target: String,
+    /// JS kaynağının indirildiği yol (ör. `/assets/app.js`).
+    pub source_path: String,
+    /// Bulunan, gerçekçi görünen endpoint yolları — "bulundu" anlamında, "erişilebilir/doğrulandı"
+    /// anlamında değil (F7.7'nin kendi ayrımı, burada da geçerli).
+    pub endpoints: Vec<String>,
+}
+
 /// F7.3 "Pasif keşif" bir sorgunun sonucu — `Runtime::discover_pentest_assets_via_certificate_transparency`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PentestReconResult {

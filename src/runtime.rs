@@ -931,6 +931,26 @@ impl Runtime {
         self.record_pentest_recon_candidates(apex_domain, "dns_bruteforce", resolved)
     }
 
+    /// F7.3 "Aktif keşif: JS analiziyle endpoint keşfi". Port taramasıyla aynı tavan gerekçesi:
+    /// hedeften gerçek bir dosya indiriliyor, bu yüzden `PentestMode::Active` talep ediliyor.
+    /// Bulunan endpoint YOLLARI (host değil) kalıcı hostname envanterine yazılmıyor — F7.1'in
+    /// scope eşleştirmesi host tabanlı, bir yolu ona zorla uydurmak yanlış bir soyutlama olurdu;
+    /// bu yalnız çağırana dönen bir sonuç (bkz. `PentestEndpointDiscoveryResult`'ın kendi notu).
+    pub fn discover_pentest_endpoints_via_javascript(
+        &self,
+        target: &str,
+        js_path: &str,
+    ) -> Result<PentestEndpointDiscoveryResult, String> {
+        self.authorize_pentest_action(target, PentestMode::Active)?;
+        let source = crate::pentest_recon::fetch_javascript_source(target, js_path)?;
+        let endpoints = crate::pentest_recon::extract_endpoint_paths_from_javascript(&source);
+        Ok(PentestEndpointDiscoveryResult {
+            target: target.to_string(),
+            source_path: js_path.to_string(),
+            endpoints,
+        })
+    }
+
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
     /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
     /// own split (a thin real-network wrapper around a pure, offline-tested function). Every F7.3
