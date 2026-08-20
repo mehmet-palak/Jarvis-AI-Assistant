@@ -1094,6 +1094,72 @@ impl Runtime {
         }
     }
 
+    /// F7.6 "Evidence tabanlı finding formatı" + "scope dışı ... hedef deny testleri". Bir
+    /// bulguyu kaydetmeden önce hedefin hâlâ aktif scope'un yetkili sınırları içinde olduğu
+    /// kontrol ediliyor — JARVIS'in kendi veritabanına yazmak hedefe hiçbir paket göndermese de,
+    /// yanlış/hayali bir hedef hakkında bir bulgunun raporlara sızmasını önlemek bu kontrolün işi.
+    /// Kaydın kendisi (sır benzeri kanıt reddi, deduplication) `SqliteStore::record_pentest_finding`'de.
+    pub fn record_pentest_finding(
+        &self,
+        target: &str,
+        category: &str,
+        title: &str,
+        evidence: &str,
+        severity_estimate: Risk,
+    ) -> Result<PentestFinding, String> {
+        let active = self.authorize_pentest_action(target, PentestMode::Safe)?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest findings require an attached local store".to_string())?;
+        store.record_pentest_finding(
+            &active.name,
+            target,
+            category,
+            title,
+            evidence,
+            severity_estimate,
+        )
+    }
+
+    /// F7.6 "İnsan onayı" + F7.7'nin `confirm_finding` sözleşmesi. Hedefin hâlâ scope içinde
+    /// olduğunu (kayıt sırasından bu yana scope değişmiş/iptal edilmiş olabilir — defense in
+    /// depth, `authorize_pentest_action`'ın her yerde uyguladığı ilkeyle aynı) yeniden kontrol
+    /// ediyor, sonra `human_approved: bool` + taze kanıt zorunluluğunu `SqliteStore`'a devrediyor.
+    pub fn confirm_pentest_finding(
+        &self,
+        finding_id: &str,
+        confirmation_evidence: &str,
+        human_approved: bool,
+    ) -> Result<PentestFinding, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest findings require an attached local store".to_string())?;
+        let finding = store
+            .pentest_finding(finding_id)?
+            .ok_or_else(|| format!("'{finding_id}' adında bir bulgu yok"))?;
+        self.authorize_pentest_action(&finding.target, PentestMode::Safe)?;
+        store.confirm_pentest_finding(finding_id, confirmation_evidence, human_approved)
+    }
+
+    /// F7.6: bir bulgunun yanlış pozitif olduğuna insan karar verdiğinde — hiçbir yeniden
+    /// yetkilendirme gerekmiyor, silmek/iptal etmek her zaman daha güvenli yöndeki karar.
+    pub fn reject_pentest_finding(&self, finding_id: &str) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "pentest findings require an attached local store".to_string())?
+            .reject_pentest_finding(finding_id)
+    }
+
+    /// Bir scope'un tüm bulguları — en son kaydedilen önce.
+    pub fn pentest_findings(&self, scope_name: &str) -> Result<Vec<PentestFinding>, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "pentest findings require an attached local store".to_string())?
+            .pentest_findings(scope_name)
+    }
+
     /// The scope-filtering + persistence half of recon, factored out from the real-network call
     /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
     /// own split (a thin real-network wrapper around a pure, offline-tested function). Every F7.3

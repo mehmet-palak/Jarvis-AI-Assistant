@@ -1057,7 +1057,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), 15);
 }
 
 #[test]
@@ -4161,7 +4161,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), 15);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -6387,4 +6387,174 @@ fn scan_pentest_exposed_files_requires_an_active_scope() {
         .scan_pentest_exposed_files("app.example.test", true, None)
         .expect_err("aktif scope yokken reddedilmeli");
     assert!(error.contains("no active pentest scope"), "{error}");
+}
+
+// --- F7.6: bulgu yönetimi -------------------------------------------------------------------
+
+#[test]
+fn record_pentest_finding_starts_as_suspected() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "exposed_sensitive_file",
+            "Açığa çıkmış .env dosyası",
+            "GET /.env -> 200, DATABASE_URL=... görüldü",
+            Risk::High,
+        )
+        .expect("kayıt çalışmalı");
+    assert_eq!(finding.status, PentestFindingStatus::Suspected);
+    assert_eq!(finding.severity_estimate, Risk::High);
+    assert!(finding.confirmed_at.is_none());
+}
+
+/// F7.6'nın "eşleştirme (deduplication)" maddesi — ayrı bir mekanizma değil, `finding_id`'nin
+/// kendi içerik-adresli kimliğinin doğal bir sonucu: AYNI (scope, hedef, kategori, başlık)
+/// dörtlüsü tekrar kaydedilirse yeni bir satır OLUŞMAZ, aynı satır güncellenir.
+#[test]
+fn recording_the_same_finding_twice_updates_in_place_instead_of_duplicating() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let first = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "exposed_sensitive_file",
+            "Açığa çıkmış .env dosyası",
+            "ilk kanıt",
+            Risk::Medium,
+        )
+        .expect("ilk kayıt");
+    let second = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "exposed_sensitive_file",
+            "Açığa çıkmış .env dosyası",
+            "güncellenmiş kanıt",
+            Risk::High,
+        )
+        .expect("ikinci kayıt");
+
+    assert_eq!(
+        first.finding_id, second.finding_id,
+        "aynı bulgu her zaman aynı finding_id'yi üretmeli"
+    );
+    let all = runtime.pentest_findings(&first.scope_name).expect("sorgu");
+    assert_eq!(
+        all.len(),
+        1,
+        "aynı bulgu iki kez kaydedilse bile envanterde tek satır olmalı"
+    );
+    assert_eq!(all[0].evidence, "güncellenmiş kanıt");
+    assert_eq!(all[0].severity_estimate, Risk::High);
+}
+
+/// Sır sızıntısı koruması: bariz bir sır/kimlik bilgisi deseni içeren bir kanıt, JARVIS'in
+/// kendi veritabanına YAZILMAMALI — çağıran önce redakte etmeli.
+#[test]
+fn record_pentest_finding_rejects_evidence_containing_an_obvious_secret() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .record_pentest_finding(
+            "app.example.test",
+            "exposed_sensitive_file",
+            "Açığa çıkmış AWS anahtarı",
+            "AKIA1234567890ABCDEF görüldü",
+            Risk::Critical,
+        )
+        .expect_err("sır benzeri kanıt reddedilmeli");
+    assert!(!error.is_empty());
+}
+
+#[test]
+fn record_pentest_finding_refuses_a_target_outside_scope() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .record_pentest_finding(
+            "not-in-scope.example.test",
+            "exposed_sensitive_file",
+            "başlık",
+            "kanıt",
+            Risk::Low,
+        )
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
+}
+
+fn record_test_finding(runtime: &Runtime, target: &str) -> PentestFinding {
+    runtime
+        .record_pentest_finding(
+            target,
+            "exposed_sensitive_file",
+            "başlık",
+            "ilk kanıt",
+            Risk::Medium,
+        )
+        .expect("kayıt")
+}
+
+#[test]
+fn confirm_pentest_finding_requires_explicit_human_approval() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    let error = runtime
+        .confirm_pentest_finding(&finding.finding_id, "yeniden üretme kanıtı", false)
+        .expect_err("onaysız doğrulama reddedilmeli");
+    assert!(error.contains("insan onayı"), "{error}");
+}
+
+#[test]
+fn confirm_pentest_finding_requires_non_empty_confirmation_evidence() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    let error = runtime
+        .confirm_pentest_finding(&finding.finding_id, "   ", true)
+        .expect_err("boş doğrulama kanıtı reddedilmeli");
+    assert!(error.contains("yeniden üretme kanıtı"), "{error}");
+}
+
+#[test]
+fn confirm_pentest_finding_moves_suspected_to_confirmed_with_evidence_and_approval() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    let confirmed = runtime
+        .confirm_pentest_finding(&finding.finding_id, "ikinci kez elle doğrulandı", true)
+        .expect("doğrulama başarılı olmalı");
+    assert_eq!(confirmed.status, PentestFindingStatus::Confirmed);
+    assert_eq!(
+        confirmed.confirmation_evidence,
+        Some("ikinci kez elle doğrulandı".to_string())
+    );
+    assert!(confirmed.confirmed_at.is_some());
+}
+
+/// F7.7'nin `confirm_finding` sözleşmesi: bir bulgu yalnız BİR KEZ doğrulanabilir — zaten
+/// doğrulanmış (ya da reddedilmiş) bir bulguyu sessizce tekrar "doğrulamak", kararın ne zaman
+/// verildiğini belirsizleştirirdi.
+#[test]
+fn confirming_an_already_confirmed_finding_is_refused() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    runtime
+        .confirm_pentest_finding(&finding.finding_id, "ilk doğrulama", true)
+        .expect("ilk doğrulama başarılı olmalı");
+    let error = runtime
+        .confirm_pentest_finding(&finding.finding_id, "ikinci doğrulama denemesi", true)
+        .expect_err("zaten doğrulanmış bir bulgu tekrar doğrulanamamalı");
+    assert!(error.contains("confirmed"), "{error}");
+}
+
+#[test]
+fn reject_pentest_finding_marks_it_rejected_without_deleting_it() {
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let finding = record_test_finding(&runtime, "app.example.test");
+    runtime
+        .reject_pentest_finding(&finding.finding_id)
+        .expect("iptal başarılı olmalı");
+    let all = runtime
+        .pentest_findings(&finding.scope_name)
+        .expect("sorgu");
+    assert_eq!(all.len(), 1, "bulgu silinmemeli, yalnız durumu değişmeli");
+    assert_eq!(all[0].status, PentestFindingStatus::Rejected);
 }

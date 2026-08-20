@@ -166,6 +166,27 @@ pub enum Risk {
     Critical,
 }
 
+impl Risk {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Risk::Low => "low",
+            Risk::Medium => "medium",
+            Risk::High => "high",
+            Risk::Critical => "critical",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "low" => Some(Risk::Low),
+            "medium" => Some(Risk::Medium),
+            "high" => Some(Risk::High),
+            "critical" => Some(Risk::Critical),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PentestMode {
     Safe,
@@ -289,6 +310,71 @@ pub struct PentestEndpointDiscoveryResult {
     /// Bulunan, gerçekçi görünen endpoint yolları — "bulundu" anlamında, "erişilebilir/doğrulandı"
     /// anlamında değil (F7.7'nin kendi ayrımı, burada da geçerli).
     pub endpoints: Vec<String>,
+}
+
+/// F7.6 "Bulgu yönetimi": bir bulgunun yaşam döngüsü durumu. F7.7'nin `confirm_finding`
+/// sözleşmesiyle aynı ilke — "model şüphelendi" ile "yeniden üretme kanıtıyla doğrulandı" ayrı,
+/// karıştırılmayan durumlar olmalı.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PentestFindingStatus {
+    /// Bir SAFE/ACTIVE kontrolü bunu otomatik olarak gözlemledi — henüz insan onayı veya yeniden
+    /// üretme kanıtı YOK. Bir bulgunun varsayılan, ilk durumu.
+    Suspected,
+    /// `confirm_pentest_finding` ile, hem taze bir yeniden üretme kanıtı hem açık bir insan
+    /// onayıyla buraya geçti.
+    Confirmed,
+    /// İnsan bunun gerçek bir bulgu olmadığına (yanlış pozitif) karar verdi — silinmedi, tarihçe
+    /// olarak kalıyor (append-only felsefesi, audit chain'le aynı).
+    Rejected,
+}
+
+impl PentestFindingStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PentestFindingStatus::Suspected => "suspected",
+            PentestFindingStatus::Confirmed => "confirmed",
+            PentestFindingStatus::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "suspected" => Some(PentestFindingStatus::Suspected),
+            "confirmed" => Some(PentestFindingStatus::Confirmed),
+            "rejected" => Some(PentestFindingStatus::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// F7.6 "Evidence tabanlı finding formatı" — bir güvenlik bulgusunun kalıcı, tipli kaydı.
+/// `finding_id`, `(scope_name, target, category, title)` dörtlüsünün içerik hash'i — `memory_id`
+/// ile aynı desen (`propose_memory_with_trust_and_scope`): AYNI bulgu tekrar kaydedilirse yeni
+/// bir satır DEĞİL, aynı satır güncellenir. Bu, F7.6'nın ayrı bir madde olarak istediği
+/// "eşleştirme (deduplication)"yi ayrı bir mekanizma icat etmeden, kimliğin kendisinden
+/// sağlıyor — gerçekten aynı bulgu yapısal olarak asla iki satıra bölünemez.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestFinding {
+    pub finding_id: String,
+    pub scope_name: String,
+    pub target: String,
+    /// Serbest biçimli kısa bir kategori etiketi (ör. `"subdomain_takeover"`,
+    /// `"exposed_sensitive_file"`, `"idor"`) — F7.5/F7.4'ün kontrol adlarıyla hizalı olması
+    /// önerilir ama zorunlu bir enum değil, yeni bulgu türleri kod değişikliği gerektirmesin diye.
+    pub category: String,
+    pub title: String,
+    /// Ham kanıt metni — istek/cevap çiftleri, eşleşen imza, vb. `record_pentest_finding`
+    /// bunu kaydetmeden önce bariz sır benzeri içeriğe karşı tarıyor (aynı kontrol, workspace RAG
+    /// ingestion'ın zaten kullandığı `reject_secret_like_workspace_document_content`) — bir
+    /// bulgunun kanıtı olarak ham bir API anahtarını/token'ı JARVIS'in kendi veritabanına
+    /// yazmamak için.
+    pub evidence: String,
+    pub severity_estimate: Risk,
+    pub status: PentestFindingStatus,
+    pub recorded_at: u64,
+    pub confirmed_at: Option<u64>,
+    /// Yalnız `status == Confirmed` ise dolu — doğrulama sırasında toplanan taze kanıt.
+    pub confirmation_evidence: Option<String>,
 }
 
 /// F7.4 "Manuel test araçları": gönderilecek isteğin tam tanımı — bir kullanıcının/modelin "bu

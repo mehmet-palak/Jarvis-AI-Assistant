@@ -23,9 +23,10 @@ use crate::{
     validate_pentest_scope, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     EmbeddingProvider, FeedbackCandidate, FeedbackReview, FeedbackSignal, MemoryNamespace,
-    MemoryProposal, MemoryRecord, ModelConfigRun, PentestMode, PentestScope, StoredPentestAsset,
-    StoredPentestScope, Task, TeacherExample, TrustLevel, VerifyStatus, WorkspaceCitation,
-    WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
+    MemoryProposal, MemoryRecord, ModelConfigRun, PentestFinding, PentestFindingStatus,
+    PentestMode, PentestScope, Risk, StoredPentestAsset, StoredPentestScope, Task, TeacherExample,
+    TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
+    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -133,7 +134,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 14;
+const CURRENT_SCHEMA_VERSION: i64 = 15;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -323,6 +324,19 @@ impl SqliteStore {
                 first_seen INTEGER NOT NULL,
                 last_seen INTEGER NOT NULL,
                 PRIMARY KEY (scope_name, asset)
+            );
+            CREATE TABLE IF NOT EXISTS pentest_findings (
+                finding_id TEXT PRIMARY KEY,
+                scope_name TEXT NOT NULL,
+                target TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                status TEXT NOT NULL,
+                recorded_at INTEGER NOT NULL,
+                confirmed_at INTEGER,
+                confirmation_evidence TEXT
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -408,6 +422,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (14, 'F7.3 pentest asset inventory')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (15, 'F7.6 pentest finding registry')",
             [],
         )?;
         Ok(())
@@ -1160,6 +1178,164 @@ impl SqliteStore {
             .map_err(|error| error.to_string())?;
         rows.collect::<SqlResult<Vec<_>>>()
             .map_err(|error| error.to_string())
+    }
+
+    /// F7.6 "Evidence tabanlı finding formatı". `finding_id`, `memory_id`'nin kendi deseniyle
+    /// aynı: `(scope_name, target, category, title)` dörtlüsünün içerik hash'i. Bu, F7.6'nın
+    /// ayrı bir madde olarak istediği "eşleştirme (deduplication)"yi ayrı bir mekanizma icat
+    /// etmeden sağlıyor — AYNI bulgu tekrar kaydedilirse `INSERT OR REPLACE` aynı satırı
+    /// günceller (kanıt/zaman tazelenir), yeni bir satır oluşmaz. **Sır sızıntısı koruması:**
+    /// kanıt metni, workspace RAG ingestion'ın zaten kullandığı
+    /// `reject_secret_like_workspace_document_content` ile taranıyor — bariz bir sır/kimlik bilgisi
+    /// deseni (PEM anahtar başlığı, bilinen token öneki) içeren bir kanıt reddediliyor; çağıran
+    /// önce kanıtı redakte etmeli (ör. "API_KEY=[REDACTED]").
+    pub fn record_pentest_finding(
+        &self,
+        scope_name: &str,
+        target: &str,
+        category: &str,
+        title: &str,
+        evidence: &str,
+        severity_estimate: Risk,
+    ) -> Result<PentestFinding, String> {
+        reject_secret_like_workspace_document_content(evidence)?;
+        let identity = format!("finding-v1|{scope_name}|{target}|{category}|{title}");
+        let finding_id = format!("finding-{}", &sha256_hex(&identity)[..16]);
+        let recorded_at = now_epoch() as i64;
+        self.connection
+            .execute(
+                "INSERT INTO pentest_findings(
+                    finding_id, scope_name, target, category, title, evidence, severity,
+                    status, recorded_at, confirmed_at, confirmation_evidence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)
+                 ON CONFLICT(finding_id) DO UPDATE SET
+                    evidence = excluded.evidence,
+                    severity = excluded.severity,
+                    recorded_at = excluded.recorded_at",
+                rusqlite::params![
+                    finding_id,
+                    scope_name,
+                    target,
+                    category,
+                    title,
+                    evidence,
+                    severity_estimate.as_str(),
+                    PentestFindingStatus::Suspected.as_str(),
+                    recorded_at,
+                ],
+            )
+            .map_err(|error| format!("pentest finding kaydı başarısız: {error}"))?;
+        self.pentest_finding(&finding_id)?
+            .ok_or_else(|| "pentest finding kaydedildi ama geri okunamadı".to_string())
+    }
+
+    /// F7.6 "İnsan onayı" + F7.7'nin `confirm_finding` sözleşmesi: bir bulgu, taze bir yeniden
+    /// üretme kanıtı VE açık bir insan onayı olmadan `Confirmed` durumuna geçemez —
+    /// `commit_memory_proposal`'ın `user_approved: bool` deseniyle aynı. Yalnız hâlâ `Suspected`
+    /// durumundaki bir bulgu onaylanabilir (zaten `Confirmed`/`Rejected` bir bulguyu sessizce
+    /// yeniden onaylamak, o kararın ne zaman/neden verildiğini belirsizleştirirdi).
+    pub fn confirm_pentest_finding(
+        &self,
+        finding_id: &str,
+        confirmation_evidence: &str,
+        human_approved: bool,
+    ) -> Result<PentestFinding, String> {
+        if !human_approved {
+            return Err("bir bulguyu doğrulamak açık insan onayı gerektirir".into());
+        }
+        if confirmation_evidence.trim().is_empty() {
+            return Err("doğrulama, taze bir yeniden üretme kanıtı gerektirir".into());
+        }
+        reject_secret_like_workspace_document_content(confirmation_evidence)?;
+        let current = self
+            .pentest_finding(finding_id)?
+            .ok_or_else(|| format!("'{finding_id}' adında bir bulgu yok"))?;
+        if current.status != PentestFindingStatus::Suspected {
+            return Err(format!(
+                "'{finding_id}' zaten '{}' durumunda — yalnız 'suspected' durumundaki bir bulgu doğrulanabilir",
+                current.status.as_str()
+            ));
+        }
+        let confirmed_at = now_epoch() as i64;
+        self.connection
+            .execute(
+                "UPDATE pentest_findings SET status = ?2, confirmed_at = ?3, confirmation_evidence = ?4
+                 WHERE finding_id = ?1",
+                rusqlite::params![
+                    finding_id,
+                    PentestFindingStatus::Confirmed.as_str(),
+                    confirmed_at,
+                    confirmation_evidence,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        self.pentest_finding(finding_id)?
+            .ok_or_else(|| "bulgu doğrulandı ama geri okunamadı".to_string())
+    }
+
+    /// F7.6: bir bulgunun yanlış pozitif olduğuna insan karar verdi — silinmiyor (append-only
+    /// felsefesi, audit chain'le aynı), yalnız durumu değişiyor.
+    pub fn reject_pentest_finding(&self, finding_id: &str) -> Result<(), String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE pentest_findings SET status = ?2 WHERE finding_id = ?1",
+                rusqlite::params![finding_id, PentestFindingStatus::Rejected.as_str()],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err(format!("'{finding_id}' adında bir bulgu yok"));
+        }
+        Ok(())
+    }
+
+    pub fn pentest_finding(&self, finding_id: &str) -> Result<Option<PentestFinding>, String> {
+        self.connection
+            .query_row(
+                "SELECT finding_id, scope_name, target, category, title, evidence, severity,
+                        status, recorded_at, confirmed_at, confirmation_evidence
+                 FROM pentest_findings WHERE finding_id = ?1",
+                [finding_id],
+                Self::row_to_pentest_finding,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Bir scope'un tüm bulguları — en son kaydedilen önce.
+    pub fn pentest_findings(&self, scope_name: &str) -> Result<Vec<PentestFinding>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT finding_id, scope_name, target, category, title, evidence, severity,
+                        status, recorded_at, confirmed_at, confirmation_evidence
+                 FROM pentest_findings WHERE scope_name = ?1 ORDER BY recorded_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([scope_name], Self::row_to_pentest_finding)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
+    }
+
+    fn row_to_pentest_finding(row: &rusqlite::Row) -> SqlResult<PentestFinding> {
+        let severity_raw: String = row.get(6)?;
+        let status_raw: String = row.get(7)?;
+        Ok(PentestFinding {
+            finding_id: row.get(0)?,
+            scope_name: row.get(1)?,
+            target: row.get(2)?,
+            category: row.get(3)?,
+            title: row.get(4)?,
+            evidence: row.get(5)?,
+            severity_estimate: Risk::parse(&severity_raw).unwrap_or(Risk::Low),
+            status: PentestFindingStatus::parse(&status_raw)
+                .unwrap_or(PentestFindingStatus::Suspected),
+            recorded_at: row.get::<_, i64>(8)? as u64,
+            confirmed_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+            confirmation_evidence: row.get(10)?,
+        })
     }
 
     /// F6 registry write path. Validation happens here (through the single policy-gate
