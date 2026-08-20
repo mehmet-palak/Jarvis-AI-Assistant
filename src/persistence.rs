@@ -23,9 +23,9 @@ use crate::{
     validate_pentest_scope, validate_teacher_example, validate_workspace_document_content,
     validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
     EmbeddingProvider, FeedbackCandidate, FeedbackReview, FeedbackSignal, MemoryNamespace,
-    MemoryProposal, MemoryRecord, ModelConfigRun, PentestMode, PentestScope, StoredPentestScope,
-    Task, TeacherExample, TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
-    CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
+    MemoryProposal, MemoryRecord, ModelConfigRun, PentestMode, PentestScope, StoredPentestAsset,
+    StoredPentestScope, Task, TeacherExample, TrustLevel, VerifyStatus, WorkspaceCitation,
+    WorkspaceIngestionReport, CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
 };
 
 pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, event: &str) -> String {
@@ -133,7 +133,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 13;
+const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -315,6 +315,14 @@ impl SqliteStore {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 key_hex TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pentest_assets (
+                scope_name TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                source TEXT NOT NULL,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                PRIMARY KEY (scope_name, asset)
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -396,6 +404,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (13, 'F7 named pentest scope registry')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (14, 'F7.3 pentest asset inventory')",
             [],
         )?;
         Ok(())
@@ -1072,6 +1084,82 @@ impl SqliteStore {
             return Err(format!("no stored pentest scope named '{name}'"));
         }
         Ok(())
+    }
+
+    /// F7.3 "Varlık envanteri kalıcı kaydı + yeni varlık ortaya çıkınca bildirim". Bir keşif
+    /// turunun bulduğu isim listesini `scope_name` altında kalıcı hale getirir ve DAHA ÖNCE bu
+    /// scope için hiç görülmemiş olanları geri döndürür — bildirim mantığı burada bir diff'ten
+    /// başka bir şey değil: "yeni" olmak, `pentest_assets` tablosunda `(scope_name, asset)`
+    /// birincil anahtarının INSERT'ten ÖNCE var olup olmadığına bakılarak belirleniyor.
+    /// `INSERT ... ON CONFLICT DO UPDATE` tek bir atomik ifade: zaten bilinen bir varlık sessizce
+    /// `last_seen`'i güncelliyor (periyodik yeniden taramanın doğal davranışı), yeni bir varlık
+    /// ise `first_seen`'i şimdiki zamana yazıyor.
+    pub fn record_pentest_assets(
+        &self,
+        scope_name: &str,
+        source: &str,
+        assets: &[String],
+    ) -> Result<Vec<String>, String> {
+        if assets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut already_known = std::collections::HashSet::new();
+        {
+            let mut statement = self
+                .connection
+                .prepare("SELECT asset FROM pentest_assets WHERE scope_name = ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([scope_name], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                already_known.insert(row.map_err(|error| error.to_string())?);
+            }
+        }
+        let now = now_epoch() as i64;
+        for asset in assets {
+            self.connection
+                .execute(
+                    "INSERT INTO pentest_assets(scope_name, asset, source, first_seen, last_seen)
+                     VALUES (?1, ?2, ?3, ?4, ?4)
+                     ON CONFLICT(scope_name, asset) DO UPDATE SET last_seen = excluded.last_seen",
+                    rusqlite::params![scope_name, asset, source, now],
+                )
+                .map_err(|error| format!("pentest asset kaydı başarısız: {error}"))?;
+        }
+        let mut new_assets: Vec<String> = assets
+            .iter()
+            .filter(|asset| !already_known.contains(*asset))
+            .cloned()
+            .collect();
+        new_assets.sort();
+        new_assets.dedup();
+        Ok(new_assets)
+    }
+
+    /// Bir scope için şu ana kadar kaydedilmiş tüm varlıkları döndürür — en son görülen önce,
+    /// böylece "bu programda en güncel ne var" sorusunun cevabı listenin başında.
+    pub fn pentest_assets(&self, scope_name: &str) -> Result<Vec<StoredPentestAsset>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT scope_name, asset, source, first_seen, last_seen FROM pentest_assets
+                 WHERE scope_name = ?1 ORDER BY last_seen DESC, asset ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([scope_name], |row| {
+                Ok(StoredPentestAsset {
+                    scope_name: row.get(0)?,
+                    asset: row.get(1)?,
+                    source: row.get(2)?,
+                    first_seen: row.get::<_, i64>(3)? as u64,
+                    last_seen: row.get::<_, i64>(4)? as u64,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())
     }
 
     /// F6 registry write path. Validation happens here (through the single policy-gate

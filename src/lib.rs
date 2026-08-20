@@ -13,6 +13,7 @@ mod model;
 mod model_quality_eval;
 pub mod patch_generator;
 pub mod pentest_network_gate;
+pub mod pentest_recon;
 mod persistence;
 mod policy;
 mod profile;
@@ -240,6 +241,39 @@ impl StoredPentestScope {
     pub fn is_revoked(&self) -> bool {
         self.revoked_at.is_some()
     }
+}
+
+/// F7.3 "Varlık envanteri kalıcı kaydı" — bir scope altında kaydedilmiş tek bir keşfedilmiş
+/// varlık (şimdilik yalnız alt alan adları; F7.3'ün diğer maddeleri, ör. port/servis keşfi,
+/// gelecekte aynı tabloya farklı bir `source` değeriyle yazacak, yeni bir tablo icat edilmeyecek).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPentestAsset {
+    pub scope_name: String,
+    pub asset: String,
+    /// Bu varlığın hangi keşif kaynağından geldiği (ör. `"certificate_transparency"`) — birden
+    /// çok kaynak aynı varlığı bulursa `source`, en son yazanınkiyle güncellenir (bilinçli:
+    /// "hangi kaynaktan geldiği" bilgisi kesin bir tarihçe değil, en güncel gözlemin etiketi).
+    pub source: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
+}
+
+/// F7.3 "Pasif keşif" bir sorgunun sonucu — `Runtime::discover_pentest_assets_via_certificate_transparency`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PentestReconResult {
+    /// Sorgulanan kök alan adı, tam olarak çağrıldığı gibi (normalize edilmemiş).
+    pub queried_domain: String,
+    /// Servisin bildirdiği, aktif scope'un `targets`/`excluded_targets`'ına göre süzülmüş,
+    /// scope İÇİNDE olan isimler — bunlar kalıcı varlık envanterine kaydedildi.
+    pub in_scope_assets: Vec<String>,
+    /// `in_scope_assets`'in bir alt kümesi: bu scope için DAHA ÖNCE hiç görülmemiş, bu sorguda
+    /// ilk kez ortaya çıkan isimler. Bug bounty'de değerin çoğu buradan gelir (F7.3'ün kendi
+    /// gerekçesi) — kullanıcıya "yeni bir şey bulundu" bildirimi tam olarak bu listeden çıkar.
+    pub new_assets: Vec<String>,
+    /// Servisin bildirdiği ama aktif scope'un dışında kalan isim sayısı — hangi isimler olduğu
+    /// KAYDEDİLMİYOR (kapsam dışı bir hedefi envantere yazıp yanlışlıkla test edilebilir gibi
+    /// göstermemek için), yalnız "bu kadarı elendi" şeffaflığı için sayı tutuluyor.
+    pub out_of_scope_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

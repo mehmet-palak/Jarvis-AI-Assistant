@@ -815,6 +815,19 @@ impl Runtime {
         target: &str,
         requested_mode: PentestMode,
     ) -> Result<StoredPentestScope, String> {
+        let active = self.active_verified_pentest_scope()?;
+        authorize_pentest_target(&active.scope, target, requested_mode)?;
+        Ok(active)
+    }
+
+    /// The active scope, checked exactly the way `authorize_pentest_action` checks it (exists,
+    /// not revoked, signature still valid) but *without* also authorizing a specific target/mode.
+    /// Factored out for F7.3 recon: a passive lookup (e.g. certificate transparency) does not
+    /// touch any target and so has no single `(target, mode)` pair to check yet — it needs the
+    /// scope itself, verified, so it can classify a whole batch of candidate names against it.
+    /// `authorize_pentest_action` stays the only entry point for anything that *acts* on a
+    /// target; this is not a second way to get that authorization, only a shared prerequisite.
+    fn active_verified_pentest_scope(&self) -> Result<StoredPentestScope, String> {
         let store = self
             .store
             .as_ref()
@@ -845,8 +858,63 @@ impl Runtime {
                 active.name
             ));
         }
-        authorize_pentest_target(&active.scope, target, requested_mode)?;
         Ok(active)
+    }
+
+    /// F7.3 pasif keşif: sertifika şeffaflık (Certificate Transparency) kayıtlarından bir kök
+    /// alan adının bilinen alt alan adlarını sorgular — hedefin kendisine TEK BİR paket bile
+    /// gitmez, yalnız halka açık crt.sh servisine sorgu atılır (bu, F7.1'in not ettiği "pasif
+    /// keşif hedefe hiç dokunmaz" ayrımının kendisi). Aktif bir scope zorunlu (rastgele bir alan
+    /// adı için sorgu atmayı serbest bırakmamak için — recon da F7.1'in yetkilendirme kapısından
+    /// geçer), ama tek tek sonuç hedefe göre SAFE/ACTIVE mod tavanı kontrolü YAPILMAZ çünkü henüz
+    /// hiçbir eyleme dair mod seçilmedi; yalnız "bu isim scope'un beyan ettiği sınırlar içinde mi"
+    /// sorusu soruluyor (bu yüzden sınıflandırma `PentestMode::Safe` ile yapılıyor — her geçerli
+    /// scope'un maximum_mode'u en az bunu kapsar, yani bu yalnızca hedef eşleşmesini sınıyor).
+    pub fn discover_pentest_assets_via_certificate_transparency(
+        &self,
+        apex_domain: &str,
+    ) -> Result<PentestReconResult, String> {
+        let candidates = crate::pentest_recon::query_certificate_transparency(apex_domain)?;
+        self.record_pentest_recon_candidates(apex_domain, "certificate_transparency", candidates)
+    }
+
+    /// The scope-filtering + persistence half of recon, factored out from the real-network call
+    /// above specifically so it is testable without a live HTTP request — mirrors `weather.rs`'s
+    /// own split (a thin real-network wrapper around a pure, offline-tested function). Any future
+    /// F7.3 passive source (technology fingerprinting, historical URL archives) funnels through
+    /// this same method with its own `source` label, so the "in scope vs. out of scope, new vs.
+    /// already known" logic exists exactly once.
+    pub(crate) fn record_pentest_recon_candidates(
+        &self,
+        queried_domain: &str,
+        source: &str,
+        candidates: Vec<String>,
+    ) -> Result<PentestReconResult, String> {
+        let active = self.active_verified_pentest_scope()?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "pentest recon requires an attached local store".to_string())?;
+
+        let mut in_scope = Vec::new();
+        let mut out_of_scope_count = 0usize;
+        for candidate in candidates {
+            match authorize_pentest_target(&active.scope, &candidate, PentestMode::Safe) {
+                Ok(()) => in_scope.push(candidate),
+                Err(_) => out_of_scope_count += 1,
+            }
+        }
+        in_scope.sort();
+        in_scope.dedup();
+
+        let new_assets = store.record_pentest_assets(&active.name, source, &in_scope)?;
+
+        Ok(PentestReconResult {
+            queried_domain: queried_domain.to_string(),
+            in_scope_assets: in_scope,
+            new_assets,
+            out_of_scope_count,
+        })
     }
 
     /// SHA-256 of the exact system prompt this build sends. This is the "prompt version" the

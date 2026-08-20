@@ -1057,7 +1057,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
 }
 
 #[test]
@@ -4161,7 +4161,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -5686,4 +5686,194 @@ fn re_saving_a_scope_under_the_same_name_re_signs_the_new_content() {
         "farklı içerik farklı imza üretmeli"
     );
     assert!(store.pentest_scope_signature_is_valid("acme").unwrap());
+}
+
+// --- F7.3: pasif keşif (sertifika şeffaflık) + varlık envanteri ------------------------------
+
+/// `SqliteStore::record_pentest_assets`'in asıl sözleşmesi: ilk kayıtta HEPSİ yeni sayılır.
+#[test]
+fn record_pentest_assets_reports_every_name_as_new_on_first_sighting() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let names = vec![
+        "api.example.test".to_string(),
+        "www.example.test".to_string(),
+    ];
+    let mut new_assets = store
+        .record_pentest_assets("acme", "certificate_transparency", &names)
+        .expect("kayıt");
+    new_assets.sort();
+    assert_eq!(new_assets, names);
+
+    let stored = store.pentest_assets("acme").expect("sorgu");
+    assert_eq!(stored.len(), 2);
+    assert!(stored
+        .iter()
+        .all(|asset| asset.source == "certificate_transparency"));
+}
+
+/// F7.3'ün "yeni varlık ortaya çıkınca bildirim" maddesinin kalbi: aynı isim ikinci kez
+/// bildirildiğinde artık "yeni" sayılmamalı (yalnız `last_seen` güncellenmeli), ama GERÇEKTEN
+/// yeni bir isim aynı turda gelirse o hâlâ yeni olarak raporlanmalı.
+#[test]
+fn record_pentest_assets_only_reports_genuinely_new_names_on_a_repeat_scan() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .record_pentest_assets(
+            "acme",
+            "certificate_transparency",
+            &["api.example.test".to_string()],
+        )
+        .expect("ilk tarama");
+
+    let second_scan = store
+        .record_pentest_assets(
+            "acme",
+            "certificate_transparency",
+            &[
+                "api.example.test".to_string(),  // zaten biliniyor
+                "beta.example.test".to_string(), // gerçekten yeni
+            ],
+        )
+        .expect("ikinci tarama");
+
+    assert_eq!(
+        second_scan,
+        vec!["beta.example.test".to_string()],
+        "yalnız gerçekten yeni olan isim 'yeni' olarak raporlanmalı"
+    );
+    assert_eq!(
+        store.pentest_assets("acme").expect("sorgu").len(),
+        2,
+        "her iki isim de envanterde kalıcı olmalı"
+    );
+}
+
+/// İki farklı program (scope) aynı isme sahip olsa bile envanterleri birbirine karışmamalı —
+/// F7.1'in "program A'nın verisiyle program B'yi karıştırma" ilkesinin envanter tarafı.
+#[test]
+fn record_pentest_assets_keeps_separate_scopes_isolated() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .record_pentest_assets(
+            "acme",
+            "certificate_transparency",
+            &["api.test".to_string()],
+        )
+        .expect("acme");
+    let widgetco_new = store
+        .record_pentest_assets(
+            "widgetco",
+            "certificate_transparency",
+            &["api.test".to_string()],
+        )
+        .expect("widgetco");
+
+    assert_eq!(
+        widgetco_new,
+        vec!["api.test".to_string()],
+        "aynı isim başka bir scope için hâlâ yeni sayılmalı — envanterler bağımsız"
+    );
+    assert_eq!(store.pentest_assets("acme").unwrap().len(), 1);
+    assert_eq!(store.pentest_assets("widgetco").unwrap().len(), 1);
+}
+
+fn wildcard_scope_for(apex: &str) -> PentestScope {
+    PentestScope {
+        schema_version: 1,
+        authorization_ref: "signed-authorization:recon-demo".into(),
+        targets: vec![format!("*.{apex}"), apex.to_string()],
+        excluded_targets: vec![format!("internal-admin.{apex}")],
+        expires_at: now_epoch() + 3600,
+        maximum_mode: PentestMode::Safe,
+        max_runtime_seconds: 300,
+    }
+}
+
+/// F7.3'ün asıl güvenlik iddiası: bir keşif kaynağının bulduğu isimler, scope'un
+/// `targets`/`excluded_targets`'ına göre SÜZÜLMEDEN kalıcı envantere yazılmamalı. Burada
+/// `record_pentest_recon_candidates`'ı gerçek bir ağ çağrısı OLMADAN, elle kurulmuş bir aday
+/// listesiyle çağırıyoruz — `weather.rs`'nin kendi deseniyle aynı: gerçek HTTP çağrısı ayrı, saf
+/// mantık burada test ediliyor.
+#[test]
+fn recon_candidates_are_filtered_by_scope_before_being_persisted() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .save_pentest_scope("acme", &wildcard_scope_for("example.test"))
+        .expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let result = runtime
+        .record_pentest_recon_candidates(
+            "example.test",
+            "certificate_transparency",
+            vec![
+                "api.example.test".to_string(), // scope içinde (wildcard eşleşiyor)
+                "internal-admin.example.test".to_string(), // açıkça dışlanmış
+                "totally-unrelated.test".to_string(), // scope'ta hiç yok
+            ],
+        )
+        .expect("recon çalışmalı");
+
+    assert_eq!(result.queried_domain, "example.test");
+    assert_eq!(result.in_scope_assets, vec!["api.example.test".to_string()]);
+    assert_eq!(result.new_assets, vec!["api.example.test".to_string()]);
+    assert_eq!(
+        result.out_of_scope_count, 2,
+        "dışlanan ve alakasız isim toplamda 2 olmalı"
+    );
+
+    // Kapsam dışı isimler kalıcı envantere HİÇ yazılmamalı — yalnız sayıldı.
+    let inventory = runtime
+        .store
+        .as_ref()
+        .unwrap()
+        .pentest_assets("acme")
+        .expect("sorgu");
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory[0].asset, "api.example.test");
+}
+
+/// Aktif scope yokken recon da (gerçek bir hedefe dokunmasa bile) çalışmamalı — F7.1'in
+/// "deny-by-default" ilkesi pasif keşif için de geçerli.
+#[test]
+fn recon_candidates_are_refused_without_an_active_scope() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    let runtime = Runtime::with_store(store);
+    let error = runtime
+        .record_pentest_recon_candidates(
+            "example.test",
+            "certificate_transparency",
+            vec!["api.example.test".to_string()],
+        )
+        .expect_err("aktif scope yokken reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
+}
+
+/// İptal edilmiş bir scope, recon için de geçersiz olmalı. `revoke_pentest_scope` scope'u aynı
+/// anda hem iptal edip hem pasifleştirdiği için (F7.1'in "iptal ve aktiflik hiç birlikte var
+/// olamaz" garantisi) gözlemlenebilir hata "no active pentest scope" oluyor — `is_revoked()`
+/// kontrolünün kendisi yalnızca API'yi bypass eden (raw SQL) bir kurcalamaya karşı savunma
+/// katmanı, normal yoldan asla bu duruma düşülemiyor. Burada test edilen, iptalin gerçek ve
+/// ANINDA bir etkisi olduğu: iptalden SONRA recon artık hiç çalışmıyor.
+#[test]
+fn recon_candidates_are_refused_immediately_after_the_active_scope_is_revoked() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .save_pentest_scope("acme", &wildcard_scope_for("example.test"))
+        .expect("kayıt");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    store
+        .revoke_pentest_scope("acme", "program iptal etti")
+        .expect("iptal");
+    let runtime = Runtime::with_store(store);
+
+    let error = runtime
+        .record_pentest_recon_candidates(
+            "example.test",
+            "certificate_transparency",
+            vec!["api.example.test".to_string()],
+        )
+        .expect_err("iptal edilmiş scope reddedilmeli");
+    assert!(error.contains("no active pentest scope"), "{error}");
 }
