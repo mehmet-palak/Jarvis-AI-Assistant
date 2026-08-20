@@ -6895,3 +6895,54 @@ fn capture_pentest_evidence_snapshot_refuses_a_target_outside_scope() {
         "{error}"
     );
 }
+
+// --- F7.7 regresyon sınıfı: atomik bulgu oluşturma + eşzamanlı ekleme güvenliği ----------------
+
+/// İki AYRI veritabanı bağlantısı aynı dosyaya AYNI bulguyu yazarsa, içerik-adresli `finding_id`
+/// ile `INSERT ... ON CONFLICT` sayesinde yapısal olarak tek satır oluşmalı — eşzamanlı iki
+/// gözlemin kaydı bir yarış durumuyla iki satıra bölünememeli.
+#[test]
+fn concurrent_finding_writes_to_the_same_db_never_duplicate() {
+    let path = std::env::temp_dir().join(format!(
+        "jarvis-concurrent-finding-{}-{}.db",
+        std::process::id(),
+        now_epoch()
+    ));
+    let path_str = path.to_str().expect("utf-8").to_string();
+
+    let store_a = SqliteStore::open(&path_str).expect("bağlantı a");
+    let store_b = SqliteStore::open(&path_str).expect("bağlantı b");
+
+    // İki bağlantı, aynı (scope, hedef, kategori, başlık) dörtlüsünü yazıyor.
+    store_a
+        .record_pentest_finding(
+            "acme",
+            "app.example.test",
+            "exposed_sensitive_file",
+            "Açığa çıkmış .env",
+            "kanıt A",
+            Risk::High,
+            Some("/.env"),
+        )
+        .expect("a yazmalı");
+    store_b
+        .record_pentest_finding(
+            "acme",
+            "app.example.test",
+            "exposed_sensitive_file",
+            "Açığa çıkmış .env",
+            "kanıt B",
+            Risk::High,
+            Some("/.env"),
+        )
+        .expect("b yazmalı");
+
+    let all = store_a.pentest_findings("acme").expect("sorgu");
+    assert_eq!(
+        all.len(),
+        1,
+        "aynı bulgu iki bağlantıdan yazılsa bile tek satır olmalı"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
