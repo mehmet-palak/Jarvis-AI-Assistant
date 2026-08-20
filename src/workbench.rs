@@ -1260,7 +1260,15 @@ mod tests {
     /// the rlimit test; production code fails loudly on that same unavailability instead
     /// (`isolated_worker_command`'s explicit `/usr/bin/systemd-run` check) rather than silently
     /// degrading, so a skip here never hides a real production gap.
+    ///
+    /// `#[ignore]` (added 20 Ağustos 2026): this test deliberately drives a real cgroup scope
+    /// into an actual OOM-kill — on a desktop with `systemd-oomd`/a memory-pressure monitor, that
+    /// surfaces as a real, user-visible "memory pressure avoided" notification, one per run. That
+    /// is harmless but disruptive if this file's tests run on every routine `cargo test`; run this
+    /// one explicitly (`cargo test --lib -- --ignored cgroup_memory_limit`) instead, e.g. once
+    /// before wrapping up a session that touched `workbench.rs`'s isolation flags.
     #[test]
+    #[ignore]
     fn cgroup_memory_limit_is_enforced_by_the_real_kernel_when_available() {
         let probe = std::process::Command::new("systemd-run")
             .args(["--user", "--scope", "--quiet", "--", "/bin/true"])
@@ -1303,7 +1311,11 @@ mod tests {
     /// calling `isolated_worker_command` directly would silently hit the plain-process bypass
     /// instead — same reason the cgroup test above builds its own `Command`). Skips (does not
     /// fail) without a functioning `systemd-run --user` session, same rationale as that test.
+    ///
+    /// `#[ignore]` (added 20 Ağustos 2026): spawns a real transient systemd scope on every run —
+    /// same desktop-notification-noise concern as the cgroup test above, run explicitly instead.
     #[test]
+    #[ignore]
     fn overlay_write_mode_never_lets_a_workers_writes_reach_the_real_workspace() {
         let probe = std::process::Command::new("systemd-run")
             .args(["--user", "--scope", "--quiet", "--", "/bin/true"])
