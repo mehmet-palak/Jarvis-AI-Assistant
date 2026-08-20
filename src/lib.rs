@@ -12,6 +12,7 @@ mod memory_intent;
 mod model;
 mod model_quality_eval;
 pub mod patch_generator;
+pub mod pentest_knowledge;
 pub mod pentest_network_gate;
 pub mod pentest_recon;
 pub mod pentest_replay;
