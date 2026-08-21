@@ -1,10 +1,22 @@
 # ADR-0008: MCP mimarisi ve güvenlik katmanları
 
-Durum: Önerildi / tasarlandı — 21 Ağustos 2026.
-Kısmen uygulandı (yalnız **ingress**: protokol sürümleme + sır/kimlik-bilgisi yanıt redaksiyonu,
-commit 62dfe0a). **Egress** (JARVIS'in dış araçları kullanması) ve aşağıdaki kalan sertleştirme
-katmanlarının tamamı **henüz uygulanmadı**; bu belge tasarım kararını sabitler ve **F10'da**
-(pentest + kodlama derinleşmesiyle birlikte) gözden geçirilip uygulanacaktır.
+Durum: **Büyük ölçüde uygulandı — 22 Ağustos 2026 (F8).** Kullanıcı "mobili F10'a at, F8'i tamamla"
+dedi; MCP egress + eklenti güven çekirdeği F8'de kuruldu.
+
+- **Ingress:** protokol sürümleme + sır/kimlik-bilgisi yanıt redaksiyonu (commit 62dfe0a).
+- **Egress (bu belgenin ana konusu), 6 fazın 5'i tam uygulandı ve gerçek testle kapatıldı:**
+  Faz 1 güven çekirdeği (imzalı manifest, rug-pull artefakt-hash, deny-by-default bağlanma kapısı),
+  Faz 2 kalıcı kayıt defteri (şema v18 + ayrı imza anahtarı), Faz 4 veri-akış filtreleri (dışarı
+  tavan/sır, içeri provenance/boyut/redaksiyon), Faz 5 operasyonel katman (runtime/TUI `/mcp`,
+  audit, global kill switch), Faz 6 sampling deny-by-default + resources/prompts izolasyonu,
+  Faz 3 JSON-RPC oturum boru hattı (düşmanca mock sunucuyla uçtan uca test).
+- **Tek kalan (dürüst sınır, F7 deseni):** Faz 3 taşıma trait'inin gerçek gerçekleştirmesi —
+  sunucuyu F4 sandbox'ında başlatıp canlı stdin/stdout JSON-RPC konuşan taşıma. Karar/filtre
+  mantığının tamamı bu seam'in üstünde test edildi; canlı bağlantı F4/F7'nin "gerçek makinede
+  doğrulanmalı" uyarısına tabi ve o doğrulamayla açılacak. Ağ taşımaları (uzak MCP) ile birlikte
+  ileri seviye ele alım F10'da.
+- **Eklenti/skill ekosistemi (F8 madde 3):** ayrı bir sistem DEĞİL — bir eklenti teknik olarak izole,
+  imzalı bir dış MCP aracı olduğundan bu güven çekirdeği tarafından kapatıldı (`McpServerKind::Plugin`).
 
 ## Bağlam
 
