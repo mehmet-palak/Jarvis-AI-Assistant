@@ -163,6 +163,43 @@ pub struct McpIngressRequest {
     pub argument: String,
 }
 
+/// F8 "MCP production hardening: protocol sürümleme". Bu build'in anladığı MCP tel-protokol
+/// sürümü. Bir MCP isteği bundan farklı bir `schema_version` taşıyorsa, işlenmeden ÖNCE
+/// reddedilir (F9'daki veritabanı sürüm güvencesinin dış-protokol karşılığı) — anlaşılmayan bir
+/// protokolde bir aracı çalıştırmak, sessizce yanlış yorumlanmış bir isteği yürütmek demek olurdu.
+pub const CURRENT_MCP_PROTOCOL_VERSION: u16 = 1;
+
+/// Bir MCP isteğinin protokol sürümünü doğrular. Şu an tek desteklenen sürüm var; ileride birden
+/// çok sürüm desteklenirse burası bir aralık/küme kontrolüne dönüşür. `0` (belirtilmemiş) ve
+/// gelecekteki sürümler açıkça reddedilir — sessizce varsayılana düşmek yerine.
+pub fn validate_mcp_protocol_version(version: u16) -> Result<(), String> {
+    if version == CURRENT_MCP_PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(format!(
+            "desteklenmeyen MCP protokol sürümü {version} — bu build yalnız sürüm {CURRENT_MCP_PROTOCOL_VERSION}'i anlıyor; istek işlenmeden reddedildi"
+        ))
+    }
+}
+
+/// F8 "MCP production hardening: credential/raw-secret response filtresi". Bir MCP aracının
+/// yanıtı, DIŞ bir kanala (MCP istemcisine) çıkmadan ÖNCE sır/kimlik-bilgisi benzeri içeriğe karşı
+/// taranır. Bu, F3'ün workspace ingestion'da zaten kullandığı aynı yüksek-güven, düşük-yanlış-
+/// pozitif imza kümesi (PEM özel-anahtar başlıkları, bilinen token önekleri). Sır benzeri içerik
+/// bulunursa yanıt redakte edilir — `Some(redakte_metin)`; temizse `None` (yanıt olduğu gibi
+/// gider). Bir sırrı JARVIS'in kendi içinde tutmakla dış bir araca sızdırmak ayrı şeylerdir;
+/// bu, ikincisine karşı bir savunma katmanı.
+pub fn redact_secret_like_mcp_response(output: &str) -> Option<String> {
+    if crate::workspace::reject_secret_like_workspace_document_content(output).is_err() {
+        Some(
+            "[MCP yanıtı redakte edildi: sır/kimlik-bilgisi benzeri içerik dış kanala aktarılmadı]"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Risk {
     Low,

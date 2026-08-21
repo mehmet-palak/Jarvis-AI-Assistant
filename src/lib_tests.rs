@@ -7381,3 +7381,46 @@ fn format_metrics_summary_is_readable_and_contains_counts() {
     assert!(text.contains("Toplam görev"), "{text}");
     assert!(text.contains("Doğrulama"), "{text}");
 }
+
+// --- F8: MCP production hardening ---------------------------------------------------------------
+
+/// Protokol sürümleme: MCP sınırında, açık ve protokole özel bir ret (ayrı `CURRENT_MCP_PROTOCOL_VERSION`
+/// sabitiyle). Desteklenen sürüm işleniyor, desteklenmeyen protokol-özel gerekçeyle reddediliyor.
+#[test]
+fn mcp_protocol_version_is_validated_at_the_boundary() {
+    assert!(validate_mcp_protocol_version(CURRENT_MCP_PROTOCOL_VERSION).is_ok());
+    let error = validate_mcp_protocol_version(CURRENT_MCP_PROTOCOL_VERSION + 1)
+        .expect_err("desteklenmeyen sürüm reddedilmeli");
+    assert!(error.contains("MCP protokol sürümü"), "{error}");
+
+    // handle_mcp yolunda: geçersiz protokol sürümü, tool eşlemesinden önce reddediliyor.
+    let mut runtime = Runtime::new();
+    let (task, result, verification) = runtime.handle_mcp(McpIngressRequest {
+        schema_version: 99,
+        request_id: "mcp-proto".into(),
+        tool_id: "jarvis.system.health".into(),
+        argument: String::new(),
+    });
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(task.capability, "mcp.rejected");
+    assert_eq!(result.status, ToolStatus::Failure);
+    assert_eq!(verification.status, VerifyStatus::Fail);
+}
+
+/// Sır sızıntısı filtresi (pür fonksiyon): sır benzeri bir çıktı redakte edilir, temiz çıktı
+/// olduğu gibi geçer.
+#[test]
+fn mcp_response_secret_filter_redacts_only_secret_like_output() {
+    // Bilinen bir sır imzası (PEM özel anahtar başlığı).
+    let leaky = "İşte anahtar:\n-----BEGIN PRIVATE KEY-----\nMIIB...\n-----END PRIVATE KEY-----";
+    let redacted =
+        redact_secret_like_mcp_response(leaky).expect("sır benzeri çıktı redakte edilmeli");
+    assert!(redacted.contains("redakte"), "{redacted}");
+    assert!(
+        !redacted.contains("BEGIN PRIVATE KEY"),
+        "sır dışa aktarılmamalı"
+    );
+
+    // Sıradan çıktı dokunulmadan geçmeli.
+    assert!(redact_secret_like_mcp_response("CPU kullanım: %12, RAM: 3.4 GB").is_none());
+}

@@ -975,9 +975,13 @@ Tamamlanma ölçütü: Scope dışı hiçbir hedefe trafik çıkamaz; SAFE modda
 
 ### F8 — MCP ekosistemi, entegrasyonlar ve güvenli remote/mobile
 
-Durum: BEKLENİYOR
+Durum: BAŞLADI (21 Ağustos 2026) — kullanıcı F9 bittikten sonra F8'e geçti ama **mobil/remote'a başlamadan** (madde 4-5 bilinçli beklemede, F8'in kendi sırası da bunları en sona koyuyor). İlk üç madde (MCP sertleştirme, yerel entegrasyonlar, eklenti sistemi) mobil gerektirmiyor.
 
-- [ ] MCP production hardening: protocol sürümleme, extension/tool manifest imzası, credential/raw-secret response filtresi, untrusted output provenance ve tool permission ekranı.
+- [~] MCP production hardening — protocol sürümleme + credential/raw-secret response filtresi tamam (manifest imzası + tool permission ekranı hâlâ açık).
+  - **Kanıt (protocol sürümleme):** `CURRENT_MCP_PROTOCOL_VERSION` sabiti + `validate_mcp_protocol_version` — bir MCP isteği, herhangi bir tool eşlemesi/yürütmesinden ÖNCE MCP sınırında doğrulanıyor; desteklenmeyen sürüm protokole-özel gerekçe + `mcp.rejected.protocol_version` audit olayıyla reddediliyor (F9'daki veritabanı sürüm güvencesinin dış-protokol karşılığı). MCP tel-protokolünü iç request şemasından ayrı bir kavram olarak isimlendiriyor (savunma-derinliği; `validate_request` de sürümü ayrıca kontrol ediyor).
+  - **Kanıt (sır sızıntısı filtresi — YENİ koruma):** `redact_secret_like_mcp_response` — bir MCP aracının yanıtı DIŞ kanala çıkmadan ÖNCE sır/kimlik-bilgisi benzeri içeriğe karşı taranıyor (F3'ün aynı yüksek-güven imza kümesi); bulunursa çıktı redakte edilip `mcp.response.secret_redacted` audit'e yazılıyor. Bir sırrı içeride tutmakla dış bir araca sızdırmak ayrı şeyler — bu ikincisine karşı savunma. Gerçek testle kanıtlandı: PEM özel-anahtar başlığı içeren çıktı redakte ediliyor, sıradan çıktı dokunulmadan geçiyor.
+  - **Test:** 2 yeni test (protokol sınır-reddi + sır redaksiyonu), mevcut 2 MCP testi bozulmadı.
+  - **Kalan:** extension/tool manifest imzası, untrusted output provenance etiketi, tool permission ekranı (UI).
 - [ ] Yerel entegrasyonlar: takvim, e-posta, mesajlaşma veya dosya sağlayıcısı yalnız explicit OAuth/secret store, minimum scope, dry-run/preview, approval ve revoke ile eklenir.
 - [ ] Plugin/skill ekosistemi: signed/allowlisted paketler, capability sandbox profile, sürüm uyumluluğu, kilitleme dosyası ve tek tıkla devre dışı bırakma.
 - [ ] Remote/mobile yalnız explicit device pairing, public key, nonce/replay koruması, revoke, bağlantı şifreleme ve server-side kill switch'ten sonra ele alınır.

@@ -2253,6 +2253,37 @@ impl Runtime {
     /// Maps a narrowly typed MCP tool call to a registered desktop capability. The adapter never
     /// accepts a free-form capability name and therefore cannot bypass the registry or policy.
     pub fn handle_mcp(&mut self, ingress: McpIngressRequest) -> (Task, ToolResult, VerifierResult) {
+        // F8 "MCP production hardening: protocol sürümleme". Protokol sürümü, herhangi bir tool
+        // eşlemesi/yürütmesinden ÖNCE doğrulanıyor — anlaşılmayan bir protokoldeki bir isteği
+        // yürütmek, sessizce yanlış yorumlanmış bir komut çalıştırmak olurdu.
+        if let Err(reason) = validate_mcp_protocol_version(ingress.schema_version) {
+            let task_id = format!("task-{}", ingress.request_id);
+            let task = Task {
+                task_id: task_id.clone(),
+                request_id: ingress.request_id.clone(),
+                state: TaskState::Failed,
+                capability: "mcp.rejected".into(),
+            };
+            let result = ToolResult {
+                status: ToolStatus::Failure,
+                output: String::new(),
+                error: Some(reason.clone()),
+                state_changed: false,
+                evidence: vec![],
+            };
+            let verification = VerifierResult {
+                status: VerifyStatus::Fail,
+                reason,
+                evidence: vec![],
+            };
+            self.record_audit(AuditEvent::pending(
+                task_id.clone(),
+                "mcp.rejected.protocol_version",
+            ));
+            self.tasks.insert(task_id, task.clone());
+            self.save_task(&task);
+            return (task, result, verification);
+        }
         let content = match ingress.tool_id.as_str() {
             "jarvis.system.health" => "system health".into(),
             "jarvis.system.time" => "system time".into(),
@@ -2263,13 +2294,25 @@ impl Runtime {
             "jarvis.note.create" => format!("not oluştur: {}", ingress.argument),
             _ => format!("unknown mcp tool: {}", ingress.tool_id),
         };
-        self.handle(Request {
+        let (task, mut result, verification) = self.handle(Request {
             schema_version: ingress.schema_version,
             request_id: ingress.request_id,
             input_type: InputType::Mcp,
             content,
             attachments: vec![],
-        })
+        });
+        // F8 "MCP production hardening: credential/raw-secret response filtresi". Yanıt DIŞ kanala
+        // dönmeden önce sır benzeri içeriğe karşı taranır; bulunursa çıktı redakte edilir ve olay
+        // audit'e yazılır. Bir sırrı içeride tutmakla dış bir araca sızdırmak ayrı şeyler.
+        if let Some(redacted) = redact_secret_like_mcp_response(&result.output) {
+            result.output = redacted;
+            result.evidence.push("mcp.response.secret_redacted".into());
+            self.record_audit(AuditEvent::pending(
+                task.task_id.clone(),
+                "mcp.response.secret_redacted",
+            ));
+        }
+        (task, result, verification)
     }
 
     fn handle_with_resolution(
