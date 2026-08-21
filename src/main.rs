@@ -16,16 +16,17 @@ use crossterm::{
 };
 use jarvis_core::ModelProvider as _;
 use jarvis_core::{
-    analyze_repository, approve_patch, attachment_receipt_manifest, default_profile_files_dir,
-    draft_coding_plan_with_provider, draft_patch_with_provider, ensure_profile_files_exist,
-    format_sources_block, inspect_local_attachment, memory_export, memory_import, new_cancel_flag,
-    parse_data_sensitivity, parse_memory_intent, parse_memory_namespace, preview_workspace_index,
-    profile_manifest, propose_memory, propose_memory_with_trust_and_scope, propose_profile_field,
+    analyze_repository, approve_patch, attachment_receipt_manifest, default_calendar_path,
+    default_profile_files_dir, draft_coding_plan_with_provider, draft_patch_with_provider,
+    ensure_profile_files_exist, format_sources_block, inspect_local_attachment, memory_export,
+    memory_import, new_cancel_flag, parse_data_sensitivity, parse_memory_intent,
+    parse_memory_namespace, preview_workspace_index, profile_manifest, propose_memory,
+    propose_memory_with_trust_and_scope, propose_profile_field,
     propose_unrecognized_remember_intent_with_provider, AttachmentReceipt, AttachmentRef,
     CancelFlag, CodingPlan, DataSensitivity, InputType, LlamaEmbeddingProvider,
-    LlamaServerProvider, LlamaVisionServerProvider, MemoryIntent, MemoryNamespace, MemoryProposal,
-    OpenMeteoWeatherProvider, PatchProposal, ProfileField, Request, Runtime, SqliteStore,
-    TaskState, TrustLevel, VisionProvider, WorkspaceCitation,
+    LlamaServerProvider, LlamaVisionServerProvider, LocalIcsCalendarProvider, MemoryIntent,
+    MemoryNamespace, MemoryProposal, OpenMeteoWeatherProvider, PatchProposal, ProfileField,
+    Request, Runtime, SqliteStore, TaskState, TrustLevel, VisionProvider, WorkspaceCitation,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -272,6 +273,7 @@ fn main() -> io::Result<()> {
     attach_embedding_provider_if_reachable(&mut runtime);
     attach_profile_files_dir(&mut runtime);
     attach_weather_provider(&mut runtime);
+    attach_calendar_provider(&mut runtime);
     let runtime = Arc::new(Mutex::new(runtime));
     let provider = LlamaServerProvider::local_default();
     let vision = LlamaVisionServerProvider::local_default();
@@ -412,6 +414,19 @@ fn attach_weather_provider(runtime: &mut Runtime) {
     runtime.set_weather_provider(Some(
         Box::new(OpenMeteoWeatherProvider::istanbul_umraniye()),
     ));
+}
+
+/// F8 "yerel entegrasyonlar" (21 Ağustos 2026): yerel bir `.ics` takvim dosyası VARSA sağlayıcıyı
+/// takar. Hava durumundan farkı: ağa hiç çıkmaz. Dosya yoksa hiçbir şey yapılmaz (özellik tamamen
+/// isteğe bağlı, tıpkı profil dosyaları gibi) — açılışı asla engellemez. Yolu değiştirmek için
+/// `JARVIS_CALENDAR_PATH` ortam değişkeni; varsayılan `~/.config/jarvis/calendar.ics`.
+fn attach_calendar_provider(runtime: &mut Runtime) {
+    let Some(path) = default_calendar_path() else {
+        return;
+    };
+    if path.exists() {
+        runtime.set_calendar_provider(Some(Box::new(LocalIcsCalendarProvider::new(path))));
+    }
 }
 
 fn ensure_local_vision_server(provider: &LlamaVisionServerProvider) -> Result<(), String> {
@@ -3207,7 +3222,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika; model veya sistem prompt'u değiştiğinde açılışta 'bu konfigürasyon ölçülmedi' uyarısı çıkar, /status de gösterir), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Kopyalama: /copy (son yanıtın tamamını panoya kopyala), /copy kod (yalnız kod bloklarını), /select (fare seçim modunu aç-kapa — açıkken fareyle seçtiğin her şey otomatik panoya kopyalanır, ama tekerlek kaydırma geçici olarak kapanır; PgUp/PgDn çalışmaya devam eder). Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika; model veya sistem prompt'u değiştiğinde açılışta 'bu konfigürasyon ölçülmedi' uyarısı çıkar, /status de gösterir), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Kopyalama: /copy (son yanıtın tamamını panoya kopyala), /copy kod (yalnız kod bloklarını), /select (fare seçim modunu aç-kapa — açıkken fareyle seçtiğin her şey otomatik panoya kopyalanır, ama tekerlek kaydırma geçici olarak kapanır; PgUp/PgDn çalışmaya devam eder). Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). F8 (yerel takvim): /takvim veya /ajanda (önümüzdeki 7 günün ajandası — yerel bir `.ics` dosyasından, İnternet'e çıkmadan; dosyayı `~/.config/jarvis/calendar.ics` olarak koy ya da `JARVIS_CALENDAR_PATH` ile belirt). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -3259,6 +3274,25 @@ fn submit(
                 .expect("JARVIS runtime lock poisoned")
                 .metrics_summary();
             app.push_system(jarvis_core::format_metrics_summary(&metrics));
+            return;
+        }
+        "/takvim" | "takvim" | "/ajanda" | "ajanda" => {
+            // F8 yerel takvim: önümüzdeki 7 günün ajandası. Sağlayıcı yoksa, kullanıcıya dosyayı
+            // nasıl ekleyeceğini söyle (ağa çıkmayan, tamamen yerel bir özellik).
+            let agenda = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .calendar_agenda(7);
+            match agenda {
+                Some(Ok(summary)) => app.push_system(summary),
+                Some(Err(error)) => app.push_system(format!("Takvim okunamadı: {error}")),
+                None => app.push_system(
+                    "Takvim ekli değil. Yerel bir `.ics` dosyasını `~/.config/jarvis/calendar.ics` \
+                     olarak koy (ya da `JARVIS_CALENDAR_PATH` ile yolunu belirt) ve JARVIS'i yeniden \
+                     başlat. Bu özellik tamamen yereldir, İnternet'e çıkmaz."
+                        .to_string(),
+                ),
+            }
             return;
         }
         "/backup" | "backup" => {

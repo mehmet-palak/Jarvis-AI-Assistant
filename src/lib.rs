@@ -1,6 +1,7 @@
 //! JARVIS implementation baseline: a small, typed, policy-gated vertical slice.
 
 pub mod attachments;
+pub mod calendar;
 mod capabilities;
 #[cfg(test)]
 mod coding_eval;
@@ -40,6 +41,9 @@ pub use attachments::{
     attachment_receipt_manifest, inspect_local_attachment, inspect_local_document,
     inspect_local_image, revalidate_local_attachment, validate_attachment, AttachmentKind,
     AttachmentReceipt, AttachmentRef,
+};
+pub use calendar::{
+    default_calendar_path, CalendarEvent, CalendarProvider, EventDate, LocalIcsCalendarProvider,
 };
 pub use capabilities::{capability_manifest, CapabilityRegistry};
 pub use command_runner::{

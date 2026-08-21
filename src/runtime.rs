@@ -80,6 +80,11 @@ pub struct Runtime {
     /// hiçbir governed capability/task/policy yoluna hiç girmez, model ona hiç "çağrı" yapamaz —
     /// yalnız Runtime'ın kendisi, başlangıç metnini oluştururken bir kez okur.
     weather_provider: Option<Box<dyn WeatherProvider>>,
+    /// İsteğe bağlı yerel takvim sağlayıcısı (F8 "yerel entegrasyonlar", 21 Ağustos 2026). Hava
+    /// durumunun aksine ağa hiç çıkmaz — yalnız yerel bir `.ics` dosyasını okur. Aynı desen:
+    /// governed capability/task/policy yoluna girmez, model ona "çağrı" yapamaz; Runtime brifingi
+    /// ve `/takvim` komutu için okur.
+    calendar_provider: Option<Box<dyn CalendarProvider>>,
 }
 
 impl Default for Runtime {
@@ -103,6 +108,7 @@ impl Default for Runtime {
             fts_only_queries_this_session: 0,
             profile_files_dir: None,
             weather_provider: None,
+            calendar_provider: None,
         }
     }
 }
@@ -697,6 +703,40 @@ impl Runtime {
         self.weather_provider = provider;
     }
 
+    /// Yerel takvim sağlayıcısını takar/söker (F8 "yerel entegrasyonlar"). Hava durumundan farkı:
+    /// ağa hiç çıkmaz. Model bunu hiç "çağıramaz"; yalnız brifing ve `/takvim` komutu okur.
+    pub fn set_calendar_provider(&mut self, provider: Option<Box<dyn CalendarProvider>>) {
+        self.calendar_provider = provider;
+    }
+
+    /// `within_days` gün içindeki (bugün dahil) takvim etkinliklerinin kullanıcıya gösterilecek
+    /// özeti. Sağlayıcı yoksa `None`; dosya okunamazsa `Some(Err(..))` — böylece `/takvim` komutu
+    /// "takvim ekli değil" ile "takvim dosyası okunamadı"yı ayırt edebilir. Etkinlik metni zaten
+    /// `calendar.rs`'te temizlenmiştir ("data, instruction değil").
+    pub fn calendar_agenda(&self, within_days: i64) -> Option<Result<String, String>> {
+        let provider = self.calendar_provider.as_ref()?;
+        Some(provider.events().map(|events| {
+            let today = crate::calendar::today_utc();
+            let upcoming = crate::calendar::events_within(&events, today, within_days);
+            if upcoming.is_empty() {
+                return format!("Önümüzdeki {within_days} günde takvimde etkinlik yok.");
+            }
+            let mut lines = vec![format!(
+                "Önümüzdeki {within_days} günde {} etkinlik:",
+                upcoming.len()
+            )];
+            for event in upcoming {
+                let location = event
+                    .location
+                    .as_ref()
+                    .map(|place| format!(" @ {place}"))
+                    .unwrap_or_default();
+                lines.push(format!("• {} — {}{}", event.start, event.summary, location));
+            }
+            lines.join("\n")
+        }))
+    }
+
     /// JARVIS her açıldığında gösterilecek karşılama metni: isim (varsa), bekleyen onaylar, son
     /// güncellenen (görev/oturum/geçici olmayan — yani gerçekten "not" sayılabilecek) bellek
     /// kayıtları ve (sağlayıcı bağlıysa) güncel hava durumu. Yalnız yerelde zaten elde olan
@@ -723,6 +763,33 @@ impl Runtime {
                     "{}: {}°C, {}.",
                     weather.location, weather.temperature_celsius, weather.description
                 ));
+            }
+        }
+
+        // F8 yerel takvim: bugünkü etkinlikleri göster. Ağa çıkmaz; dosya okunamazsa (hata) satır
+        // sessizce atlanır — brifing hiçbir zaman bir okuma hatasıyla bozulmamalı (hava durumuyla
+        // aynı zarafet).
+        if let Some(provider) = self.calendar_provider.as_ref() {
+            if let Ok(events) = provider.events() {
+                let (year, month, day) = crate::calendar::today_utc();
+                let today = crate::calendar::events_on_day(&events, year, month, day);
+                if !today.is_empty() {
+                    let preview = today
+                        .iter()
+                        .take(3)
+                        .map(|event| match (event.start.hour, event.start.minute) {
+                            (Some(hour), Some(minute)) => {
+                                format!("{hour:02}:{minute:02} {}", event.summary)
+                            }
+                            _ => event.summary.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    lines.push(format!(
+                        "Bugün takviminizde {} etkinlik: {preview}.",
+                        today.len()
+                    ));
+                }
             }
         }
 

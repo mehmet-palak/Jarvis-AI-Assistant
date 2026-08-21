@@ -2407,6 +2407,72 @@ fn startup_briefing_includes_weather_only_when_a_provider_is_attached() {
     assert!(briefing.contains("İstanbul, Ümraniye: 24°C, açık."));
 }
 
+#[derive(Debug)]
+struct FixedCalendarProvider(Vec<CalendarEvent>);
+
+impl CalendarProvider for FixedCalendarProvider {
+    fn events(&self) -> Result<Vec<CalendarEvent>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// F8 yerel takvim: sağlayıcı bağlı ve bugün bir etkinlik varsa karşılamaya eklenmeli; bağlı
+/// değilse hiç görünmemeli. Bugünün tarihi çalışma anında hesaplandığı için etkinliği de bugüne
+/// tarihliyoruz (ağa çıkmadan, tamamen yerel).
+#[test]
+fn startup_briefing_includes_todays_calendar_events_only_when_a_provider_is_attached() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    let mut runtime = Runtime::with_store(store);
+    assert!(!runtime.startup_briefing().contains("takviminizde"));
+
+    let (year, month, day) = crate::calendar::today_utc();
+    runtime.set_calendar_provider(Some(Box::new(FixedCalendarProvider(vec![CalendarEvent {
+        summary: "Ekip toplantısı".into(),
+        location: Some("Oda 4".into()),
+        start: EventDate {
+            year,
+            month,
+            day,
+            hour: Some(14),
+            minute: Some(30),
+        },
+        end: None,
+    }]))));
+    let briefing = runtime.startup_briefing();
+    assert!(briefing.contains("Bugün takviminizde 1 etkinlik"));
+    assert!(briefing.contains("14:30 Ekip toplantısı"));
+}
+
+/// `/takvim` komutunun asıl çağırdığı yol: sağlayıcı yoksa `None` (arayüz "takvim ekli değil"
+/// der); varsa etkinlikleri konum bilgisiyle biçimli listeler.
+#[test]
+fn calendar_agenda_returns_none_without_a_provider_and_a_formatted_list_with_one() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    let mut runtime = Runtime::with_store(store);
+    assert!(runtime.calendar_agenda(7).is_none());
+
+    let (year, month, day) = crate::calendar::today_utc();
+    runtime.set_calendar_provider(Some(Box::new(FixedCalendarProvider(vec![CalendarEvent {
+        summary: "Diş randevusu".into(),
+        location: Some("Klinik".into()),
+        start: EventDate {
+            year,
+            month,
+            day,
+            hour: Some(10),
+            minute: Some(0),
+        },
+        end: None,
+    }]))));
+    let agenda = runtime
+        .calendar_agenda(7)
+        .expect("sağlayıcı var")
+        .expect("okuma başarılı");
+    assert!(agenda.contains("1 etkinlik"));
+    assert!(agenda.contains("Diş randevusu"));
+    assert!(agenda.contains("@ Klinik"));
+}
+
 /// Bir sırrın hafızadaki yer tutucusu "son notlar" listesine hiç girmemeli — kullanıcı
 /// açılışta yanlışlıkla "api_key = [gizli değer ...]" gibi bir satır görmemeli.
 #[test]
