@@ -1,0 +1,29 @@
+# F9 "Güvenlik bakım döngüsü": cargo-audit yapılandırması.
+#
+# Buradaki `ignore` listesi SESSİZ bir bastırma DEĞİL — her giriş, gerekçesi
+# docs/security_dependency_audit.md'de belgelenmiş, bilinçli olarak kabul edilmiş bir karardır.
+# Amaç: `cargo audit`'in YENİ / beklenmedik açıklarda başarısız olması (gerçek bir kapı olarak iş
+# görmesi), ama zaten incelenip düşük-maruziyet olarak kabul edilmiş transitif uyarılarda geçmesi.
+#
+# Her ID'yi kaldırmadan önce docs/security_dependency_audit.md'deki gerekçeyi yeniden değerlendir:
+# bir bağımlılık güncellemesi bir ID'yi çözerse, hem buradan hem belgeden çıkarılmalı.
+
+[advisories]
+ignore = [
+    # quick-xml 0.30.0 (DoS: karesel çalışma süresi + sınırsız namespace tahsisi).
+    # Transitif: zbus_xml <- atspi <- eframe (masaüstü erişilebilirlik yığını). Ayrıştırılan XML
+    # yerel D-Bus introspection verisidir, saldırgan kontrolünde DEĞİL — gerçek maruziyet düşük.
+    # Erişilebilirlik yığını quick-xml 0.41'e taşıyan bir major sürüme geçince temizlenecek.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # paste 1.0.15 — bakımı bırakılmış (unmaintained). Transitif: ratatui (TUI). Bir proc-macro,
+    # çalışma zamanı saldırı yüzeyi yok. Kabul edildi.
+    "RUSTSEC-2024-0436",
+    # ttf-parser 0.25.1 — bakımı bırakılmış. Transitif: pdf-extract (lopdf) + eframe (font).
+    # Bir güvenlik açığı değil, bakım uyarısı. Kabul edildi.
+    "RUSTSEC-2026-0192",
+    # lru 0.12.5 — unsound (IterMut / LruCache::pop panik güvenliği). Transitif: ratatui'nin
+    # kendi iç layout önbelleği. Doğrudan kullanmıyoruz. ratatui güncellemesi bekleniyor.
+    "RUSTSEC-2026-0002",
+    "RUSTSEC-2026-0253",
+]
