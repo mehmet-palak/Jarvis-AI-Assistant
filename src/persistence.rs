@@ -43,7 +43,7 @@ pub(crate) fn audit_hash(sequence: u64, previous_hash: &str, task_id: &str, even
     format!("{:x}", hasher.finalize())
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -61,7 +61,7 @@ fn decode_hex_32(hex: &str) -> Option<[u8; 32]> {
 /// Constant-time byte comparison. Comparing a signature with `==` would short-circuit on the
 /// first differing byte, which leaks (via timing) how many leading bytes an attacker's guess got
 /// right — the standard reason signature/MAC comparisons never use the ordinary equality check.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -75,7 +75,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Minimal HMAC-SHA256 (RFC 2104) over the `Sha256` primitive already used by `audit_hash` —
 /// this project has no cryptography crate dependency, and one construction on top of an already
 /// vetted hash function does not justify adding one.
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     const BLOCK_SIZE: usize = 64;
     let mut block_key = [0u8; BLOCK_SIZE];
     if key.len() > BLOCK_SIZE {
