@@ -202,6 +202,45 @@ impl Runtime {
         &self.structured_logs
     }
 
+    /// F9 "Metrikler ... kişisel içerik toplamadan yerel telemetry". Bellekteki görev + structured
+    /// log verisini gizlilik-güvenli bir özete indirger — YALNIZ sayımlar ve capability/olay
+    /// adları. Hiçbir kullanıcı metni/hedef/sır bu özete girmez (kaynak veri `StructuredLogEvent`
+    /// zaten yalnız olay adı + ID taşıyor). Hiçbir yere gönderilmez; kullanıcının kendi sistemini
+    /// gözlemlemesi için. Audit olayı adları sabit sözlükten geldiği için (`policy.Allow`,
+    /// `verify.Pass` vb.) alt-dize eşleşmesi güvenli.
+    pub fn metrics_summary(&self) -> RuntimeMetricsSummary {
+        let mut summary = RuntimeMetricsSummary {
+            total_tasks: self.tasks.len(),
+            total_events: self.structured_logs.len(),
+            ..RuntimeMetricsSummary::default()
+        };
+        for task in self.tasks.values() {
+            *summary
+                .tasks_by_capability
+                .entry(task.capability.clone())
+                .or_insert(0) += 1;
+        }
+        for log in &self.structured_logs {
+            if matches!(log.level, LogLevel::Warn) {
+                summary.warning_events += 1;
+            }
+            let event = log.event.as_str();
+            if event.contains("verify.Pass") {
+                summary.verification_pass += 1;
+            } else if event.contains("verify.Fail") {
+                summary.verification_fail += 1;
+            }
+            if event.contains("policy.Allow") {
+                summary.policy_allow += 1;
+            } else if event.contains("policy.Deny") {
+                summary.policy_deny += 1;
+            } else if event.contains("policy.AskUser") {
+                summary.policy_ask_user += 1;
+            }
+        }
+        summary
+    }
+
     fn append_chat_turn(&mut self, role: &'static str, content: String) {
         // Keep only whole, most-recent exchanges. Before a new user turn we remove the oldest
         // user/assistant pair, so the model never receives an orphaned assistant reply.

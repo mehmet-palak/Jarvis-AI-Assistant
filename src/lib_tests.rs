@@ -7273,3 +7273,51 @@ fn the_same_schema_version_opens_normally() {
     SqliteStore::open(&db_str).expect("aynı sürüm sorunsuz açılmalı");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- F9: gizlilik-güvenli metrik özeti ---------------------------------------------------------
+
+/// Gerçek görevler koştur, metrik özetinin bunları yansıttığını doğrula — ve özetin YALNIZ
+/// sayım/capability adı içerdiğini (kullanıcı metni sızmadığını) kanıtla.
+#[test]
+fn metrics_summary_reflects_real_task_activity_without_leaking_content() {
+    let mut runtime = Runtime::new();
+    // Birkaç gerçek sağlık görevi (fast-path, verify.Pass üretir).
+    runtime.handle(request("1", "system health"));
+    runtime.handle(request("2", "system health"));
+
+    let metrics = runtime.metrics_summary();
+    assert!(metrics.total_tasks >= 2, "{metrics:?}");
+    assert!(
+        metrics
+            .tasks_by_capability
+            .get("system.health")
+            .copied()
+            .unwrap_or(0)
+            >= 2,
+        "capability bazında sayım olmalı: {metrics:?}"
+    );
+    assert!(
+        metrics.verification_pass >= 2,
+        "başarılı doğrulama sayılmalı: {metrics:?}"
+    );
+    assert!(metrics.total_events > 0);
+
+    // Gizlilik: özet Debug çıktısında hiçbir kullanıcı girdisi olmamalı — yalnız capability/olay
+    // adları ve sayılar. (Bu görevlerin girdisi "system health"; capability adı system.health,
+    // bu ayrı bir şey — kullanıcının yazdığı ham metin özete girmemeli.)
+    let debug = format!("{metrics:?}");
+    assert!(
+        !debug.contains("request-"),
+        "korelasyon/istek kimlikleri sızmamalı: {debug}"
+    );
+}
+
+/// Boş bir runtime'ın metrikleri sıfır olmalı — özet, aktivite olmadan uydurma sayı üretmemeli.
+#[test]
+fn metrics_summary_is_empty_for_a_fresh_runtime() {
+    let runtime = Runtime::new();
+    let metrics = runtime.metrics_summary();
+    assert_eq!(metrics.total_tasks, 0);
+    assert_eq!(metrics.verification_pass, 0);
+    assert!(metrics.tasks_by_capability.is_empty());
+}

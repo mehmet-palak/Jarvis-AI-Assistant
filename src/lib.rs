@@ -698,6 +698,27 @@ pub struct StructuredLogEvent {
     pub event: String,
 }
 
+/// F9 "Metrikler ... kişisel içerik toplamadan yerel telemetry". Bir oturumun operasyonel özeti —
+/// YALNIZ sayımlar ve capability/olay adları; hiçbir kullanıcı metni, hedef, sır ya da içerik YOK.
+/// `Runtime::metrics_summary` bunu bellekteki görev/audit verisinden türetiyor; hiçbir yere
+/// gönderilmiyor, yalnız kullanıcının kendi sistemini gözlemlemesi için.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeMetricsSummary {
+    pub total_tasks: usize,
+    /// Capability adı → o capability'yle kaç görev. Yalnız capability KİMLİKLERİ (ör.
+    /// `system.health`), kullanıcı girdisi değil.
+    pub tasks_by_capability: std::collections::BTreeMap<String, usize>,
+    pub verification_pass: usize,
+    pub verification_fail: usize,
+    pub policy_allow: usize,
+    pub policy_deny: usize,
+    pub policy_ask_user: usize,
+    /// `LogLevel::Warn` seviyesindeki olay sayısı (başarısız/geçersiz olaylar).
+    pub warning_events: usize,
+    /// Toplam kayıtlı structured-log olayı — "ne kadar aktivite oldu"nun kaba ölçüsü.
+    pub total_events: usize,
+}
+
 /// A dialogue turn passed to a model as data. Roles describe attribution only; they grant no
 /// policy, tool, or system authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
