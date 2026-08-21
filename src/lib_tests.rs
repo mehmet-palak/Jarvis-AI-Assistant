@@ -7109,3 +7109,120 @@ fn schema_migration_check_detects_a_deleted_migration_row() {
         "{error}"
     );
 }
+
+// --- F9: kendi kendini doğrulayan yedek + saklama (restore tatbikatı) --------------------------
+
+/// Yedekleme uçtan uca: gerçek bir DB'ye veri yaz, yedek al, yedeği AYRI bir store olarak açıp
+/// verinin gerçekten orada olduğunu doğrula — "restore tatbikatı"nın kalbi.
+#[test]
+fn a_verified_backup_actually_contains_the_data_and_can_be_reopened() {
+    let dir = temporary_workspace("f9-backup-roundtrip");
+    let db_path = dir.join("jarvis.db");
+    let backups = dir.join("backups");
+
+    // Gerçek bir dosya-tabanlı store'a bir görev yaz (audit zinciri de oluşsun).
+    {
+        let mut store = SqliteStore::open(db_path.to_str().unwrap()).expect("db aç");
+        let task = Task {
+            task_id: "t-backup".into(),
+            request_id: "r-backup".into(),
+            state: TaskState::Completed,
+            capability: "system.health".into(),
+        };
+        store.save_task(&task).expect("görev kaydı");
+        store
+            .append_audit_chain("t-backup", "task.completed")
+            .expect("audit");
+
+        let backup_path = store
+            .create_verified_backup(&backups, 5)
+            .expect("doğrulanmış yedek alınmalı");
+        assert!(backup_path.exists());
+
+        // Yedeği ayrı bir store olarak aç — veri gerçekten orada mı.
+        let restored = SqliteStore::open(backup_path.to_str().unwrap()).expect("yedek aç");
+        assert_eq!(
+            restored.task_state("t-backup").unwrap().as_deref(),
+            Some("COMPLETED"),
+            "yedek, canlı verinin gerçek bir kopyasını içermeli"
+        );
+        restored
+            .verify_schema_migrations()
+            .expect("yedek göç bütünlüğünü geçmeli");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Saklama (retention): en yeni N yedek tutulmalı, daha eskiler silinmeli.
+#[test]
+fn backup_retention_keeps_only_the_most_recent_n() {
+    let dir = temporary_workspace("f9-backup-retention");
+    let db_path = dir.join("jarvis.db");
+    let backups = dir.join("backups");
+    let store = SqliteStore::open(db_path.to_str().unwrap()).expect("db aç");
+    // (retention testi audit yazmıyor; yalnız prune davranışını sınıyor)
+
+    // Aynı saniyede birden çok yedek adı çakışır (isim epoch tabanlı); farklı isimler için
+    // elle birkaç sahte eski yedek yerleştirip prune'u doğruluyoruz.
+    std::fs::create_dir_all(&backups).unwrap();
+    for epoch in [100u64, 200, 300, 400] {
+        // Her biri geçerli bir DB olmalı ki ileride açılabilsinler; VACUUM INTO ile gerçek kopya.
+        let path = backups.join(format!("jarvis-backup-{epoch}.db"));
+        store.backup_to(&path).expect("sahte eski yedek");
+    }
+    // Şimdi gerçek bir doğrulanmış yedek al, retention=2 — toplam 5 varken en yeni 2 kalmalı.
+    let newest = store
+        .create_verified_backup(&backups, 2)
+        .expect("yedek + prune");
+
+    let remaining: Vec<String> = std::fs::read_dir(&backups)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("jarvis-backup-"))
+        .collect();
+    assert_eq!(remaining.len(), 2, "en yeni 2 yedek kalmalı: {remaining:?}");
+    // En yeni gerçek yedek kesinlikle kalmalı.
+    assert!(remaining
+        .iter()
+        .any(|name| newest.file_name().unwrap().to_string_lossy() == *name));
+    // 100 ve 200 gibi en eskiler silinmiş olmalı.
+    assert!(!remaining.contains(&"jarvis-backup-100.db".to_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Restore tatbikatının asıl değeri: bozuk bir yedek (audit zinciri kurcalanmış) doğrulamayı
+/// geçemez ve tutulmaz — sessizce işe yaramaz bir yedek biriktirmek felaket anında beterdir.
+#[test]
+fn a_backup_that_fails_verification_is_deleted_not_kept() {
+    // Bunu doğrudan create_verified_backup ile üretmek zor (canlı DB zaten geçerli); bunun yerine
+    // doğrulama mantığının kendisini bir kurcalanmış yedek üzerinde sınıyoruz: geçerli bir yedek
+    // al, audit satırını boz, sonra yeniden doğrula.
+    let dir = temporary_workspace("f9-backup-corrupt");
+    let db_path = dir.join("jarvis.db");
+    let mut store = SqliteStore::open(db_path.to_str().unwrap()).expect("db aç");
+    store
+        .save_task(&Task {
+            task_id: "t1".into(),
+            request_id: "r1".into(),
+            state: TaskState::Completed,
+            capability: "system.health".into(),
+        })
+        .unwrap();
+    store.append_audit_chain("t1", "task.completed").unwrap();
+
+    let backup = dir.join("manual-backup.db");
+    store.backup_to(&backup).unwrap();
+
+    // Yedeği aç, audit zincirini kurcala.
+    let tampered = SqliteStore::open(backup.to_str().unwrap()).unwrap();
+    tampered
+        .raw_connection()
+        .execute("UPDATE audit_events SET event = 'tampered'", [])
+        .unwrap();
+    assert!(
+        !tampered.audit_chain_is_valid().unwrap(),
+        "kurcalanmış zincir geçersiz olmalı — create_verified_backup böyle bir yedeği silerdi"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2540,6 +2540,93 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// F9 "Backup/retention komutları ... ve restore tatbikatı". `backup_to`'nun üstüne üç şey
+    /// ekliyor:
+    /// 1. **Restore tatbikatı (en kritik):** yedek alınır alınmaz AÇILIP doğrulanıyor — şema göç
+    ///    bütünlüğü (`verify_schema_migrations`) VE audit hash-zinciri (`audit_chain_is_valid`)
+    ///    geçmezse yedek BOZUK sayılıp siliniyor ve hata dönüyor. Bir yedeğin "gerçekten geri
+    ///    yüklenebilir" olduğu, ona güvenmeden ÖNCE kanıtlanıyor — sessizce bozuk bir yedek
+    ///    tutup felaket anında işe yaramadığını görmek, hiç yedek olmamaktan beterdir.
+    /// 2. **Zaman damgalı isim:** `backups_dir` içinde `jarvis-backup-<epoch>.db` — mevcut bir
+    ///    yedeğin üzerine asla yazılmıyor.
+    /// 3. **Saklama (retention):** en yeni `retention_count` yedek tutuluyor, daha eskiler
+    ///    siliniyor — sınırsız disk büyümesini önler. `retention_count` en az 1'e zorlanıyor
+    ///    (yeni alınan yedeği asla hemen silmemek için).
+    ///
+    /// Döndürülen yol, doğrulanmış yeni yedeğin yolu. Ağ/indirme gerektirmez.
+    pub fn create_verified_backup(
+        &self,
+        backups_dir: &Path,
+        retention_count: usize,
+    ) -> Result<PathBuf, String> {
+        fs::create_dir_all(backups_dir)
+            .map_err(|error| format!("yedek dizini oluşturulamadı: {error}"))?;
+        let backup_path = backups_dir.join(format!("jarvis-backup-{}.db", now_epoch()));
+        if backup_path.exists() {
+            return Err(format!(
+                "aynı saniyede bir yedek zaten var: {}",
+                backup_path.display()
+            ));
+        }
+        self.backup_to(&backup_path)
+            .map_err(|error| format!("yedek yazılamadı: {error}"))?;
+
+        // Restore tatbikatı: yedeği aç ve doğrula. Geçmezse sil ve hata ver.
+        let verification = (|| -> Result<(), String> {
+            let restored = SqliteStore::open(
+                backup_path
+                    .to_str()
+                    .ok_or_else(|| "yedek yolu UTF-8 değil".to_string())?,
+            )
+            .map_err(|error| format!("yedek açılamadı (restore tatbikatı): {error}"))?;
+            restored.verify_schema_migrations()?;
+            if !restored
+                .audit_chain_is_valid()
+                .map_err(|error| error.to_string())?
+            {
+                return Err("yedeğin audit hash-zinciri doğrulanamadı".into());
+            }
+            Ok(())
+        })();
+        if let Err(reason) = verification {
+            let _ = fs::remove_file(&backup_path);
+            return Err(format!(
+                "yedek doğrulanamadı, bozuk yedek silindi: {reason}"
+            ));
+        }
+
+        self.prune_old_backups(backups_dir, retention_count.max(1))?;
+        Ok(backup_path)
+    }
+
+    /// `backups_dir` içindeki `jarvis-backup-*.db` dosyalarından en yeni `keep` tanesini tutup
+    /// gerisini siler. İsimdeki epoch'a göre değil dosya değişiklik zamanına göre değil —
+    /// isimdeki sayısal epoch'a göre sıralıyor (isim, yedeğin alındığı anı taşıyor ve dış
+    /// etkenlerden bağımsız).
+    fn prune_old_backups(&self, backups_dir: &Path, keep: usize) -> Result<(), String> {
+        let mut backups: Vec<(u64, PathBuf)> = fs::read_dir(backups_dir)
+            .map_err(|error| format!("yedek dizini okunamadı: {error}"))?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?;
+                let epoch = name
+                    .strip_prefix("jarvis-backup-")?
+                    .strip_suffix(".db")?
+                    .parse::<u64>()
+                    .ok()?;
+                Some((epoch, path))
+            })
+            .collect();
+        // En yeni önce.
+        backups.sort_by_key(|(epoch, _)| std::cmp::Reverse(*epoch));
+        for (_, path) in backups.into_iter().skip(keep) {
+            fs::remove_file(&path)
+                .map_err(|error| format!("eski yedek silinemedi ({}): {error}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Crate-internal, test-only escape hatch: some integrity tests need to corrupt raw rows
     /// (for example a tampered audit event) to prove `audit_chain_is_valid` actually detects it.
     /// Production code never reaches into the raw connection; every real write goes through a
