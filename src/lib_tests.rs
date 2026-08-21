@@ -7321,3 +7321,63 @@ fn metrics_summary_is_empty_for_a_fresh_runtime() {
     assert_eq!(metrics.verification_pass, 0);
     assert!(metrics.tasks_by_capability.is_empty());
 }
+
+// --- F9: audit export (witness) ----------------------------------------------------------------
+
+#[test]
+fn audit_export_writes_the_chain_and_rejects_a_tampered_one() {
+    let dir = temporary_workspace("f9-audit-export");
+    let db_path = dir.join("jarvis.db");
+    let mut store = SqliteStore::open(db_path.to_str().unwrap()).expect("db");
+    store.append_audit_chain("t1", "task.queued").expect("a1");
+    store
+        .append_audit_chain("t1", "task.completed")
+        .expect("a2");
+
+    let out = dir.join("audit-witness.jsonl");
+    let count = store
+        .export_audit_chain(&out)
+        .expect("geçerli zincir dışa aktarılmalı");
+    assert!(count >= 2, "en az 2 olay dışa aktarılmalı");
+    let content = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        content.contains("task.completed"),
+        "içerik olayları taşımalı"
+    );
+    assert!(
+        content.contains("event_hash"),
+        "hash alanları da yazılmalı (witness)"
+    );
+
+    // Var olan dosyanın üzerine yazmaz.
+    assert!(
+        store.export_audit_chain(&out).is_err(),
+        "mevcut dosyanın üzerine yazılmamalı"
+    );
+
+    // Kurcalanmış zincir dışa aktarılmaz.
+    store
+        .raw_connection()
+        .execute("UPDATE audit_events SET event='tampered'", [])
+        .unwrap();
+    let out2 = dir.join("audit-witness-2.jsonl");
+    let error = store
+        .export_audit_chain(&out2)
+        .expect_err("kurcalanmış zincir reddedilmeli");
+    assert!(
+        error.contains("bütünlük") || error.contains("kurcalan"),
+        "{error}"
+    );
+    assert!(!out2.exists(), "reddedilen export dosya bırakmamalı");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F9 metrik formatlayıcısı okunabilir ve sayımları içeriyor.
+#[test]
+fn format_metrics_summary_is_readable_and_contains_counts() {
+    let mut runtime = Runtime::new();
+    runtime.handle(request("1", "system health"));
+    let text = crate::format_metrics_summary(&runtime.metrics_summary());
+    assert!(text.contains("Toplam görev"), "{text}");
+    assert!(text.contains("Doğrulama"), "{text}");
+}

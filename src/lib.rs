@@ -717,6 +717,9 @@ pub struct RuntimeMetricsSummary {
     pub warning_events: usize,
     /// Toplam kayıtlı structured-log olayı — "ne kadar aktivite oldu"nun kaba ölçüsü.
     pub total_events: usize,
+    /// F9 "Metrikler: latency" — işlenmiş bir isteğin ortalama süresi (ms). Görev yoksa 0.
+    /// Yalnız bir süre ölçüsü; hiçbir içerik taşımaz.
+    pub average_task_latency_millis: u64,
 }
 
 /// A dialogue turn passed to a model as data. Roles describe attribution only; they grant no
@@ -1419,6 +1422,40 @@ pub fn now_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// F9 "Sürüm/migration yönetimi: semantic version". Tek kaynak: `Cargo.toml`'un `version`'ı
+/// (derleme zamanında gömülür) — elle senkron tutulacak ikinci bir sabit yok. CHANGELOG.md bu
+/// sürümün insan-okunur değişiklik kaydını tutuyor.
+pub const JARVIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// F9 "Metrikler": bir metrik özetini kullanıcıya gösterilecek okunabilir Türkçe metne çevirir.
+/// Yalnız sayımlar ve capability/olay adları — özetin kendisi zaten gizlilik-güvenli.
+pub fn format_metrics_summary(metrics: &RuntimeMetricsSummary) -> String {
+    let mut lines = vec![
+        format!("Toplam görev: {}", metrics.total_tasks),
+        format!(
+            "Doğrulama: {} geçti / {} kaldı",
+            metrics.verification_pass, metrics.verification_fail
+        ),
+        format!(
+            "Policy: {} izin / {} ret / {} onay-bekle",
+            metrics.policy_allow, metrics.policy_deny, metrics.policy_ask_user
+        ),
+        format!("Uyarı olayı: {}", metrics.warning_events),
+        format!("Toplam olay: {}", metrics.total_events),
+        format!(
+            "Ortalama işlem süresi: {} ms",
+            metrics.average_task_latency_millis
+        ),
+    ];
+    if !metrics.tasks_by_capability.is_empty() {
+        lines.push("Capability dağılımı:".to_string());
+        for (capability, count) in &metrics.tasks_by_capability {
+            lines.push(format!("  • {capability}: {count}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn approval_scope_hash(task_id: &str, action_id: &str, input: &str) -> String {

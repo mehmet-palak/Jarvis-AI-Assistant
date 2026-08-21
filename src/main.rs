@@ -3246,10 +3246,57 @@ fn submit(
                 }
             };
             app.push_system(format!(
-                "Model server: {} • GPU offload (Vulkan, 28/36 katman) • RAG: {rag_mode} • bu konfigürasyon: {measurement} • {}",
+                "JARVIS v{} • Model server: {} • GPU offload (Vulkan, 28/36 katman) • RAG: {rag_mode} • bu konfigürasyon: {measurement} • {}",
+                jarvis_core::JARVIS_VERSION,
                 model_label(&app.model_state),
                 app.status
             ));
+            return;
+        }
+        "/metrics" | "metrics" => {
+            let metrics = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .metrics_summary();
+            app.push_system(jarvis_core::format_metrics_summary(&metrics));
+            return;
+        }
+        "/backup" | "backup" => {
+            // Yedekler DB'nin yanındaki `backups/` dizinine (proje kökü), en yeni 10 tanesi tutulur.
+            let backups_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backups");
+            let outcome = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .create_backup(&backups_dir, 10);
+            match outcome {
+                Ok(path) => app.push_system(format!(
+                    "Doğrulanmış yedek alındı (açılıp bütünlüğü kontrol edildi): {}",
+                    path.display()
+                )),
+                Err(error) => app.push_system(format!("Yedek alınamadı: {error}")),
+            }
+            return;
+        }
+        _ if input == "/audit-export" || input.starts_with("/audit-export ") => {
+            let target = input
+                .as_str()
+                .strip_prefix("/audit-export")
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let Some(target) = target else {
+                app.push_system("Kullanım: /audit-export <dosya-yolu> (audit zincirini JSONL olarak dışa aktarır)");
+                return;
+            };
+            let outcome = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .export_audit(std::path::Path::new(target));
+            match outcome {
+                Ok(count) => app.push_system(format!(
+                    "Audit zinciri dışa aktarıldı ({count} olay): {target} — bütünlük kontrolünden geçti."
+                )),
+                Err(error) => app.push_system(format!("Audit export başarısız: {error}")),
+            }
             return;
         }
         "/voice" => {

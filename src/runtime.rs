@@ -50,6 +50,10 @@ pub struct Runtime {
     audit_sequence: u64,
     audit_hash: String,
     structured_logs: Vec<StructuredLogEvent>,
+    /// F9 "Metrikler: latency" — işlenmiş isteklerin toplam süresi (ms) ve sayısı; ortalama
+    /// türetiliyor. Gizlilik-güvenli: yalnız süre, içerik değil.
+    total_task_latency_millis: u128,
+    timed_task_count: u64,
     pub(crate) chat_history: Vec<ConversationMessage>,
     /// Optional hybrid-retrieval embedding adapter (F3 madde 13, ADR-0004). `None` by default —
     /// every workspace indexing/search path already degrades to FTS-only when this is unset,
@@ -90,6 +94,8 @@ impl Default for Runtime {
             audit_sequence: 0,
             audit_hash: "GENESIS".into(),
             structured_logs: Vec::new(),
+            total_task_latency_millis: 0,
+            timed_task_count: 0,
             chat_history: Vec::new(),
             embedding_provider: None,
             last_workspace_citations: Vec::new(),
@@ -208,10 +214,38 @@ impl Runtime {
     /// zaten yalnız olay adı + ID taşıyor). Hiçbir yere gönderilmez; kullanıcının kendi sistemini
     /// gözlemlemesi için. Audit olayı adları sabit sözlükten geldiği için (`policy.Allow`,
     /// `verify.Pass` vb.) alt-dize eşleşmesi güvenli.
+    /// F9 "Backup/retention komutları": doğrulanmış bir yedek alır (bkz.
+    /// `SqliteStore::create_verified_backup`). Yedek dizini + saklama sayısı çağırandan gelir —
+    /// Runtime yol-bağımsız kalır.
+    pub fn create_backup(
+        &self,
+        backups_dir: &std::path::Path,
+        retention_count: usize,
+    ) -> Result<std::path::PathBuf, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "yedekleme için yerel depo gerekli".to_string())?
+            .create_verified_backup(backups_dir, retention_count)
+    }
+
+    /// F9 "audit export/witness stratejisi": audit hash-zincirini bir dosyaya dışa aktarır.
+    pub fn export_audit(&self, destination: &std::path::Path) -> Result<usize, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "audit export için yerel depo gerekli".to_string())?
+            .export_audit_chain(destination)
+    }
+
     pub fn metrics_summary(&self) -> RuntimeMetricsSummary {
+        let average_task_latency_millis = if self.timed_task_count > 0 {
+            (self.total_task_latency_millis / u128::from(self.timed_task_count)) as u64
+        } else {
+            0
+        };
         let mut summary = RuntimeMetricsSummary {
             total_tasks: self.tasks.len(),
             total_events: self.structured_logs.len(),
+            average_task_latency_millis,
             ..RuntimeMetricsSummary::default()
         };
         for task in self.tasks.values() {
@@ -2239,6 +2273,20 @@ impl Runtime {
     }
 
     fn handle_with_resolution(
+        &mut self,
+        request: Request,
+        resolution: IntentResolution,
+    ) -> (Task, ToolResult, VerifierResult) {
+        // F9 "Metrikler: latency". Bir isteği işlemenin duvar-saati süresi — gizlilik-güvenli
+        // (yalnız bir süre, içerik değil). Toplam + sayaç tutup ortalama türetiyoruz.
+        let handling_started = Instant::now();
+        let outcome = self.handle_with_resolution_inner(request, resolution);
+        self.total_task_latency_millis += handling_started.elapsed().as_millis();
+        self.timed_task_count += 1;
+        outcome
+    }
+
+    fn handle_with_resolution_inner(
         &mut self,
         request: Request,
         resolution: IntentResolution,

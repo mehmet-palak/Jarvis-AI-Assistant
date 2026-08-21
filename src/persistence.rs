@@ -2549,6 +2549,59 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// F9 "audit export/witness stratejisi". Audit hash-zincirini bir dosyaya JSON-satır (JSONL)
+    /// olarak yazar — her olay bir satır, sıra/hash'leriyle birlikte. Bu bir "witness": zincir
+    /// dışa aktarıldıktan sonra bağımsız olarak (JARVIS olmadan) incelenebilir/arşivlenebilir, ve
+    /// hash'ler kurcalamayı ele verir. Önce `audit_chain_is_valid` ile zincirin bütünlüğü
+    /// doğrulanıyor — geçmezse export REDDEDİLİYOR (bozuk/kurcalanmış bir zinciri "resmi kayıt"
+    /// gibi dışa aktarmak yanıltıcı olurdu). Hedef dosya zaten varsa üzerine yazmaz. Döndürülen
+    /// değer: dışa aktarılan olay sayısı.
+    pub fn export_audit_chain(&self, destination: &Path) -> Result<usize, String> {
+        if destination.exists() {
+            return Err(format!(
+                "hedef dosya zaten var, üzerine yazılmaz: {}",
+                destination.display()
+            ));
+        }
+        if !self
+            .audit_chain_is_valid()
+            .map_err(|error| error.to_string())?
+        {
+            return Err(
+                "audit zinciri bütünlük kontrolünü geçemedi — kurcalanmış/bozuk bir zincir witness olarak dışa aktarılmaz".into(),
+            );
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT task_id, event, event_sequence, previous_hash, event_hash
+                 FROM audit_events ORDER BY event_sequence ASC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "task_id": row.get::<_, String>(0)?,
+                    "event": row.get::<_, String>(1)?,
+                    "sequence": row.get::<_, i64>(2)?,
+                    "previous_hash": row.get::<_, String>(3)?,
+                    "event_hash": row.get::<_, String>(4)?,
+                }))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut lines = String::new();
+        let mut count = 0usize;
+        for row in rows {
+            let value = row.map_err(|error| error.to_string())?;
+            lines.push_str(&value.to_string());
+            lines.push('\n');
+            count += 1;
+        }
+        fs::write(destination, lines)
+            .map_err(|error| format!("audit export yazılamadı: {error}"))?;
+        Ok(count)
+    }
+
     pub fn recover_interrupted_tasks(&self) -> SqlResult<usize> {
         self.connection.execute(
             "UPDATE tasks SET state='INTERRUPTED' WHERE state='RUNNING'",
