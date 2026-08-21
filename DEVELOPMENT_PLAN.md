@@ -987,7 +987,7 @@ Tamamlanma ölçütü: Yerel desktop sürümü güvenilir olmadan hiçbir eklent
 
 ### F9 — Operasyonel olgunluk, release ve uzun dönem bakım
 
-Durum: BEKLENİYOR — F2 ile birlikte başlar, ürün yayınından önce kapanır
+Durum: BAŞLADI (21 Ağustos 2026) — kullanıcı F8'den ÖNCE F9'u seçti (F8'in remote/mobile kapısı "güvenilir desktop" gerektiriyor, o da büyük ölçüde F9). İlk parça: release pipeline'ın "migration kontrolü" alt maddesi — `SqliteStore::verify_schema_migrations` şema göç kayıtlarının bütünlüğünü doğruluyor (en yüksek sürüm == CURRENT_SCHEMA_VERSION, 1..=güncel arası boşluk yok, her göçün adı dolu). Bu, bu oturumda her yeni tabloda elle hatırlanması gereken "sürüm artırıldı ama migration satırı unutuldu" hata sınıfını otomatik yakalıyor; `cargo test`'in (dolayısıyla release kapısının) parçası. Gerçek testle kanıtlandı: silinen bir göç satırı yakalanıyor (kontrolün sessizce her şeye 'tamam' demediğinin kanıtı).
 
 - [ ] Release pipeline: format, test, clippy, dependency/security denetimi, release build, migration kontrolü ve E2E smoke'u tek raporda birleştirme.
 - [ ] Metrikler: latency, model yükleme, token üretimi, başarı/verification oranı, iptal, hata sınıfı, CPU/RAM/disk kullanımı; kişisel içerik toplamadan yerel telemetry.

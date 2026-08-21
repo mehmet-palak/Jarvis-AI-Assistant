@@ -2476,6 +2476,51 @@ impl SqliteStore {
         )
     }
 
+    /// F9 "Release pipeline: ... migration kontrolü". Şema göç kayıtlarının bütünlüğünü doğrular —
+    /// bir class hatayı yakalamak için: `CURRENT_SCHEMA_VERSION` artırılıp ilgili
+    /// `INSERT INTO schema_migrations` satırının EKLENMEMESİ (bu oturumda her yeni tabloda elle
+    /// hatırlanması gereken, kolayca unutulan bir adımdı). Kontroller: (1) kayıtlı en yüksek sürüm
+    /// tam olarak `CURRENT_SCHEMA_VERSION`; (2) 1..=güncel arası HİÇBİR sürüm atlanmamış (boşluk
+    /// yok); (3) her göçün boş olmayan bir adı var (kime ne yaptığı belirsiz bir göç, geri
+    /// alma/hata ayıklama sırasında işe yaramaz). Herhangi biri ihlal edilirse açıklayıcı bir
+    /// `Err`. Ağ/indirme gerektirmez — release kapısının çevrimdışı doğasına uygun.
+    pub fn verify_schema_migrations(&self) -> Result<(), String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT version, name FROM schema_migrations ORDER BY version ASC")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let recorded: Vec<(i64, String)> = rows
+            .collect::<SqlResult<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
+
+        let highest = recorded.last().map(|(version, _)| *version).unwrap_or(0);
+        if highest != CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "şema göç tutarsızlığı: kayıtlı en yüksek sürüm {highest}, ama CURRENT_SCHEMA_VERSION {CURRENT_SCHEMA_VERSION} — muhtemelen bir sürüm artırıldı ama schema_migrations satırı eklenmedi"
+            ));
+        }
+        for expected in 1..=CURRENT_SCHEMA_VERSION {
+            let entry = recorded.iter().find(|(version, _)| *version == expected);
+            match entry {
+                None => {
+                    return Err(format!(
+                        "şema göç boşluğu: sürüm {expected} eksik (1..={CURRENT_SCHEMA_VERSION} arası her sürüm kayıtlı olmalı)"
+                    ));
+                }
+                Some((_, name)) if name.trim().is_empty() => {
+                    return Err(format!("şema göç {expected}'in adı boş"));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn recover_interrupted_tasks(&self) -> SqlResult<usize> {
         self.connection.execute(
             "UPDATE tasks SET state='INTERRUPTED' WHERE state='RUNNING'",

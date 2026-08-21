@@ -7075,3 +7075,37 @@ fn execute_intent_still_enforces_scope_for_network_actions() {
         "{error}"
     );
 }
+
+// --- F9: şema göç bütünlüğü (release pipeline "migration kontrolü") ----------------------------
+
+/// Gerçek, taze bir veritabanı her zaman bütünlük kontrolünü geçmeli — bu, her `cargo test`
+/// koşumunda (dolayısıyla release kapısında) "sürüm artırıldı ama migration satırı unutuldu"
+/// hatasını yakalar. Bu oturumda tam da bu risk defalarca elle önlendi; artık otomatik.
+#[test]
+fn a_fresh_database_passes_schema_migration_integrity() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .verify_schema_migrations()
+        .expect("taze bir veritabanı göç bütünlüğünü geçmeli");
+}
+
+/// Kontrolün gerçekten AYIRT ETTİĞİNİ kanıtlıyoruz (varsayım değil): bir göç satırını ham SQL ile
+/// silip bir boşluk yaratıyoruz — kontrol bunu yakalamalı. `verify_schema_migrations`'ın sessizce
+/// her şeye "tamam" demediğinin kanıtı.
+#[test]
+fn schema_migration_check_detects_a_deleted_migration_row() {
+    let store = SqliteStore::in_memory().expect("sqlite");
+    // Ortadaki bir sürümü sil (en yüksek olmayan) — böylece "en yüksek == CURRENT" kontrolü değil,
+    // "boşluk yok" kontrolü tetiklensin.
+    store
+        .raw_connection()
+        .execute("DELETE FROM schema_migrations WHERE version = 2", [])
+        .expect("test kurulumu");
+    let error = store
+        .verify_schema_migrations()
+        .expect_err("silinen bir göç satırı yakalanmalı");
+    assert!(
+        error.contains("boşluk") || error.contains("eksik"),
+        "{error}"
+    );
+}
