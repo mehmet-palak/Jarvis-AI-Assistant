@@ -7592,6 +7592,48 @@ fn mcp_registry_revoked_server_is_refused_and_status_round_trips() {
 }
 
 #[test]
+fn runtime_mcp_kill_switch_blocks_connection_even_for_a_valid_server() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    let mut runtime = Runtime::with_store(store);
+    runtime
+        .register_mcp_server(&sample_mcp_manifest("hava"))
+        .expect("kayıt");
+
+    // Kapatma anahtarı açıkken geçerli bir sunucu bağlanabilir.
+    assert!(runtime.mcp_egress_enabled());
+    let ok = runtime
+        .authorize_mcp_connection("hava", &"c".repeat(64), CURRENT_MCP_CLIENT_PROTOCOL_VERSION)
+        .expect("store hatası yok");
+    assert!(ok.is_ok());
+
+    // /mcp off → global kill switch; geçerli sunucu bile artık reddedilir.
+    runtime.set_mcp_egress_enabled(false);
+    let blocked = runtime
+        .authorize_mcp_connection("hava", &"c".repeat(64), CURRENT_MCP_CLIENT_PROTOCOL_VERSION)
+        .expect("store hatası yok");
+    assert!(blocked.is_err());
+
+    // Durum değişiklikleri ve iptal audit'e yazılmalı.
+    runtime
+        .revoke_mcp_server("hava", "test iptali")
+        .expect("iptal");
+    let audit_events: Vec<String> = runtime
+        .structured_logs()
+        .iter()
+        .map(|event| event.event.clone())
+        .collect();
+    assert!(audit_events
+        .iter()
+        .any(|detail| detail == "mcp.egress.disabled"));
+    assert!(audit_events
+        .iter()
+        .any(|detail| detail == "mcp.server.registered:hava"));
+    assert!(audit_events
+        .iter()
+        .any(|detail| detail == "mcp.server.revoked:hava"));
+}
+
+#[test]
 fn mcp_registry_unknown_server_is_refused_no_auto_discovery() {
     let store = SqliteStore::in_memory().expect("sqlite schema");
     let outcome = store

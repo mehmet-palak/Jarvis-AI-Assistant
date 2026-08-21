@@ -85,6 +85,11 @@ pub struct Runtime {
     /// governed capability/task/policy yoluna girmez, model ona "çağrı" yapamaz; Runtime brifingi
     /// ve `/takvim` komutu için okur.
     calendar_provider: Option<Box<dyn CalendarProvider>>,
+    /// F8 MCP egress global kapatma anahtarı (ADR-0008 Katman 5). `false` iken hiçbir dış MCP
+    /// sunucusuna/eklentiye bağlanılmaz — kayıtlı ve geçerli olsalar bile. Varsayılan `true`
+    /// (özellik açık ama hiç sunucu kayıtlı değilse zaten hiçbir şey olmaz); `/mcp off` bunu anında
+    /// kapatır.
+    mcp_egress_enabled: bool,
 }
 
 impl Default for Runtime {
@@ -109,6 +114,7 @@ impl Default for Runtime {
             profile_files_dir: None,
             weather_provider: None,
             calendar_provider: None,
+            mcp_egress_enabled: true,
         }
     }
 }
@@ -735,6 +741,96 @@ impl Runtime {
             }
             lines.join("\n")
         }))
+    }
+
+    // --- F8 MCP egress operasyonel katmanı (ADR-0008 Faz 5): kayıt/liste/iptal/karantina +
+    // global kapatma anahtarı + her durum değişikliğinin audit'e yazılması. ---
+
+    /// Global MCP egress kapatma anahtarını okur.
+    pub fn mcp_egress_enabled(&self) -> bool {
+        self.mcp_egress_enabled
+    }
+
+    /// `/mcp on|off` — global kapatma anahtarını değiştirir ve audit'e yazar. `off` iken hiçbir dış
+    /// araca/eklentiye bağlanılmaz (kill switch).
+    pub fn set_mcp_egress_enabled(&mut self, enabled: bool) {
+        self.mcp_egress_enabled = enabled;
+        let event = if enabled {
+            "mcp.egress.enabled"
+        } else {
+            "mcp.egress.disabled"
+        };
+        self.record_audit(AuditEvent::pending("mcp-egress", event));
+    }
+
+    /// Bir dış MCP sunucusunu/eklentisini kayıt defterine ekler (onay olayı). Doğrulama+imzalama
+    /// store'da (tek policy-gate); burada audit yazılır.
+    pub fn register_mcp_server(&mut self, manifest: &McpServerManifest) -> Result<(), String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "MCP kaydı yerel bir store gerektirir".to_string())?;
+        store.register_mcp_server(manifest)?;
+        self.record_audit(AuditEvent::pending(
+            "mcp-egress",
+            format!("mcp.server.registered:{}", manifest.id),
+        ));
+        Ok(())
+    }
+
+    pub fn list_mcp_servers(&self) -> Result<Vec<RegisteredMcpServer>, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "MCP listesi yerel bir store gerektirir".to_string())?
+            .list_mcp_servers()
+    }
+
+    /// Bir sunucuyu iptal eder (kullanıcı kararı) — durum `Revoked`, audit yazılır.
+    pub fn revoke_mcp_server(&mut self, id: &str, reason: &str) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "MCP iptali yerel bir store gerektirir".to_string())?
+            .set_mcp_server_status(id, McpServerStatus::Revoked, Some(reason))?;
+        self.record_audit(AuditEvent::pending(
+            "mcp-egress",
+            format!("mcp.server.revoked:{id}"),
+        ));
+        Ok(())
+    }
+
+    /// Bir sunucuyu karantinaya alır (kural ihlali — otomatik ya da elle). Durum `Quarantined`,
+    /// audit yazılır. İptalden farkı: karantina "kötü davrandı" gerekçesiyle, geçici bir güven
+    /// askıya alma; yeniden kayıt (yeniden onay) tekrar `active` yapar.
+    pub fn quarantine_mcp_server(&mut self, id: &str, reason: &str) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "MCP karantinası yerel bir store gerektirir".to_string())?
+            .set_mcp_server_status(id, McpServerStatus::Quarantined, Some(reason))?;
+        self.record_audit(AuditEvent::pending(
+            "mcp-egress",
+            format!("mcp.server.quarantined:{id}"),
+        ));
+        Ok(())
+    }
+
+    /// Bir dış sunucuya bağlanma yetkisini değerlendirir — **önce global kapatma anahtarı**, sonra
+    /// store üzerinden deny-by-default kapı (imza/artefakt/protokol). `Ok(Ok(server))` bağlanabilir
+    /// demektir; her ret tipli. Bu, gerçek süreç başlatmadan (Faz 3) ÖNCEki karar noktasıdır.
+    pub fn authorize_mcp_connection(
+        &self,
+        id: &str,
+        live_artifact_hash: &str,
+        advertised_protocol_version: u16,
+    ) -> Result<Result<RegisteredMcpServer, McpConnectRejection>, String> {
+        if !self.mcp_egress_enabled {
+            return Ok(Err(McpConnectRejection::NotActive(
+                McpServerStatus::Revoked,
+            )));
+        }
+        self.store
+            .as_ref()
+            .ok_or_else(|| "MCP bağlanması yerel bir store gerektirir".to_string())?
+            .authorize_mcp_connection(id, live_artifact_hash, advertised_protocol_version)
     }
 
     /// JARVIS her açıldığında gösterilecek karşılama metni: isim (varsa), bekleyen onaylar, son

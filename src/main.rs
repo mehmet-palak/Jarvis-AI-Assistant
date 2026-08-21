@@ -416,6 +416,86 @@ fn attach_weather_provider(runtime: &mut Runtime) {
     ));
 }
 
+/// F8 MCP egress (ADR-0008 Faz 5): `/mcp` komut ailesi — kayıtlı dış araçları/eklentileri
+/// listeler, iptal eder ve global kapatma anahtarını yönetir. Kayıt (yeni sunucu ekleme) imzalı
+/// bir manifest gerektirdiğinden TUI'den elle yazılmaz; bu komut okuma+iptal+kill-switch odaklıdır.
+fn handle_mcp_command(app: &mut App, runtime: &Arc<Mutex<Runtime>>, argument: &str) {
+    let mut parts = argument.splitn(2, char::is_whitespace);
+    let subcommand = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    match subcommand {
+        "" | "list" | "status" => {
+            let guard = runtime.lock().expect("JARVIS runtime lock poisoned");
+            let enabled = guard.mcp_egress_enabled();
+            let servers = guard.list_mcp_servers();
+            drop(guard);
+            let mut lines = vec![format!(
+                "MCP egress: {} (dış araç/eklenti kullanımı)",
+                if enabled {
+                    "AÇIK"
+                } else {
+                    "KAPALI (/mcp on ile aç)"
+                }
+            )];
+            match servers {
+                Ok(servers) if servers.is_empty() => {
+                    lines.push("Kayıtlı dış araç/eklenti yok. (Kayıt imzalı bir manifest gerektirir; şimdilik salt-okunur çekirdek — ADR-0008.)".to_string());
+                }
+                Ok(servers) => {
+                    for server in servers {
+                        lines.push(format!(
+                            "• {} [{}] — {} · durum: {} · araçlar: {}",
+                            server.manifest.id,
+                            server.manifest.kind.as_str(),
+                            server.manifest.display_name,
+                            server.status.as_str(),
+                            server.manifest.declared_tools.join(", ")
+                        ));
+                    }
+                }
+                Err(error) => lines.push(format!("Liste alınamadı: {error}")),
+            }
+            app.push_system(lines.join("\n"));
+        }
+        "off" => {
+            runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .set_mcp_egress_enabled(false);
+            app.push_system("MCP egress KAPATILDI. Hiçbir dış araca/eklentiye bağlanılmaz (kill switch). /mcp on ile geri aç.".to_string());
+        }
+        "on" => {
+            runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .set_mcp_egress_enabled(true);
+            app.push_system("MCP egress AÇILDI. (Yalnız kayıtlı, imzası doğrulanan, artefaktı değişmemiş sunuculara bağlanılır.)".to_string());
+        }
+        "revoke" => {
+            if rest.is_empty() {
+                app.push_system(
+                    "Kullanım: /mcp revoke <id> — kayıtlı bir dış aracı/eklentiyi iptal eder."
+                        .to_string(),
+                );
+                return;
+            }
+            let outcome = runtime
+                .lock()
+                .expect("JARVIS runtime lock poisoned")
+                .revoke_mcp_server(rest, "kullanıcı /mcp revoke ile iptal etti");
+            match outcome {
+                Ok(()) => app.push_system(format!("'{rest}' iptal edildi; artık ona bağlanılmaz.")),
+                Err(error) => app.push_system(format!("İptal edilemedi: {error}")),
+            }
+        }
+        other => {
+            app.push_system(format!(
+                "Bilinmeyen /mcp alt-komutu: '{other}'. Komutlar: /mcp (durum+liste), /mcp on, /mcp off, /mcp revoke <id>."
+            ));
+        }
+    }
+}
+
 /// F8 "yerel entegrasyonlar" (21 Ağustos 2026): yerel bir `.ics` takvim dosyası VARSA sağlayıcıyı
 /// takar. Hava durumundan farkı: ağa hiç çıkmaz. Dosya yoksa hiçbir şey yapılmaz (özellik tamamen
 /// isteğe bağlı, tıpkı profil dosyaları gibi) — açılışı asla engellemez. Yolu değiştirmek için
@@ -3222,7 +3302,7 @@ fn submit(
             return;
         }
         "/help" => {
-            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika; model veya sistem prompt'u değiştiğinde açılışta 'bu konfigürasyon ölçülmedi' uyarısı çıkar, /status de gösterir), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Kopyalama: /copy (son yanıtın tamamını panoya kopyala), /copy kod (yalnız kod bloklarını), /select (fare seçim modunu aç-kapa — açıkken fareyle seçtiğin her şey otomatik panoya kopyalanır, ama tekerlek kaydırma geçici olarak kapanır; PgUp/PgDn çalışmaya devam eder). Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). F8 (yerel takvim): /takvim veya /ajanda (önümüzdeki 7 günün ajandası — yerel bir `.ics` dosyasından, İnternet'e çıkmadan; dosyayı `~/.config/jarvis/calendar.ics` olarak koy ya da `JARVIS_CALENDAR_PATH` ile belirt). Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
+            app.push_system("Kısayollar (terminal/Claude Code alışkanlıkları): Enter gönder • Alt+Enter veya Shift+Enter taslağa yeni satır ekler • Ctrl+V yapıştır • ←/→ imleç, Ctrl+←/→ kelime kelime • Ctrl+A/Ctrl+E taslağın başına/sonuna • Ctrl+Backspace veya Ctrl+W ya da Ctrl+K/Ctrl+U önceki/sonraki kısmı sil (Ctrl+K imleçten sona, Ctrl+U imleçten başa) • Ctrl+D ileri sil • Esc taslağın tamamını sil. Geçmiş: ↑/↓ veya PageUp/PageDown. Ek: /attach <PNG/JPEG/TXT/MD/PDF-yolu>, /attachments, /attachments clear, /attachment-history, /attachment-history remove <id>|clear, /attachment-export <dosya-yolu>. Belge ekleri metadata-only'dir; indeksleme için ayrı /index akışı kullanılır. Bellek: /remember [profil|proje|görev <task-id>|oturum|geçici] anahtar = değer (namespace verilmezse profil), /remember sensitivity <public|internal|sensitive>, /remember ttl <saat|none>, /remember model-context <evet|hayır>, /remember approve|reject, /memory, /forget <id>|all, /forget namespace <profil|proje|görev|oturum|geçici>, /memory export <dosya-yolu>, /memory import <dosya-yolu>. Sır: /secret anahtar = değer (Secret Manager'a gider, sıradan belleğe/modele hiç gitmez), /secret show <anahtar>, /secret forget <anahtar>, /secrets (yalnız anahtarları listeler). Profil: /profile, /profile set <ad|hitap|dil|rol> = <değer> (onay: /remember approve), /profile delete <alan>, /profile reset, /profile export <dosya-yolu>. RAG: /index <proje-içi-göreli-dosya> [public|internal|sensitive], /index-preview <proje-içi-göreli-klasör> [hariç-desen ...], /index-folder <proje-içi-göreli-klasör> [hariç-desen ...] [public|internal|sensitive], /source <numara> (son yanıtın kaynağının tamamını aç), /rag status, /rag rebuild, /rag verify. F6 (model kalitesi): /eval (golden set'i canlı modelle koş — sonuç registry'ye kaydedilir, ~1 dakika; model veya sistem prompt'u değiştiğinde açılışta 'bu konfigürasyon ölçülmedi' uyarısı çıkar, /status de gösterir), /model-runs (kayıtlı konfigürasyonlar), /model-runs compare (en yeni konfigürasyonu geri dönüş hedefiyle karşılaştır: bir senaryo kaybı hızlanmayla telafi edilmez), /feedback iyi|kotu|duzelt <doğru yanıt> (son tur için geri bildirim — doğrudan eğitim verisi olmaz, insan inceleme kuyruğuna girer), /feedback list, /feedback onayla|reddet <id>, /feedback terfi <id> <capability> (onaylı adayı eğitim verisine dönüştür), /dataset export <sürüm> [dosya-yolu] (yalnız uygun örnekler; içerik-adresli manifest hash'i), /dataset mark <örnek-id> poisoned|deleted <gerekçe> (işaretli örnek hiçbir export'a giremez), /dataset markers. F5 (ses): terminal destekliyorsa **F2'yi basılı tutup konuş** — bıraktığın anda istek gider ve yanıt sana SESLİ döner, Enter'a basman gerekmez; desteklemiyorsa /voice ile başlat-bitir (aynı davranış). Metni göndermeden önce görmek istersen: /voice-settings review on. Kayıt sırasında durum çubuğunda canlı ses seviyesi görünür. /voice-cancel (kaydı iptal et ve ses dosyasını sil), /speak (son yanıtı seslendir), /speak stop (çalan sesi durdur), /voice-settings (ses ayarlarını göster), /voice-settings autoplay on|off (yanıt bitince otomatik seslendirme — varsayılan kapalı), /voice-settings speed <0.5-2.0>, /voice-settings mute|unmute (sessiz mod). Ham ses hiçbir zaman saklanmaz. Kopyalama: /copy (son yanıtın tamamını panoya kopyala), /copy kod (yalnız kod bloklarını), /select (fare seçim modunu aç-kapa — açıkken fareyle seçtiğin her şey otomatik panoya kopyalanır, ama tekerlek kaydırma geçici olarak kapanır; PgUp/PgDn çalışmaya devam eder). Sesli onay yüksek riskli eylemler için yeterli değildir: ses yanlış duyulabilir, başkası söyleyebilir veya kayıttan oynatılabilir, o yüzden ekrandan yazılı onay gerekir. F4: /analyze [proje-içi-göreli-klasör] (salt-okunur repo analizi — dil/manifest/test komutu tespiti, hiçbir dosyaya dokunmaz; klasör verilmezse proje kökü), /plan <değişiklik isteği> (salt-okunur coding plan taslağı — model hangi dosyaların ilgili olduğunu ve bir test planını önerir, hiçbir dosyaya dokunmaz/yazmaz), /patch (en son plana göre modelden gerçek bir diff taslağı üretir — dosyaları tam yeniden yazdırıp gerçek diff'i git ile hesaplar, hâlâ hiçbir şey diske yazılmaz), /patch-files (patch'i dosya dosya, her birinin kendi diff'iyle gösterir), /patch-note <metin> (onay öncesi serbest bir not ekler, boş çağrılırsa temizler), /approve-patch [dosya1 dosya2 ...] (izole ortamda uygular, ardından plan'ın test komutlarını izole çalıştırır — testler geçmezse veya iptal edilirse değişiklik otomatik geri alınır; dosya adı verilirse patch'in yalnız o alt kümesi onaylanır, hiçbiri verilmezse tümü), /reject-patch (taslağı at, hiçbir şey değişmez), /abort (şu an çalışan izole test/komutu SIGTERM→SIGKILL ile durdurur), /note-append <proje-içi-göreli-dosya> | <satır> (var olan bir dosyaya kalıcı bir satır eklemek için onay ister — model çağrısı yok, doğrudan Policy/Approval/Verifier zincirinden geçer). F8 (yerel takvim): /takvim veya /ajanda (önümüzdeki 7 günün ajandası — yerel bir `.ics` dosyasından, İnternet'e çıkmadan; dosyayı `~/.config/jarvis/calendar.ics` olarak koy ya da `JARVIS_CALENDAR_PATH` ile belirt). F8 (MCP egress/eklenti): /mcp (durum + kayıtlı dış araç/eklenti listesi), /mcp on, /mcp off (kill switch — hiçbir dış araca bağlanma), /mcp revoke <id>. Komutlar: /status, /approvals, /approve, /cancel, /clear, /quit, exit. `exit` modeli RAM'den çıkarır; /quit veya Ctrl+C yalnız arayüzü kapatır.");
             return;
         }
         "/approvals" | "approvals" => {
@@ -3293,6 +3373,14 @@ fn submit(
                         .to_string(),
                 ),
             }
+            return;
+        }
+        _ if input == "/mcp" || input.starts_with("/mcp ") => {
+            handle_mcp_command(
+                app,
+                runtime,
+                input.strip_prefix("/mcp").unwrap_or("").trim(),
+            );
             return;
         }
         "/backup" | "backup" => {
