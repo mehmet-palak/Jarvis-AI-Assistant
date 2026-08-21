@@ -40,6 +40,14 @@ impl McpServerKind {
             Self::Plugin => "plugin",
         }
     }
+
+    pub fn from_stored(value: &str) -> Result<Self, String> {
+        match value {
+            "external_tool" => Ok(Self::ExternalTool),
+            "plugin" => Ok(Self::Plugin),
+            other => Err(format!("bilinmeyen MCP sunucu türü: {other}")),
+        }
+    }
 }
 
 /// Bir kayıtlı sunucunun durumu. Deny-by-default: yalnız `Active` bir sunucuya bağlanılır;
@@ -58,6 +66,15 @@ impl McpServerStatus {
             Self::Active => "active",
             Self::Quarantined => "quarantined",
             Self::Revoked => "revoked",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Result<Self, String> {
+        match value {
+            "active" => Ok(Self::Active),
+            "quarantined" => Ok(Self::Quarantined),
+            "revoked" => Ok(Self::Revoked),
+            other => Err(format!("bilinmeyen MCP sunucu durumu: {other}")),
         }
     }
 }
@@ -110,6 +127,27 @@ pub struct McpServerManifest {
 pub struct SignedMcpManifest {
     pub manifest: McpServerManifest,
     pub signature: String,
+}
+
+/// Kayıt defterinde saklanan bir sunucu/eklenti — imzalı manifest + durum + zaman damgaları.
+/// `authorize_mcp_connect`, bunun `signed_manifest()`'i ve `status`'u üzerinden çalışır.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredMcpServer {
+    pub manifest: McpServerManifest,
+    pub signature: String,
+    pub status: McpServerStatus,
+    pub registered_at: u64,
+    pub revoked_at: Option<u64>,
+    pub revoked_reason: Option<String>,
+}
+
+impl RegisteredMcpServer {
+    pub fn signed_manifest(&self) -> SignedMcpManifest {
+        SignedMcpManifest {
+            manifest: self.manifest.clone(),
+            signature: self.signature.clone(),
+        }
+    }
 }
 
 /// `DataSensitivity` için tavan-karşılaştırması sıralaması (Public < Internal < Sensitive). Enum'un

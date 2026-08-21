@@ -15,17 +15,19 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult, Trans
 use sha2::{Digest, Sha256};
 
 use crate::{
-    chunk_workspace_text, configured_retrieval_candidate_multiplier, configured_rrf_k,
-    cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query, now_epoch,
-    reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
-    reject_secret_like_workspace_document_name, serialize_embedding, sha256_hex,
-    validate_feedback_candidate, validate_memory_record, validate_model_config_run,
-    validate_pentest_scope, validate_teacher_example, validate_workspace_document_content,
-    validate_workspace_document_path, Approval, AuditEvent, CapabilityRegistry, DataSensitivity,
-    EmbeddingProvider, FeedbackCandidate, FeedbackReview, FeedbackSignal, MemoryNamespace,
-    MemoryProposal, MemoryRecord, ModelConfigRun, PentestCoverageEntry, PentestFinding,
-    PentestFindingStatus, PentestMode, PentestScope, Risk, StoredPentestAsset, StoredPentestScope,
-    Task, TeacherExample, TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
+    authorize_mcp_connect, chunk_workspace_text, configured_retrieval_candidate_multiplier,
+    configured_rrf_k, cosine_similarity, deserialize_embedding, extract_pdf_text, fts_query,
+    now_epoch, reject_oversized_workspace_document, reject_secret_like_workspace_document_content,
+    reject_secret_like_workspace_document_name, serialize_embedding, sha256_hex, sign_mcp_manifest,
+    validate_feedback_candidate, validate_mcp_manifest, validate_memory_record,
+    validate_model_config_run, validate_pentest_scope, validate_teacher_example,
+    validate_workspace_document_content, validate_workspace_document_path, Approval, AuditEvent,
+    CapabilityRegistry, DataSensitivity, EmbeddingProvider, FeedbackCandidate, FeedbackReview,
+    FeedbackSignal, McpConnectRejection, McpServerKind, McpServerManifest, McpServerStatus,
+    McpTransport, MemoryNamespace, MemoryProposal, MemoryRecord, ModelConfigRun,
+    PentestCoverageEntry, PentestFinding, PentestFindingStatus, PentestMode, PentestScope,
+    RegisteredMcpServer, Risk, StoredPentestAsset, StoredPentestScope, Task, TeacherExample,
+    TrustLevel, VerifyStatus, WorkspaceCitation, WorkspaceIngestionReport,
     CURRENT_WORKSPACE_INDEX_SCHEMA_VERSION, MIN_RELEVANT_SIMILARITY,
 };
 
@@ -126,6 +128,58 @@ fn canonical_pentest_scope_bytes(name: &str, scope: &PentestScope) -> Vec<u8> {
     bytes
 }
 
+/// Newline-birleşik bir liste alanını böler; boş string → boş vec (`"".split('\n')` tek bir boş
+/// eleman verirdi, onu istemiyoruz).
+fn split_stored_lines(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split('\n').map(str::to_string).collect()
+    }
+}
+
+/// Bir `mcp_servers` satırını `RegisteredMcpServer`'a çevirir. Enum/hassasiyet alanları bizim kendi
+/// yazdığımız sabit stringlerdir; bozuksa (dış müdahale) tipli bir sütun hatası döner.
+fn row_to_registered_mcp_server(row: &rusqlite::Row) -> rusqlite::Result<RegisteredMcpServer> {
+    let to_col = |index: usize, why: String| {
+        rusqlite::Error::InvalidColumnType(index, why, rusqlite::types::Type::Text)
+    };
+    let kind_raw: String = row.get(3)?;
+    let kind = McpServerKind::from_stored(&kind_raw).map_err(|why| to_col(3, why))?;
+    let command: String = row.get(4)?;
+    let args_raw: String = row.get(5)?;
+    let sensitivity_raw: String = row.get(8)?;
+    let sensitivity_ceiling =
+        DataSensitivity::from_str(&sensitivity_raw).map_err(|why| to_col(8, why))?;
+    let network_allowed: i64 = row.get(9)?;
+    let status_raw: String = row.get(11)?;
+    let status = McpServerStatus::from_stored(&status_raw).map_err(|why| to_col(11, why))?;
+    let registered_at: i64 = row.get(13)?;
+    let revoked_at: Option<i64> = row.get(14)?;
+    Ok(RegisteredMcpServer {
+        manifest: McpServerManifest {
+            schema_version: row.get::<_, i64>(1)? as u16,
+            id: row.get(0)?,
+            display_name: row.get(2)?,
+            kind,
+            transport: McpTransport::Stdio {
+                command,
+                args: split_stored_lines(&args_raw),
+            },
+            declared_tools: split_stored_lines(&row.get::<_, String>(6)?),
+            capability_allowlist: split_stored_lines(&row.get::<_, String>(7)?),
+            sensitivity_ceiling,
+            network_allowed: network_allowed != 0,
+            artifact_hash: row.get(10)?,
+        },
+        signature: row.get(12)?,
+        status,
+        registered_at: registered_at as u64,
+        revoked_at: revoked_at.map(|value| value as u64),
+        revoked_reason: row.get(15)?,
+    })
+}
+
 /// Durable task and audit storage for the implementation baseline.
 #[derive(Debug)]
 pub struct SqliteStore {
@@ -134,7 +188,7 @@ pub struct SqliteStore {
 
 /// Highest `schema_migrations.version` this build knows how to apply. Keep in sync with the
 /// last `INSERT OR IGNORE INTO schema_migrations` row in `migrate()`.
-const CURRENT_SCHEMA_VERSION: i64 = 17;
+const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 impl SqliteStore {
     pub fn open(path: &str) -> SqlResult<Self> {
@@ -374,6 +428,29 @@ impl SqliteStore {
                 vulnerability_class TEXT NOT NULL,
                 tested_at INTEGER NOT NULL,
                 PRIMARY KEY (scope_name, target, endpoint, parameter, vulnerability_class)
+            );
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                transport_command TEXT NOT NULL,
+                transport_args TEXT NOT NULL,
+                declared_tools TEXT NOT NULL,
+                capability_allowlist TEXT NOT NULL,
+                sensitivity_ceiling TEXT NOT NULL,
+                network_allowed INTEGER NOT NULL DEFAULT 0,
+                artifact_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                signature TEXT NOT NULL DEFAULT '',
+                registered_at INTEGER NOT NULL,
+                revoked_at INTEGER,
+                revoked_reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS mcp_signing_key (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                key_hex TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );",
         )?;
         self.ensure_approval_column("expires_at", "INTEGER NOT NULL DEFAULT 0")?;
@@ -476,6 +553,10 @@ impl SqliteStore {
         )?;
         self.connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (17, 'F7.7 pentest coverage matrix')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (18, 'F8 MCP egress server/plugin registry')",
             [],
         )?;
         Ok(())
@@ -955,6 +1036,171 @@ impl SqliteStore {
             &key,
             &canonical_pentest_scope_bytes(name, scope),
         )))
+    }
+
+    /// F8 MCP egress imza anahtarı — pentest imza anahtarıyla aynı desen (kendi tablosunda, hiçbir
+    /// kullanıcı komutuyla açığa çıkmaz; `/secret show`'un okuduğu `secrets` tablosunda DEĞİL).
+    /// Ayrı bir anahtar: MCP güven alanı pentest'ten farklı, biri sızsa diğerini etkilemesin.
+    pub(crate) fn mcp_signing_key(&self) -> Result<[u8; 32], String> {
+        let existing: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT key_hex FROM mcp_signing_key WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(hex_key) = existing {
+            return decode_hex_32(&hex_key)
+                .ok_or_else(|| "stored MCP signing key is corrupt".to_string());
+        }
+        let mut key = [0u8; 32];
+        {
+            use std::io::Read;
+            let mut urandom = std::fs::File::open("/dev/urandom")
+                .map_err(|error| format!("could not open /dev/urandom: {error}"))?;
+            urandom
+                .read_exact(&mut key)
+                .map_err(|error| format!("could not read /dev/urandom: {error}"))?;
+        }
+        self.connection
+            .execute(
+                "INSERT INTO mcp_signing_key(id, key_hex, created_at) VALUES (1, ?1, ?2)",
+                rusqlite::params![encode_hex(&key), now_epoch() as i64],
+            )
+            .map_err(|error| format!("MCP signing key persist failed: {error}"))?;
+        Ok(key)
+    }
+
+    /// Bir dış MCP sunucusunu/eklentisini kayıt defterine ekler (F8 egress, ADR-0008). Doğrulama
+    /// tek policy-gate'ten (`validate_mcp_manifest`) geçer — hiçbir çağıran geçersiz bir manifesti
+    /// kaydedemesin diye (F7 `save_pentest_scope` disiplini). Kaydederken manifest imzalanır: imza
+    /// her zaman diskte duran manifestin tam halini kapsar. `INSERT OR REPLACE`: aynı id ile yeniden
+    /// kaydetmek (ör. artefakt güncellendiğinde yeniden onay) yerinde günceller ve YENİDEN imzalar.
+    /// Yeniden kayıt durumu `active`'e döndürür — bu bilinçli: yeni bir onay, taze bir güven olayıdır.
+    pub fn register_mcp_server(&self, manifest: &McpServerManifest) -> Result<(), String> {
+        validate_mcp_manifest(manifest)?;
+        let key = self.mcp_signing_key()?;
+        let signature = sign_mcp_manifest(&key, manifest);
+        let (command, args) = match &manifest.transport {
+            McpTransport::Stdio { command, args } => (command.clone(), args.join("\n")),
+        };
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO mcp_servers(
+                    id, schema_version, display_name, kind, transport_command, transport_args,
+                    declared_tools, capability_allowlist, sensitivity_ceiling, network_allowed,
+                    artifact_hash, status, signature, registered_at, revoked_at, revoked_reason
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', ?12, ?13, NULL, NULL)",
+                rusqlite::params![
+                    manifest.id,
+                    manifest.schema_version as i64,
+                    manifest.display_name,
+                    manifest.kind.as_str(),
+                    command,
+                    args,
+                    manifest.declared_tools.join("\n"),
+                    manifest.capability_allowlist.join("\n"),
+                    manifest.sensitivity_ceiling.as_str(),
+                    manifest.network_allowed as i64,
+                    manifest.artifact_hash,
+                    signature,
+                    now_epoch() as i64,
+                ],
+            )
+            .map_err(|error| format!("MCP sunucu kaydı başarısız: {error}"))?;
+        Ok(())
+    }
+
+    /// Kayıtlı tüm MCP sunucularını/eklentilerini döndürür (en yeni önce).
+    pub fn list_mcp_servers(&self) -> Result<Vec<RegisteredMcpServer>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, schema_version, display_name, kind, transport_command, transport_args,
+                        declared_tools, capability_allowlist, sensitivity_ceiling, network_allowed,
+                        artifact_hash, status, signature, registered_at, revoked_at, revoked_reason
+                 FROM mcp_servers ORDER BY registered_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], row_to_registered_mcp_server)
+            .map_err(|error| error.to_string())?;
+        let mut servers = Vec::new();
+        for row in rows {
+            servers.push(row.map_err(|error| error.to_string())?);
+        }
+        Ok(servers)
+    }
+
+    /// Tek bir kayıtlı sunucuyu id'siyle getirir; yoksa `None`.
+    pub fn mcp_server(&self, id: &str) -> Result<Option<RegisteredMcpServer>, String> {
+        self.connection
+            .query_row(
+                "SELECT id, schema_version, display_name, kind, transport_command, transport_args,
+                        declared_tools, capability_allowlist, sensitivity_ceiling, network_allowed,
+                        artifact_hash, status, signature, registered_at, revoked_at, revoked_reason
+                 FROM mcp_servers WHERE id = ?1",
+                rusqlite::params![id],
+                row_to_registered_mcp_server,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Bir sunucunun durumunu değiştirir (iptal / karantina / yeniden aktifleştirme). Gerekçe
+    /// (revoked_reason) yalnız `Active` olmayan durumlarda anlamlıdır; `Active`'e dönüşte temizlenir.
+    pub fn set_mcp_server_status(
+        &self,
+        id: &str,
+        status: McpServerStatus,
+        reason: Option<&str>,
+    ) -> Result<(), String> {
+        let (revoked_at, revoked_reason): (Option<i64>, Option<String>) = match status {
+            McpServerStatus::Active => (None, None),
+            _ => (Some(now_epoch() as i64), reason.map(str::to_string)),
+        };
+        let affected = self
+            .connection
+            .execute(
+                "UPDATE mcp_servers SET status = ?2, revoked_at = ?3, revoked_reason = ?4 WHERE id = ?1",
+                rusqlite::params![id, status.as_str(), revoked_at, revoked_reason],
+            )
+            .map_err(|error| format!("MCP sunucu durumu güncellenemedi: {error}"))?;
+        if affected == 0 {
+            return Err(format!("kayıtlı MCP sunucusu yok: {id}"));
+        }
+        Ok(())
+    }
+
+    /// Store üzerinden **deny-by-default bağlanma kapısı**: kayıtlı sunucuyu yükler, imza anahtarını
+    /// alır ve `authorize_mcp_connect`'i çağırır. `live_artifact_hash` çağıran tarafça o an diskteki
+    /// artefakttan (`hash_artifact`) hesaplanır; `advertised_protocol_version` sunucunun `initialize`
+    /// yanıtından gelir. Kayıt yoksa da (tıpkı iptal edilmiş gibi) reddedilir — otomatik keşif yok.
+    pub fn authorize_mcp_connection(
+        &self,
+        id: &str,
+        live_artifact_hash: &str,
+        advertised_protocol_version: u16,
+    ) -> Result<Result<RegisteredMcpServer, McpConnectRejection>, String> {
+        let Some(server) = self.mcp_server(id)? else {
+            return Ok(Err(McpConnectRejection::NotActive(
+                McpServerStatus::Revoked,
+            )));
+        };
+        let key = self.mcp_signing_key()?;
+        match authorize_mcp_connect(
+            &server.signed_manifest(),
+            &key,
+            server.status,
+            &server.manifest.artifact_hash,
+            live_artifact_hash,
+            advertised_protocol_version,
+        ) {
+            Ok(()) => Ok(Ok(server)),
+            Err(rejection) => Ok(Err(rejection)),
+        }
     }
 
     /// F7.1 "Çoklu program/scope yönetimi". Validation happens here (through the single

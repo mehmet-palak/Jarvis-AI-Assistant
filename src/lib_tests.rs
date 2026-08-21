@@ -1057,7 +1057,7 @@ fn verified_human_reviewed_teacher_example_is_persisted() {
     let example = verified_teacher_example("example-1");
     store.append_teacher_example(&example, &registry).unwrap();
     assert_eq!(store.teacher_example_count().unwrap(), 1);
-    assert_eq!(store.schema_version().unwrap(), 17);
+    assert_eq!(store.schema_version().unwrap(), 18);
 }
 
 #[test]
@@ -4227,7 +4227,7 @@ fn sqlite_store_persists_task_and_audit() {
     let store = runtime.store.as_ref().expect("store attached");
     assert_eq!(store.task_count().unwrap(), 1);
     assert_eq!(store.audit_count().unwrap(), 5);
-    assert_eq!(store.schema_version().unwrap(), 17);
+    assert_eq!(store.schema_version().unwrap(), 18);
     assert!(store.audit_chain_is_valid().unwrap());
 }
 
@@ -7489,4 +7489,117 @@ fn mcp_response_secret_filter_redacts_only_secret_like_output() {
 
     // Sıradan çıktı dokunulmadan geçmeli.
     assert!(redact_secret_like_mcp_response("CPU kullanım: %12, RAM: 3.4 GB").is_none());
+}
+
+// --- F8 MCP egress kayıt defteri (Faz 2, ADR-0008) — persistence + deny-by-default kapı ---
+
+fn sample_mcp_manifest(id: &str) -> McpServerManifest {
+    McpServerManifest {
+        schema_version: CURRENT_MCP_CLIENT_PROTOCOL_VERSION,
+        id: id.into(),
+        display_name: "Örnek Araç".into(),
+        kind: McpServerKind::ExternalTool,
+        transport: McpTransport::Stdio {
+            command: "/usr/bin/ornek-mcp".into(),
+            args: vec!["--stdio".into()],
+        },
+        declared_tools: vec!["ornek.oku".into()],
+        capability_allowlist: vec!["system.time".into()],
+        sensitivity_ceiling: DataSensitivity::Public,
+        network_allowed: false,
+        artifact_hash: "c".repeat(64),
+    }
+}
+
+#[test]
+fn mcp_registry_round_trips_a_registered_server() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    assert!(store.list_mcp_servers().expect("liste").is_empty());
+
+    store
+        .register_mcp_server(&sample_mcp_manifest("ornek"))
+        .expect("kayıt");
+    let servers = store.list_mcp_servers().expect("liste");
+    assert_eq!(servers.len(), 1);
+    let server = &servers[0];
+    assert_eq!(server.manifest.id, "ornek");
+    assert_eq!(server.status, McpServerStatus::Active);
+    assert_eq!(server.manifest.capability_allowlist, vec!["system.time"]);
+    // İmza, kaydedilmiş manifestin tam halini doğrulamalı.
+    assert!(store.mcp_server("ornek").expect("getir").is_some());
+}
+
+#[test]
+fn mcp_registry_refuses_to_persist_an_invalid_manifest() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    let mut invalid = sample_mcp_manifest("kötü");
+    invalid.capability_allowlist.clear(); // deny-by-default: boş allowlist geçersiz
+    assert!(store.register_mcp_server(&invalid).is_err());
+    assert!(store.list_mcp_servers().expect("liste").is_empty());
+}
+
+#[test]
+fn mcp_registry_authorizes_a_valid_connection_and_detects_a_rug_pull() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    let manifest = sample_mcp_manifest("hava");
+    store.register_mcp_server(&manifest).expect("kayıt");
+
+    // Diskteki artefakt onaylanan hash ile aynıysa bağlanma yetkilenir.
+    let approved_hash = "c".repeat(64);
+    let ok = store
+        .authorize_mcp_connection("hava", &approved_hash, CURRENT_MCP_CLIENT_PROTOCOL_VERSION)
+        .expect("store hatası yok");
+    assert!(ok.is_ok(), "geçerli bağlanma yetkilenmeli");
+
+    // Artefakt değiştiyse (rug-pull) reddedilir.
+    let changed_hash = "d".repeat(64);
+    let rejected = store
+        .authorize_mcp_connection("hava", &changed_hash, CURRENT_MCP_CLIENT_PROTOCOL_VERSION)
+        .expect("store hatası yok");
+    assert_eq!(rejected, Err(McpConnectRejection::ArtifactChanged));
+}
+
+#[test]
+fn mcp_registry_revoked_server_is_refused_and_status_round_trips() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    store
+        .register_mcp_server(&sample_mcp_manifest("eklenti"))
+        .expect("kayıt");
+    store
+        .set_mcp_server_status(
+            "eklenti",
+            McpServerStatus::Revoked,
+            Some("kullanıcı iptali"),
+        )
+        .expect("durum");
+
+    let server = store.mcp_server("eklenti").expect("getir").expect("var");
+    assert_eq!(server.status, McpServerStatus::Revoked);
+    assert_eq!(server.revoked_reason.as_deref(), Some("kullanıcı iptali"));
+
+    // İptal edilmiş sunucuya bağlanma, artefakt doğru olsa bile reddedilir.
+    let outcome = store
+        .authorize_mcp_connection(
+            "eklenti",
+            &"c".repeat(64),
+            CURRENT_MCP_CLIENT_PROTOCOL_VERSION,
+        )
+        .expect("store hatası yok");
+    assert_eq!(
+        outcome,
+        Err(McpConnectRejection::NotActive(McpServerStatus::Revoked))
+    );
+}
+
+#[test]
+fn mcp_registry_unknown_server_is_refused_no_auto_discovery() {
+    let store = SqliteStore::in_memory().expect("sqlite schema");
+    let outcome = store
+        .authorize_mcp_connection(
+            "hiç-kayıtlı-değil",
+            &"c".repeat(64),
+            CURRENT_MCP_CLIENT_PROTOCOL_VERSION,
+        )
+        .expect("store hatası yok");
+    assert!(matches!(outcome, Err(McpConnectRejection::NotActive(_))));
 }

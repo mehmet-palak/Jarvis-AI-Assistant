@@ -66,7 +66,7 @@ pub use mcp_client::{
     authorize_mcp_connect, hash_artifact, sign_mcp_manifest,
     validate_external_mcp_protocol_version, validate_mcp_manifest, verify_mcp_manifest,
     McpConnectRejection, McpServerKind, McpServerManifest, McpServerStatus, McpTransport,
-    SignedMcpManifest, CURRENT_MCP_CLIENT_PROTOCOL_VERSION,
+    RegisteredMcpServer, SignedMcpManifest, CURRENT_MCP_CLIENT_PROTOCOL_VERSION,
 };
 pub use memory_intent::{
     parse_memory_intent, propose_unrecognized_remember_intent_with_provider, MemoryIntent,
