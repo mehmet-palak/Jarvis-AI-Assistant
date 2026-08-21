@@ -1189,6 +1189,106 @@ impl Runtime {
             .pentest_findings(scope_name)
     }
 
+    /// F7 doğal-dil arayüzü: `pentest_intent::parse_pentest_intent`'in ürettiği tipli bir niyeti
+    /// gerçek F7 metotlarına bağlar ve okunabilir bir Türkçe sonuç döndürür. Bu, yeni bir
+    /// yetkilendirme yolu DEĞİL — her ağa dokunan dal yine `authorize_pentest_action`/
+    /// `active_verified_pentest_scope`'tan geçen mevcut metotları çağırıyor, onları atlamıyor.
+    /// Onay (ağa dokunan niyetler için) çağıranın işi: bu metot çağrıldığında eylem YAPILIR, o
+    /// yüzden çağıran `intent.touches_network()` ise önce kullanıcı onayını almış olmalı.
+    pub fn execute_pentest_intent(
+        &self,
+        intent: &crate::pentest_intent::PentestIntent,
+    ) -> Result<String, String> {
+        use crate::pentest_intent::PentestIntent;
+        let store = || {
+            self.store
+                .as_ref()
+                .ok_or_else(|| "pentest için yerel depo gerekli".to_string())
+        };
+        match intent {
+            PentestIntent::ListScopes => {
+                let scopes = store()?.pentest_scopes()?;
+                if scopes.is_empty() {
+                    return Ok("Kayıtlı pentest scope'u yok.".into());
+                }
+                let lines: Vec<String> = scopes
+                    .iter()
+                    .map(|scope| {
+                        let mut flags = Vec::new();
+                        if scope.is_active {
+                            flags.push("AKTİF");
+                        }
+                        if scope.is_revoked() {
+                            flags.push("İPTAL");
+                        }
+                        let suffix = if flags.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", flags.join(", "))
+                        };
+                        format!("• {}{suffix}", scope.name)
+                    })
+                    .collect();
+                Ok(format!("Kayıtlı scope'lar:\n{}", lines.join("\n")))
+            }
+            PentestIntent::ShowActiveScope => match store()?.active_pentest_scope()? {
+                Some(active) => Ok(format!(
+                    "Aktif scope: '{}' — hedefler: {}",
+                    active.name,
+                    if active.scope.targets.is_empty() {
+                        "(yok)".to_string()
+                    } else {
+                        active.scope.targets.join(", ")
+                    }
+                )),
+                None => Ok("Şu an aktif bir pentest scope'u yok. Bir tane aktifleştirmeden hiçbir hedef test edilemez.".into()),
+            },
+            PentestIntent::ActivateScope { name } => {
+                store()?.set_active_pentest_scope(name)?;
+                Ok(format!("'{name}' scope'u aktifleştirildi."))
+            }
+            PentestIntent::DeactivateScope => {
+                store()?.deactivate_pentest_scope()?;
+                Ok("Aktif scope pasifleştirildi — şu an hiçbir hedef yetkili değil.".into())
+            }
+            PentestIntent::DiscoverSubdomainsCertificateTransparency { apex } => {
+                let result = self.discover_pentest_assets_via_certificate_transparency(apex)?;
+                Ok(format_recon_result(&result))
+            }
+            PentestIntent::DiscoverSubdomainsDnsBruteforce { apex } => {
+                let wordlist = crate::pentest_recon::common_pentest_subdomain_wordlist();
+                let result = self.discover_pentest_assets_via_dns_bruteforce(apex, &wordlist)?;
+                Ok(format_recon_result(&result))
+            }
+            PentestIntent::ScanPorts { target, ports } => {
+                let result = self.scan_pentest_ports(target, ports)?;
+                let open = if result.open_ports.is_empty() {
+                    "hiçbir açık port bulunamadı".to_string()
+                } else {
+                    format!(
+                        "açık portlar: {}",
+                        result
+                            .open_ports
+                            .iter()
+                            .map(|port| port.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let mut message = format!(
+                    "'{}' üzerinde {} port tarandı — {open}.",
+                    result.target, result.scanned_port_count
+                );
+                if result.stopped_early_due_to_runtime_budget {
+                    message.push_str(
+                        " (Süre bütçesi dolduğu için tarama tüm portlara ulaşmadan durdu.)",
+                    );
+                }
+                Ok(message)
+            }
+        }
+    }
+
     /// F7.6 "Rapor öncesi yeniden doğrulama" + "Düzeltme sonrası hedefli yeniden test" — aynı
     /// mekanizma, iki farklı zamanlama için (bkz. `PentestFindingRevalidation`'ın kendi notu).
     /// Bulgunun `category`'sine göre F7.5'in İLGİLİ tek kontrolünü tekrar çalıştırıyor —
@@ -2512,4 +2612,36 @@ fn pentest_tcp_port_is_open(target: &str, port: u16, timeout: Duration) -> bool 
         return false;
     };
     TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
+/// F7 doğal-dil arayüzü: bir keşif sonucunu kullanıcıya gösterilecek okunabilir bir Türkçe
+/// metne çevirir. "Yeni bulunan" varlıkları ayrıca vurgular — F7.3'ün kendi gerekçesi gereği
+/// bug bounty'de değerin çoğu yeni bir varlığı ilk görmekten gelir.
+fn format_recon_result(result: &PentestReconResult) -> String {
+    let mut message = format!(
+        "'{}' için keşif tamamlandı: kapsam içinde {} varlık",
+        result.queried_domain,
+        result.in_scope_assets.len()
+    );
+    if result.out_of_scope_count > 0 {
+        message.push_str(&format!(
+            " ({} kapsam-dışı isim elendi)",
+            result.out_of_scope_count
+        ));
+    }
+    message.push('.');
+    if !result.new_assets.is_empty() {
+        message.push_str(&format!(
+            "\nYENİ (ilk kez görülen) {} varlık: {}",
+            result.new_assets.len(),
+            result.new_assets.join(", ")
+        ));
+    }
+    if !result.in_scope_assets.is_empty() {
+        message.push_str(&format!(
+            "\nKapsam içi varlıklar: {}",
+            result.in_scope_assets.join(", ")
+        ));
+    }
+    message
 }

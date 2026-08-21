@@ -9,9 +9,10 @@ use super::{
     kill_to_start_from_cursor, move_cursor_left, move_cursor_right, move_cursor_to_end,
     move_cursor_to_start, move_cursor_word_left, move_cursor_word_right,
     native_desktop_binary_path, notification_arguments, notification_preview,
-    parse_remember_namespace_prefix, return_to_latest, should_clear_draft,
-    should_close_tui_for_key, submit, try_notify_desktop, tui_exit_action, tui_notification, App,
-    EmbeddingAttach, Message, MessageRole, TuiExitAction, WorkerReply,
+    parse_remember_namespace_prefix, pentest_reply_is_affirmative, pentest_reply_is_negative,
+    return_to_latest, should_clear_draft, should_close_tui_for_key, submit, try_notify_desktop,
+    tui_exit_action, tui_notification, App, EmbeddingAttach, Message, MessageRole, TuiExitAction,
+    WorkerReply,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use jarvis_core::{
@@ -1895,4 +1896,23 @@ fn a_reply_without_code_yields_nothing_to_copy_as_code() {
     assert!(extract_code_blocks("Sadece düz bir açıklama.")
         .trim()
         .is_empty());
+}
+
+/// F7 doğal-dil arayüzü: onay yanıtı sınıflandırması — belirsiz bir cevap ne olumlu ne olumsuz
+/// sayılmalı (o zaman bekleyen niyet güvenle düşürülüp mesaj normal işlenir).
+#[test]
+fn pentest_confirmation_reply_classification() {
+    assert!(pentest_reply_is_affirmative("evet"));
+    assert!(pentest_reply_is_affirmative("Onayla"));
+    assert!(pentest_reply_is_affirmative("yes"));
+    assert!(!pentest_reply_is_affirmative("belki sonra"));
+
+    assert!(pentest_reply_is_negative("hayır"));
+    assert!(pentest_reply_is_negative("iptal"));
+    assert!(pentest_reply_is_negative("no"));
+    assert!(!pentest_reply_is_negative("evet"));
+
+    // Belirsiz bir mesaj ikisi de değil.
+    assert!(!pentest_reply_is_affirmative("example.com'u tara"));
+    assert!(!pentest_reply_is_negative("example.com'u tara"));
 }

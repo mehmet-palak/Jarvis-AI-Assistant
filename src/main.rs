@@ -144,6 +144,11 @@ struct App {
     /// `true`'ya çeviriyor. `Runtime::cancel`'dan (bir task başlamadan önce iptali) tamamen ayrı:
     /// bu, hâlâ çalışan izole bir süreci ortasında durduruyor.
     active_cancel: Option<CancelFlag>,
+    /// F7 doğal-dil arayüzü: ağa dokunan bir pentest niyeti anlaşıldı ve kullanıcının onayı
+    /// bekleniyor (kullanıcı seçimi: "anla + onay iste"). Bir sonraki mesaj "evet/onayla" ise
+    /// yürütülür, "hayır/iptal" ise vazgeçilir. Yalnız-yerel niyetler (scope göster/listele/
+    /// aktifleştir) buraya hiç girmez, doğrudan çalışır.
+    pending_pentest_intent: Option<jarvis_core::pentest_intent::PentestIntent>,
 }
 
 impl App {
@@ -182,6 +187,7 @@ impl App {
             pending_patch: None,
             pending_patch_note: None,
             active_cancel: None,
+            pending_pentest_intent: None,
         }
     }
 
@@ -1479,6 +1485,66 @@ fn adjust_pending_memory_model_context(app: &mut App, word: &str) {
     }
 }
 
+/// F7 doğal-dil arayüzü: onay bekleyen bir pentest niyetine verilen yanıt olumlu mu.
+fn pentest_reply_is_affirmative(reply: &str) -> bool {
+    let normalized = reply.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "evet"
+            | "e"
+            | "onayla"
+            | "onaylıyorum"
+            | "onayliyorum"
+            | "tamam"
+            | "olur"
+            | "yap"
+            | "devam"
+            | "yes"
+            | "y"
+            | "ok"
+            | "okay"
+            | "confirm"
+            | "do it"
+    )
+}
+
+/// Olumsuz mu.
+fn pentest_reply_is_negative(reply: &str) -> bool {
+    let normalized = reply.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "hayır"
+            | "hayir"
+            | "h"
+            | "iptal"
+            | "vazgeç"
+            | "vazgec"
+            | "dur"
+            | "yapma"
+            | "no"
+            | "n"
+            | "cancel"
+            | "stop"
+    )
+}
+
+/// Bir pentest niyetini yürütür ve sonucu (ya da hatayı) sohbete yazar. Ağa dokunan niyetler
+/// buraya YALNIZ kullanıcı onayından sonra gelir — onay mantığı `submit`'te.
+fn run_pentest_intent(
+    app: &mut App,
+    runtime: &Arc<Mutex<Runtime>>,
+    intent: &jarvis_core::pentest_intent::PentestIntent,
+) {
+    let outcome = runtime
+        .lock()
+        .expect("JARVIS runtime lock poisoned")
+        .execute_pentest_intent(intent);
+    match outcome {
+        Ok(message) => app.push_system(message),
+        Err(error) => app.push_system(format!("Pentest işlemi başarısız: {error}")),
+    }
+}
+
 fn submit(
     app: &mut App,
     runtime: &Arc<Mutex<Runtime>>,
@@ -1497,6 +1563,23 @@ fn submit(
     app.input_cursor = 0;
     if input.is_empty() {
         return;
+    }
+    // F7 doğal-dil arayüzü: ağa dokunan bir pentest niyeti onay bekliyorsa, bu mesaj o onaya
+    // verilen cevaptır. Onay/ret dışında bir şeyse bekleyen niyeti düşürüp mesajı normal işliyoruz
+    // (kullanıcı fikrini değiştirip başka bir şey yazmış olabilir — takılıp kalmamalı).
+    if let Some(intent) = app.pending_pentest_intent.take() {
+        if pentest_reply_is_affirmative(&input) {
+            run_pentest_intent(app, runtime, &intent);
+            return;
+        }
+        if pentest_reply_is_negative(&input) {
+            app.push_system("Tamam, o pentest işlemini yapmıyorum.");
+            return;
+        }
+        app.push_system(
+            "Önceki pentest işlemini onaylanmadı sayıyorum (net bir 'evet' gelmedi) ve yeni mesajını işliyorum.",
+        );
+        // bekleyen niyet düşürüldü; mesaj aşağıda normal işlenir
     }
     // Natural-language memory commands ("hafızana yaz: ...", "belleğinden ... sil") are
     // recognized here, before any slash-command parsing — a plain sentence, not a "/"-prefixed
@@ -1580,6 +1663,22 @@ fn submit(
             return;
         }
         None => {} // trigger phrase yok — normal sohbet, aşağıda değişmeden devam eder
+    }
+    // F7 doğal-dil arayüzü: pentest niyetleri de burada, slash-komut ayrıştırmasından ÖNCE
+    // tanınıyor (memory-intent'le aynı desen). Hiçbir slash-komut bu ifadelerle başlamaz, o yüzden
+    // bir komutu gölgeleyemez; tanınmayan her şey aşağıya değişmeden düşer. Ağa dokunan niyetler
+    // için önce onay istenir (kullanıcı seçimi), yalnız-yerel niyetler doğrudan çalışır.
+    if !input.starts_with('/') {
+        if let Some(intent) = jarvis_core::pentest_intent::parse_pentest_intent(&input) {
+            if intent.touches_network() {
+                app.push_system(intent.confirmation_prompt());
+                app.push_system("Onaylıyorsan 'evet' yaz, vazgeçmek için 'hayır'.");
+                app.pending_pentest_intent = Some(intent);
+            } else {
+                run_pentest_intent(app, runtime, &intent);
+            }
+            return;
+        }
     }
     if let Some(task_id) = input
         .strip_prefix("/approve ")

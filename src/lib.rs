@@ -13,6 +13,7 @@ mod model;
 mod model_quality_eval;
 pub mod patch_generator;
 pub mod pentest_evidence;
+pub mod pentest_intent;
 pub mod pentest_knowledge;
 pub mod pentest_network_gate;
 pub mod pentest_osint;

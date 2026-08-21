@@ -6984,3 +6984,94 @@ fn pentest_steering_applies_stop_exclude_and_focus_in_the_right_order() {
         "açıkça dışlanan, odakta olsa bile reddedilmeli"
     );
 }
+
+// --- F7 doğal-dil arayüzü: execute_pentest_intent ----------------------------------------------
+
+#[test]
+fn execute_intent_activates_and_shows_a_scope_end_to_end() {
+    use crate::pentest_intent::PentestIntent;
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .save_pentest_scope("acme", &active_mode_scope_for("app.example.test"))
+        .expect("kayıt");
+    let runtime = Runtime::with_store(store);
+
+    // Başta aktif scope yok.
+    let before = runtime
+        .execute_pentest_intent(&PentestIntent::ShowActiveScope)
+        .expect("çalışmalı");
+    assert!(before.contains("aktif bir pentest scope'u yok"), "{before}");
+
+    // Aktifleştir.
+    let activated = runtime
+        .execute_pentest_intent(&PentestIntent::ActivateScope {
+            name: "acme".into(),
+        })
+        .expect("çalışmalı");
+    assert!(activated.contains("acme"), "{activated}");
+
+    // Artık aktif.
+    let after = runtime
+        .execute_pentest_intent(&PentestIntent::ShowActiveScope)
+        .expect("çalışmalı");
+    assert!(after.contains("acme"), "{after}");
+    assert!(after.contains("app.example.test"), "{after}");
+}
+
+#[test]
+fn execute_intent_lists_scopes_and_flags_the_active_one() {
+    use crate::pentest_intent::PentestIntent;
+    let store = SqliteStore::in_memory().expect("sqlite");
+    store
+        .save_pentest_scope("acme", &active_mode_scope_for("a.test"))
+        .expect("a");
+    store
+        .save_pentest_scope("widgetco", &active_mode_scope_for("b.test"))
+        .expect("b");
+    store.set_active_pentest_scope("acme").expect("aktif");
+    let runtime = Runtime::with_store(store);
+
+    let listing = runtime
+        .execute_pentest_intent(&PentestIntent::ListScopes)
+        .expect("çalışmalı");
+    assert!(listing.contains("acme"), "{listing}");
+    assert!(listing.contains("widgetco"), "{listing}");
+    assert!(listing.contains("AKTİF"), "{listing}");
+}
+
+/// Port taraması niyeti, gerçek metoda bağlanıp gerçek bir açık portu doğru raporlamalı — niyet
+/// çekirdeğinden Runtime dispatch'ine, oradan gerçek TCP bağlantısına kadar uçtan uca.
+#[test]
+fn execute_intent_scans_ports_end_to_end_against_a_real_listener() {
+    use crate::pentest_intent::PentestIntent;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("dinleyici");
+    let open_port = listener.local_addr().unwrap().port();
+
+    let runtime = runtime_with_active_mode_scope("127.0.0.1");
+    let message = runtime
+        .execute_pentest_intent(&PentestIntent::ScanPorts {
+            target: "127.0.0.1".into(),
+            ports: vec![open_port],
+        })
+        .expect("tarama çalışmalı");
+    assert!(message.contains(&open_port.to_string()), "{message}");
+    assert!(message.contains("açık portlar"), "{message}");
+}
+
+/// Dispatch yeni bir yetkilendirme yolu AÇMAMALI: scope dışı bir hedefe port taraması niyeti
+/// bile, alttaki `scan_pentest_ports`'un aynı reddiyle düşmeli.
+#[test]
+fn execute_intent_still_enforces_scope_for_network_actions() {
+    use crate::pentest_intent::PentestIntent;
+    let runtime = runtime_with_active_mode_scope("app.example.test");
+    let error = runtime
+        .execute_pentest_intent(&PentestIntent::ScanPorts {
+            target: "not-in-scope.example.test".into(),
+            ports: vec![80],
+        })
+        .expect_err("scope dışı hedef reddedilmeli");
+    assert!(
+        error.contains("outside the authorization allowlist"),
+        "{error}"
+    );
+}
