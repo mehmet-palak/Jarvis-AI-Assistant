@@ -7226,3 +7226,50 @@ fn a_backup_that_fails_verification_is_deleted_not_kept() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- F9: sürüm uyumluluk güvencesi (compatibility check) ---------------------------------------
+
+/// Eski bir binary, kendinden DAHA YENİ bir şema taşıyan bir veritabanını AÇMAYI REDDETMELİ —
+/// bozmak yerine. "Daha yeni" DB'yi, gerçek bir DB'ye gelecekteki bir migration satırı ekleyerek
+/// simüle ediyoruz, sonra yeniden açmayı deniyoruz.
+#[test]
+fn an_older_binary_refuses_to_open_a_newer_schema_database() {
+    let dir = temporary_workspace("f9-version-guard");
+    let db_path = dir.join("jarvis.db");
+    let db_str = db_path.to_str().unwrap().to_string();
+
+    let current = {
+        let store = SqliteStore::open(&db_str).expect("ilk açılış");
+        let current = store.schema_version().expect("sürüm");
+        // Gelecekten bir migration satırı ekle — sanki daha yeni bir JARVIS yazmış gibi.
+        store
+            .raw_connection()
+            .execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?1, 'future-version')",
+                [current + 1],
+            )
+            .expect("gelecek satırı");
+        current
+    };
+
+    // Yeniden açmak reddedilmeli.
+    let error = SqliteStore::open(&db_str).expect_err("daha yeni şema reddedilmeli");
+    let message = format!("{error}");
+    assert!(
+        message.contains("daha yeni") && message.contains(&(current + 1).to_string()),
+        "{message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Aynı sürüm (normal durum) sorunsuz açılmalı — güvence, meşru açılışları engellememelidir.
+#[test]
+fn the_same_schema_version_opens_normally() {
+    let dir = temporary_workspace("f9-version-same");
+    let db_path = dir.join("jarvis.db");
+    let db_str = db_path.to_str().unwrap().to_string();
+    SqliteStore::open(&db_str).expect("ilk açılış");
+    // İkinci açılış (aynı sürüm) sorunsuz olmalı.
+    SqliteStore::open(&db_str).expect("aynı sürüm sorunsuz açılmalı");
+    let _ = std::fs::remove_dir_all(&dir);
+}

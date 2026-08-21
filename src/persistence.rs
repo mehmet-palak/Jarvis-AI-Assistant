@@ -186,6 +186,34 @@ impl SqliteStore {
     }
 
     fn migrate(&mut self) -> SqlResult<()> {
+        // F9 "Sürüm/migration yönetimi ... compatibility check": schema_migrations tablosunu (varsa
+        // önceki bir sürümden) kontrol et — diskteki veritabanı BU sürümün bildiğinden DAHA YENİ
+        // bir şema taşıyorsa (daha yeni bir JARVIS yazmış, kullanıcı eski sürüme dönmüş), açmayı
+        // REDDET. Eski bir binary'nin anlamadığı yeni bir şemaya yazması veri bozulmasına yol
+        // açardı; ileri-göç olmadığı (down-migration yok) için bunu sessizce "hiçbir şey yapma"
+        // ile geçiştirmek tehlikeli. Tablo henüz yoksa (yepyeni DB) bu sorgu 0 döner, geçilir.
+        let table_exists: bool = self.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        )?;
+        if table_exists {
+            let on_disk: i64 = self.connection.query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )?;
+            if on_disk > CURRENT_SCHEMA_VERSION {
+                // `SqliteFailure(_, Some(msg))` Display'i yalnız mesajı yazıyor (temiz kullanıcı
+                // mesajı) — `ModuleError` bu build'de `vtab` feature'ı kapalı olduğu için yok.
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(format!(
+                        "bu veritabanı daha yeni bir JARVIS sürümü tarafından yazıldı (şema sürümü {on_disk}), bu sürüm yalnız {CURRENT_SCHEMA_VERSION}'e kadar biliyor — veri bozulmasını önlemek için açılmıyor. JARVIS'i güncelleyin ya da bu sürümü yazan JARVIS ile açın."
+                    )),
+                ));
+            }
+        }
         self.connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
