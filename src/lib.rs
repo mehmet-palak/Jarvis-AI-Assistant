@@ -69,7 +69,7 @@ pub use mcp_client::{
     McpConnectRejection, McpServerKind, McpServerManifest, McpServerStatus, McpTransport,
     RegisteredMcpServer, SignedMcpManifest, CURRENT_MCP_CLIENT_PROTOCOL_VERSION,
 };
-pub use mcp_egress::{McpEgressSession, McpRpcTransport};
+pub use mcp_egress::{McpEgressSession, McpRpcTransport, SandboxedStdioTransport};
 pub use memory_intent::{
     parse_memory_intent, propose_unrecognized_remember_intent_with_provider, MemoryIntent,
 };

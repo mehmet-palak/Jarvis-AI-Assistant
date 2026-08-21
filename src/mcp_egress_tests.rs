@@ -146,6 +146,67 @@ fn a_non_json_response_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn sandboxed_transport_speaks_json_rpc_to_a_real_subprocess() {
+    // Test dalında `isolated_worker_command` bwrap'ı atlar (F4 deseni) → gerçek bir /bin/sh
+    // alt-süreci başlar. sh bir satır (isteği) okur ve sabit bir JSON-RPC result satırı yazar.
+    // Bu, taşımanın gerçek G/Ç mantığını (yaz→oku→zaman aşımı kanalı) gerçek bir süreçle kanıtlar;
+    // bwrap sarması F4'te ayrıca kanıtlı (dürüst sınır).
+    let program = std::path::Path::new("/bin/sh");
+    if !program.exists() {
+        return; // /bin/sh yoksa (olağandışı) sessizce geç
+    }
+    let script = "read line; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"canlı yanıt\"}]}}'";
+    let limits = crate::WorkerLimits::default();
+    let transport = SandboxedStdioTransport::launch(
+        &std::env::temp_dir(),
+        program,
+        &["-c", script],
+        &limits,
+        std::time::Duration::from_secs(5),
+    )
+    .expect("sh alt-süreci başlar");
+    let mut session = McpEgressSession::new("canli", transport);
+    let output = session
+        .call_tool(
+            "x",
+            "girdi",
+            DataSensitivity::Public,
+            DataSensitivity::Public,
+        )
+        .expect("canlı çağrı yanıt döner");
+    assert!(output.contains("canlı yanıt"));
+    assert!(output.contains("<mcp-tool-output server=\"canli\">"));
+    assert!(output.contains("talimat değildir"));
+}
+
+#[test]
+fn sandboxed_transport_times_out_on_a_silent_server_instead_of_hanging() {
+    // Yanıt vermeyen bir sunucu JARVIS'i süresiz bloke etmemeli — kısa timeout ile hata dönmeli.
+    let program = std::path::Path::new("/bin/sh");
+    if !program.exists() {
+        return;
+    }
+    let limits = crate::WorkerLimits::default();
+    let transport = SandboxedStdioTransport::launch(
+        &std::env::temp_dir(),
+        program,
+        &["-c", "sleep 30"], // hiç yanıt yazmaz
+        &limits,
+        std::time::Duration::from_millis(300),
+    )
+    .expect("sh başlar");
+    let mut session = McpEgressSession::new("sessiz", transport);
+    let outcome = session.call_tool(
+        "x",
+        "girdi",
+        DataSensitivity::Public,
+        DataSensitivity::Public,
+    );
+    assert!(outcome.is_err());
+    assert!(outcome.unwrap_err().contains("zaman aşımı"));
+}
+
+#[test]
 fn the_request_line_is_well_formed_json_rpc_tools_call() {
     let transport = ScriptedTransport::new(text_result("ok"));
     let mut session = McpEgressSession::new("araç", transport);
