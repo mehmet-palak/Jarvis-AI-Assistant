@@ -744,15 +744,33 @@ pub(crate) fn wait_with_deadline_and_cancellation(
 /// returns — `child.wait()` is always called last so the process is fully reaped, never a
 /// zombie.
 pub(crate) fn terminate_then_kill(child: &mut Child, grace_period: Duration) {
-    // SAFETY: `libc::kill` with a valid pid and a standard signal number is a plain syscall with
-    // no aliasing/lifetime requirements Rust needs to uphold here.
+    let pid = child.id() as libc::pid_t;
+    // F9 "process group": eğer çocuk kendi süreç grubunun lideriyse (worker'lar öyle —
+    // `isolated_worker_command` `process_group(0)` ile başlatıyor), sinyali TÜM GRUBA gönder
+    // (`kill(-pid, ...)`) — böylece çocuğun doğurduğu alt-süreçler (cargo→rustc gibi) yetim
+    // kalmıyor. Aksi halde (düz bir çocuk, kendi grubunda değil) yalnız çocuğa gönder —
+    // `kill(-pid)` yanlışlıkla JARVIS'in KENDİ grubunu hedefleyip test koşucusunu/uygulamayı
+    // öldürebilirdi, bu yüzden grup-öldürme yalnız gerçekten grup lideri olan çocuklar için.
+    let is_group_leader = unsafe { libc::getpgid(pid) == pid };
+    let signal_target = if is_group_leader { -pid } else { pid };
+    // SAFETY: `libc::kill`/`getpgid` valid pid + standart sinyalle sıradan syscall'lar; Rust'ın
+    // uygulaması gereken aliasing/lifetime koşulu yok.
     unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        libc::kill(signal_target, libc::SIGTERM);
     }
     let grace_deadline = Instant::now() + grace_period;
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => return,
+            Ok(Some(_status)) => {
+                // Çocuğun kendisi çıktı; grup lideriyse hâlâ hayatta olabilecek alt-süreçleri de
+                // temizle (yetim bırakma).
+                if is_group_leader {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
+                return;
+            }
             Ok(None) => {
                 if Instant::now() >= grace_deadline {
                     break;
@@ -760,6 +778,11 @@ pub(crate) fn terminate_then_kill(child: &mut Child, grace_period: Duration) {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => break,
+        }
+    }
+    if is_group_leader {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
         }
     }
     let _ = child.kill();
@@ -1005,7 +1028,10 @@ pub(crate) fn isolated_worker_command(
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // F9 "process group": systemd-run'ı (ve dolayısıyla altındaki bwrap+worker ağacını) kendi
+        // süreç grubunda başlat — süre aşımı/iptalinde tüm grup öldürülebilsin, yetim süreç kalmasın.
+        .process_group(0);
     // SAFETY: this closure only captures `seccomp_memfd` to keep its underlying fd open until
     // exec — it does not call anything beyond what was already required to be async-signal-safe
     // by the other `pre_exec` hook (`apply_worker_rlimits`) attached to this same `Command`.
@@ -1048,7 +1074,11 @@ pub(crate) fn isolated_worker_command(
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // F9 "process group": worker'ı kendi süreç grubunda başlat — böylece süre aşımı/iptalinde
+        // `terminate_then_kill` tüm grubu (worker'ın doğurduğu alt-süreçler dahil) öldürebilir,
+        // yetim süreç bırakmaz. Üretim dalı (aşağıda systemd-run) de aynısını yapıyor.
+        .process_group(0);
     Ok(command)
 }
 
@@ -1165,6 +1195,38 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "the watchdog must actually kill the process, not wait for it to finish on its own"
+        );
+    }
+
+    /// F9 "process group": süre aşımında yalnız doğrudan çocuk değil, onun DOĞURDUĞU alt-süreçler
+    /// de öldürülmeli (yetim kalmamalı). Bir kabuk kendi süreç grubunda başlatılıp içinde uzun bir
+    /// `sleep` fork ediyor; süre aşımıyla öldürülünce grubun TAMAMEN boş olduğunu (`kill(-pgid, 0)`
+    /// → ESRCH) doğruluyoruz. Grup-öldürme olmadan fork edilen sleep hayatta kalır ve grup
+    /// hâlâ var olurdu — bu test tam olarak o farkı yakalıyor.
+    #[test]
+    fn a_timed_out_worker_group_leaves_no_orphaned_child_processes() {
+        // Kendi süreç grubunda bir kabuk başlat (worker'ların yaptığı gibi), içinde bir alt-süreç
+        // fork et, sonra kabuk beklesin — böylece grup, süre aşımına kadar canlı kalır.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 300 & sleep 300")
+            .process_group(0)
+            .spawn()
+            .expect("sh must be available");
+        let pgid = child.id() as libc::pid_t; // grup lideri: pgid == pid
+
+        let result = wait_with_timeout(&mut child, 0);
+        assert!(result.is_err(), "asılı grup süre aşımıyla öldürülmeli");
+
+        // Grup gerçekten boşaldı mı: `kill(-pgid, 0)` sinyal göndermeden varlığı yoklar.
+        // Grupta hâlâ bir süreç varsa 0 döner; hiç yoksa -1 (ESRCH). Kısa bir bekleme, çekirdeğin
+        // süreçleri reap etmesine izin verir.
+        std::thread::sleep(Duration::from_millis(200));
+        let group_probe = unsafe { libc::kill(-pgid, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        assert!(
+            group_probe == -1 && errno == libc::ESRCH,
+            "süre aşımı sonrası süreç grubu tamamen boş olmalı (yetim kalan alt-süreç yok); probe={group_probe} errno={errno}"
         );
     }
 
