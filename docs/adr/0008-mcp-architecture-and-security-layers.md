@@ -9,12 +9,14 @@ dedi; MCP egress + eklenti güven çekirdeği F8'de kuruldu.
   Faz 2 kalıcı kayıt defteri (şema v18 + ayrı imza anahtarı), Faz 4 veri-akış filtreleri (dışarı
   tavan/sır, içeri provenance/boyut/redaksiyon), Faz 5 operasyonel katman (runtime/TUI `/mcp`,
   audit, global kill switch), Faz 6 sampling deny-by-default + resources/prompts izolasyonu,
-  Faz 3 JSON-RPC oturum boru hattı (düşmanca mock sunucuyla uçtan uca test).
-- **Tek kalan (dürüst sınır, F7 deseni):** Faz 3 taşıma trait'inin gerçek gerçekleştirmesi —
-  sunucuyu F4 sandbox'ında başlatıp canlı stdin/stdout JSON-RPC konuşan taşıma. Karar/filtre
-  mantığının tamamı bu seam'in üstünde test edildi; canlı bağlantı F4/F7'nin "gerçek makinede
-  doğrulanmalı" uyarısına tabi ve o doğrulamayla açılacak. Ağ taşımaları (uzak MCP) ile birlikte
-  ileri seviye ele alım F10'da.
+  Faz 3 JSON-RPC oturum boru hattı (düşmanca mock sunucuyla uçtan uca test) + **canlı taşıma**
+  (`SandboxedStdioTransport` — sunucuyu F4 hapsinde başlatır, satır JSON-RPC + timeout; gerçek bir
+  alt-süreçle test edildi).
+- **6 fazın tamamı kod olarak yazıldı.** Tek dürüst sınır (F4'ün kendisiyle aynı bar):
+  `SandboxedStdioTransport`'un gerçek `bwrap + systemd-run` sarması bu geliştirme ortamında tam
+  koşamaz; F4'te olduğu gibi gerçek makinede release smoke ile doğrulanır. Taşımanın G/Ç mantığı
+  (yaz→oku→zaman aşımı) gerçek bir alt-süreçle test edilmiştir; yalnız namespace/cgroup sarması
+  gerçek-makine doğrulaması bekler. Ağ taşımaları (uzak MCP) ve `network_allowed` sunucular F10.
 - **Eklenti/skill ekosistemi (F8 madde 3):** ayrı bir sistem DEĞİL — bir eklenti teknik olarak izole,
   imzalı bir dış MCP aracı olduğundan bu güven çekirdeği tarafından kapatıldı (`McpServerKind::Plugin`).
 
